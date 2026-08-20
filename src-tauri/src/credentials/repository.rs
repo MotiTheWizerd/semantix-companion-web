@@ -1,13 +1,12 @@
 use std::{
     path::Path,
     sync::{Mutex, MutexGuard},
-    time::Duration,
 };
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::CredentialMetadata;
-use crate::app_error::AppError;
+use crate::{app_error::AppError, database};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CredentialRecord {
@@ -21,33 +20,8 @@ pub(crate) struct CredentialRepository {
 
 impl CredentialRepository {
     pub(crate) fn open(path: &Path) -> Result<Self, AppError> {
-        let connection = Connection::open(path).map_err(AppError::database)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(AppError::database)?;
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode = WAL;
-                 PRAGMA foreign_keys = ON;
-
-                 CREATE TABLE IF NOT EXISTS provider_credentials (
-                     id TEXT PRIMARY KEY,
-                     provider_id TEXT NOT NULL,
-                     label TEXT NOT NULL,
-                     secret_ref TEXT NOT NULL UNIQUE,
-                     key_hint TEXT NOT NULL,
-                     created_at INTEGER NOT NULL,
-                     updated_at INTEGER NOT NULL,
-                     last_used_at INTEGER
-                 );
-
-                 CREATE INDEX IF NOT EXISTS idx_provider_credentials_provider
-                     ON provider_credentials(provider_id);",
-            )
-            .map_err(AppError::database)?;
-
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection: Mutex::new(database::open_connection(path)?),
         })
     }
 

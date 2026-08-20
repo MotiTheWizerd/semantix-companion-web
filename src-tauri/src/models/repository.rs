@@ -1,13 +1,12 @@
 use std::{
     path::Path,
     sync::{Mutex, MutexGuard},
-    time::Duration,
 };
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{ConfiguredModel, ModelRecord};
-use crate::app_error::AppError;
+use crate::{app_error::AppError, database};
 
 pub(crate) struct ModelRepository {
     connection: Mutex<Connection>,
@@ -15,47 +14,8 @@ pub(crate) struct ModelRepository {
 
 impl ModelRepository {
     pub(crate) fn open(path: &Path) -> Result<Self, AppError> {
-        let connection = Connection::open(path).map_err(AppError::database)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(AppError::database)?;
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode = WAL;
-                 PRAGMA foreign_keys = ON;
-
-                 CREATE TABLE IF NOT EXISTS configured_models (
-                     id TEXT PRIMARY KEY,
-                     provider_id TEXT NOT NULL,
-                     model_id TEXT NOT NULL,
-                     display_name TEXT NOT NULL,
-                     credential_id TEXT,
-                     secret_ref TEXT UNIQUE,
-                     manual_key_hint TEXT,
-                     created_at INTEGER NOT NULL,
-                     updated_at INTEGER NOT NULL,
-                     FOREIGN KEY (credential_id)
-                         REFERENCES provider_credentials(id)
-                         ON DELETE RESTRICT,
-                     CHECK (
-                         (credential_id IS NOT NULL AND secret_ref IS NULL AND manual_key_hint IS NULL)
-                         OR
-                         (credential_id IS NULL AND secret_ref IS NOT NULL AND manual_key_hint IS NOT NULL)
-                     )
-                 );
-
-                 CREATE INDEX IF NOT EXISTS idx_configured_models_provider
-                     ON configured_models(provider_id);
-
-                 CREATE INDEX IF NOT EXISTS idx_configured_models_credential
-                     ON configured_models(credential_id);
-
-                 PRAGMA user_version = 2;",
-            )
-            .map_err(AppError::database)?;
-
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection: Mutex::new(database::open_connection(path)?),
         })
     }
 

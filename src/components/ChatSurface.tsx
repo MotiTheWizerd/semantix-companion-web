@@ -1,3 +1,6 @@
+import { useState, type FormEvent, type KeyboardEvent } from "react";
+
+import type { ChatMessage } from "../features/chat/types";
 import { EmptyState } from "./EmptyState";
 
 function AttachIcon() {
@@ -16,12 +19,60 @@ function SendIcon() {
   );
 }
 
-export function ChatSurface() {
-  return (
-    <main className="chat-surface" id="chat">
-      <EmptyState />
+interface ChatSurfaceProps {
+  messages: ChatMessage[];
+  isLoading: boolean;
+  isSending: boolean;
+  error: string | null;
+  onSend: (content: string) => Promise<void>;
+}
 
-      <form className="chat-composer">
+export function ChatSurface({
+  messages,
+  isLoading,
+  isSending,
+  error,
+  onSend,
+}: ChatSurfaceProps) {
+  const [content, setContent] = useState("");
+  const hasMessages = messages.length > 0;
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const message = content.trim();
+    if (!message || isSending) return;
+    setContent("");
+    await onSend(message);
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  };
+
+  return (
+    <main className={`chat-surface ${hasMessages ? "has-messages" : ""}`} id="chat">
+      {hasMessages ? (
+        <section className="chat-thread" aria-label="Conversation messages" aria-live="polite">
+          {messages.map((message) => (
+            <article
+              className={`chat-message chat-message--${message.role}`}
+              key={message.id}
+            >
+              <p>{message.content || (message.status === "streaming" ? "Thinking…" : "")}</p>
+              {message.errorMessage ? (
+                <span className="chat-message__error">{message.errorMessage}</span>
+              ) : null}
+            </article>
+          ))}
+        </section>
+      ) : (
+        <EmptyState />
+      )}
+
+      <form className="chat-composer" onSubmit={handleSubmit}>
         <label className="sr-only" htmlFor="companion-message">
           Message Companion
         </label>
@@ -31,19 +82,28 @@ export function ChatSurface() {
           rows={1}
           placeholder="Message Companion…"
           aria-describedby="composer-note"
+          value={content}
+          disabled={isLoading}
+          onChange={(event) => setContent(event.target.value)}
+          onKeyDown={handleKeyDown}
         />
         <div className="chat-composer__toolbar">
           <button className="composer-button" type="button" aria-label="Attach context">
             <AttachIcon />
           </button>
           <span className="chat-composer__model">Companion</span>
-          <button className="composer-send" type="button" aria-label="Send message">
+          <button
+            className="composer-send"
+            type="submit"
+            aria-label="Send message"
+            disabled={isLoading || isSending || content.trim().length === 0}
+          >
             <SendIcon />
           </button>
         </div>
       </form>
       <p className="composer-note" id="composer-note">
-        Your conversations stay in your private workspace.
+        {error ?? "Your conversations stay in your private workspace."}
       </p>
     </main>
   );

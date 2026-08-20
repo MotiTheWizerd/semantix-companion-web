@@ -1,4 +1,5 @@
 import { CompanionMark } from "./CompanionMark";
+import type { Conversation } from "../features/chat/types";
 
 function PlusIcon() {
   return (
@@ -37,10 +38,21 @@ function SettingsIcon() {
 
 interface AppSidebarProps {
   activeView: "chat" | "settings";
+  conversations: Conversation[];
+  activeConversationId: string | null;
   onViewChange: (view: "chat" | "settings") => void;
+  onNewConversation: () => void;
+  onConversationSelect: (conversationId: string) => void;
 }
 
-export function AppSidebar({ activeView, onViewChange }: AppSidebarProps) {
+export function AppSidebar({
+  activeView,
+  conversations,
+  activeConversationId,
+  onViewChange,
+  onNewConversation,
+  onConversationSelect,
+}: AppSidebarProps) {
   return (
     <aside className="app-sidebar" aria-label="Companion navigation">
       <div className="sidebar-brand">
@@ -48,7 +60,7 @@ export function AppSidebar({ activeView, onViewChange }: AppSidebarProps) {
         <span>Companion</span>
       </div>
 
-      <button className="new-chat-button" type="button">
+      <button className="new-chat-button" type="button" onClick={onNewConversation}>
         <PlusIcon />
         <span>New conversation</span>
       </button>
@@ -70,12 +82,25 @@ export function AppSidebar({ activeView, onViewChange }: AppSidebarProps) {
         </a>
       </nav>
 
-      <div className="conversation-list" aria-label="Recent conversations">
-        <p className="sidebar-section-label">Today</p>
-        <a className="conversation-list__item" href="#current-conversation">
-          A quiet beginning
-        </a>
-      </div>
+      {conversations.length > 0 ? (
+        <div className="conversation-list" aria-label="Recent conversations">
+          <p className="sidebar-section-label">Recent</p>
+          {conversations.map((conversation) => (
+            <button
+              className={`conversation-list__item ${
+                activeView === "chat" && activeConversationId === conversation.id
+                  ? "is-active"
+                  : ""
+              }`}
+              type="button"
+              key={conversation.id}
+              onClick={() => onConversationSelect(conversation.id)}
+            >
+              {conversation.title}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="sidebar-footer">
         <button
