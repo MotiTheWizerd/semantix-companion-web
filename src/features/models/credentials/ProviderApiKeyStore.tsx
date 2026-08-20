@@ -1,0 +1,334 @@
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+
+import {
+  createProviderCredential,
+  deleteProviderCredential,
+  listKnownModelProviders,
+  listProviderCredentials,
+  onCredentialsChanged,
+} from "./credentialService";
+import type {
+  CredentialChangedEvent,
+  ModelProvider,
+  ProviderCredential,
+} from "./types";
+
+function errorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "Companion could not access your saved API keys.";
+}
+
+function reconcileCredentialEvent(
+  credentials: ProviderCredential[],
+  event: CredentialChangedEvent,
+): ProviderCredential[] {
+  if (event.kind === "deleted") {
+    return credentials.filter((credential) => credential.id !== event.credentialId);
+  }
+
+  return [
+    event.credential,
+    ...credentials.filter((credential) => credential.id !== event.credential.id),
+  ].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+export function ProviderApiKeyStore() {
+  const [providers, setProviders] = useState<ModelProvider[]>([]);
+  const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isAdding, setIsAdding] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [providerId, setProviderId] = useState("");
+  const [label, setLabel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedProvider = useMemo(
+    () => providers.find((provider) => provider.id === providerId),
+    [providerId, providers],
+  );
+  const providerNames = useMemo(
+    () => new Map(providers.map((provider) => [provider.id, provider.name])),
+    [providers],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+
+    const initialise = async () => {
+      try {
+        unlisten = await onCredentialsChanged((event) => {
+          if (!cancelled) {
+            setCredentials((current) => reconcileCredentialEvent(current, event));
+          }
+        });
+
+        const [knownProviders, savedCredentials] = await Promise.all([
+          listKnownModelProviders(),
+          listProviderCredentials(),
+        ]);
+        if (cancelled) return;
+
+        setProviders(knownProviders);
+        setProviderId((current) => current || knownProviders[0]?.id || "");
+        setCredentials(savedCredentials);
+      } catch (initialisationError) {
+        if (!cancelled) setError(errorMessage(initialisationError));
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    };
+
+    void initialise();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const resetForm = () => {
+    setLabel("");
+    setApiKey("");
+    setError(null);
+  };
+
+  const closeForm = () => {
+    resetForm();
+    setIsAdding(false);
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!providerId || !apiKey.trim()) return;
+
+    setError(null);
+    setIsSaving(true);
+    try {
+      const credential = await createProviderCredential({
+        providerId,
+        label,
+        apiKey,
+      });
+      setCredentials((current) =>
+        reconcileCredentialEvent(current, { kind: "created", credential }),
+      );
+      closeForm();
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async (credentialId: string) => {
+    if (pendingDeleteId !== credentialId) {
+      setPendingDeleteId(credentialId);
+      return;
+    }
+
+    setError(null);
+    setDeletingId(credentialId);
+    try {
+      await deleteProviderCredential(credentialId);
+      setCredentials((current) =>
+        reconcileCredentialEvent(current, { kind: "deleted", credentialId }),
+      );
+      setPendingDeleteId(null);
+    } catch (deleteError) {
+      setError(errorMessage(deleteError));
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <section className="credential-store" aria-labelledby="saved-api-keys-title">
+      <div className="credential-store__header">
+        <div>
+          <h2 id="saved-api-keys-title">Saved API keys</h2>
+          <p>Save a provider key once, then reuse it when configuring models.</p>
+        </div>
+        <button
+          className="credential-store__add-button"
+          type="button"
+          aria-expanded={isAdding}
+          onClick={() => {
+            setError(null);
+            setIsAdding((current) => !current);
+          }}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          Add API key
+        </button>
+      </div>
+
+      {isAdding ? (
+        <form className="credential-form" onSubmit={handleSubmit}>
+          <div className="credential-form__heading">
+            <div>
+              <h3>Add provider key</h3>
+              <p>The secret is stored by your operating system, not in Companion's database.</p>
+            </div>
+            <button
+              className="credential-form__close"
+              type="button"
+              aria-label="Close add API key form"
+              onClick={closeForm}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m7 7 10 10M17 7 7 17" />
+              </svg>
+            </button>
+          </div>
+
+          <div className="credential-form__fields">
+            <label className="credential-field">
+              <span>Provider</span>
+              <select
+                value={providerId}
+                required
+                onChange={(event) => setProviderId(event.target.value)}
+              >
+                {providers.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="credential-field">
+              <span>Label <small>Optional</small></span>
+              <input
+                type="text"
+                maxLength={80}
+                value={label}
+                placeholder={selectedProvider ? `${selectedProvider.name} key` : "Personal key"}
+                onChange={(event) => setLabel(event.target.value)}
+              />
+            </label>
+
+            <label className="credential-field credential-field--wide">
+              <span>API key</span>
+              <input
+                type="password"
+                autoComplete="off"
+                spellCheck="false"
+                required
+                minLength={8}
+                value={apiKey}
+                placeholder={selectedProvider?.keyPlaceholder ?? "Enter API key"}
+                onChange={(event) => setApiKey(event.target.value)}
+              />
+            </label>
+          </div>
+
+          {error ? (
+            <p className="credential-store__error" role="alert">
+              {error}
+            </p>
+          ) : null}
+
+          <div className="credential-form__actions">
+            <button
+              type="button"
+              className="credential-button credential-button--quiet"
+              onClick={closeForm}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="credential-button credential-button--primary"
+              disabled={isSaving || !providerId || apiKey.trim().length < 8}
+            >
+              {isSaving ? "Saving…" : "Save API key"}
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      {!isAdding && error ? (
+        <p className="credential-store__error" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      <div className="credential-list" aria-live="polite" aria-busy={isLoading}>
+        {isLoading ? (
+          <div className="credential-list__status">Loading saved keys…</div>
+        ) : credentials.length === 0 ? (
+          <div className="credential-list__empty">
+            <div className="credential-list__empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <circle cx="8" cy="15" r="3" />
+                <path d="m10.5 13.5 7-7M15 9l2 2M17 7l2 2" />
+              </svg>
+            </div>
+            <strong>No saved API keys</strong>
+            <span>Add a provider key to make it available to your model configurations.</span>
+          </div>
+        ) : (
+          <ul>
+            {credentials.map((credential) => (
+              <li key={credential.id}>
+                <div className="credential-list__provider" aria-hidden="true">
+                  {(providerNames.get(credential.providerId) ?? credential.providerId)
+                    .charAt(0)
+                    .toUpperCase()}
+                </div>
+                <div className="credential-list__identity">
+                  <strong>{credential.label}</strong>
+                  <span>{providerNames.get(credential.providerId) ?? credential.providerId}</span>
+                </div>
+                <code>{credential.keyHint}</code>
+                <button
+                  className={`credential-list__delete${pendingDeleteId === credential.id ? " is-confirming" : ""}`}
+                  type="button"
+                  disabled={deletingId === credential.id}
+                  aria-label={
+                    pendingDeleteId === credential.id
+                      ? `Confirm removal of ${credential.label}`
+                      : `Remove ${credential.label}`
+                  }
+                  onBlur={() =>
+                    setPendingDeleteId((current) =>
+                      current === credential.id ? null : current,
+                    )
+                  }
+                  onClick={() => void handleDelete(credential.id)}
+                >
+                  {pendingDeleteId === credential.id ? (
+                    deletingId === credential.id ? "Removing…" : "Remove?"
+                  ) : (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+                    </svg>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="credential-store__security-note">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3 5.5 6v5.2c0 4.1 2.7 7.9 6.5 9.8 3.8-1.9 6.5-5.7 6.5-9.8V6L12 3Z" />
+          <path d="m9.2 12 1.8 1.8 3.8-4" />
+        </svg>
+        <span>
+          Keys stay on this computer in the native system keychain. Saved secrets are never
+          displayed again.
+        </span>
+      </div>
+    </section>
+  );
+}

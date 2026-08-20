@@ -1,8 +1,25 @@
+import { useState } from "react";
+
+import { AppHeader } from "./components/AppHeader";
+import { AppSidebar } from "./components/AppSidebar";
+import { ChatSurface } from "./components/ChatSurface";
+import { SettingsScreen } from "./components/SettingsScreen";
+
 export function App() {
+  const [activeView, setActiveView] = useState<"chat" | "settings">("chat");
+  const isSettings = activeView === "settings";
+
   return (
-    <main className="app-shell">
-      <p className="eyebrow">Semantix Companion</p>
-      <h1>Tauri is ready.</h1>
-    </main>
+    <div className="app-shell">
+      <AppSidebar activeView={activeView} onViewChange={setActiveView} />
+      <div className="app-workspace">
+        <AppHeader
+          eyebrow={isSettings ? "Companion" : "Conversation"}
+          title={isSettings ? "Settings" : "New conversation"}
+          showOptions={!isSettings}
+        />
+        {isSettings ? <SettingsScreen /> : <ChatSurface />}
+      </div>
+    </div>
   );
 }

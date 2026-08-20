@@ -4,3 +4,4 @@ src-tauri/target/
 .vscode/
 .DS_Store
 *.log
+semantix-indexer
