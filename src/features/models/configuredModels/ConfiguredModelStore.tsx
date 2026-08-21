@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { ConfirmDeleteButton } from "../../../components/ConfirmDeleteButton";
+import { EditButton } from "../../../components/EditButton";
 import {
   listKnownModelProviders,
   listProviderCredentials,
@@ -17,6 +18,7 @@ import {
   deleteConfiguredModel,
   listConfiguredModels,
   onModelsChanged,
+  updateConfiguredModel,
 } from "./modelService";
 import type {
   ConfiguredModel,
@@ -64,6 +66,7 @@ export function ConfiguredModelStore() {
   const [isLoading, setIsLoading] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [providerId, setProviderId] = useState("");
@@ -86,6 +89,13 @@ export function ConfiguredModelStore() {
     () => credentials.filter((credential) => credential.providerId === providerId),
     [credentials, providerId],
   );
+  const editingModel = useMemo(
+    () => models.find((model) => model.id === editingId),
+    [editingId, models],
+  );
+  const isEditing = editingId !== null;
+  const canKeepManualKey =
+    isEditing && editingModel?.credentialKind === "manual" && credentialKind === "manual";
 
   useEffect(() => {
     let cancelled = false;
@@ -145,21 +155,43 @@ export function ConfiguredModelStore() {
     setError(null);
   };
 
-  const openForm = () => {
+  const openCreateForm = () => {
     resetForm();
-    setCredentialKind(providerCredentials.length > 0 ? "saved" : "manual");
+    setEditingId(null);
+    const initialProviderId = providers[0]?.id ?? "";
+    const initialCredentials = credentials.filter(
+      (credential) => credential.providerId === initialProviderId,
+    );
+    setProviderId(initialProviderId);
+    setCredentialId(initialCredentials[0]?.id ?? "");
+    setCredentialKind(initialCredentials.length > 0 ? "saved" : "manual");
+    setIsAdding(true);
+  };
+
+  const openEditForm = (model: ConfiguredModel) => {
+    resetForm();
+    setEditingId(model.id);
+    setProviderId(model.providerId);
+    setModelId(model.modelId);
+    setDisplayName(model.displayName);
+    setCredentialKind(model.credentialKind);
+    setCredentialId(model.credentialId ?? "");
+    setPendingDeleteId(null);
     setIsAdding(true);
   };
 
   const closeForm = () => {
     resetForm();
+    setEditingId(null);
     setIsAdding(false);
   };
 
   const canSubmit =
     providerId.length > 0 &&
     modelId.trim().length > 0 &&
-    (credentialKind === "saved" ? credentialId.length > 0 : manualApiKey.trim().length >= 8);
+    (credentialKind === "saved"
+      ? credentialId.length > 0
+      : canKeepManualKey || manualApiKey.trim().length >= 8);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -168,16 +200,30 @@ export function ConfiguredModelStore() {
     setError(null);
     setIsSaving(true);
     try {
-      const model = await createConfiguredModel({
-        providerId,
-        modelId,
-        displayName,
-        credential:
-          credentialKind === "saved"
-            ? { kind: "saved", credentialId }
-            : { kind: "manual", apiKey: manualApiKey },
-      });
-      setModels((current) => reconcileModelEvent(current, { kind: "created", model }));
+      const credential =
+        credentialKind === "saved"
+          ? ({ kind: "saved", credentialId } as const)
+          : ({ kind: "manual", apiKey: manualApiKey.trim() || null } as const);
+      const model = isEditing
+        ? await updateConfiguredModel({
+            modelId: editingId,
+            providerId,
+            providerModelId: modelId,
+            displayName,
+            credential,
+          })
+        : await createConfiguredModel({
+            providerId,
+            modelId,
+            displayName,
+            credential:
+              credential.kind === "saved"
+                ? credential
+                : { kind: "manual", apiKey: credential.apiKey ?? "" },
+          });
+      setModels((current) =>
+        reconcileModelEvent(current, { kind: isEditing ? "updated" : "created", model }),
+      );
       closeForm();
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -199,6 +245,7 @@ export function ConfiguredModelStore() {
       setModels((current) =>
         reconcileModelEvent(current, { kind: "deleted", modelId: configuredModelId }),
       );
+      if (editingId === configuredModelId) closeForm();
       setPendingDeleteId(null);
     } catch (deleteError) {
       setError(errorMessage(deleteError));
@@ -218,7 +265,7 @@ export function ConfiguredModelStore() {
           className="credential-store__add-button"
           type="button"
           aria-expanded={isAdding}
-          onClick={() => (isAdding ? closeForm() : openForm())}
+          onClick={() => (isAdding ? closeForm() : openCreateForm())}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 5v14M5 12h14" />
@@ -231,13 +278,17 @@ export function ConfiguredModelStore() {
         <form className="credential-form model-form" onSubmit={handleSubmit}>
           <div className="credential-form__heading">
             <div>
-              <h3>Add model</h3>
-              <p>Use a reusable saved key or keep a manual key scoped only to this model.</p>
+              <h3>{isEditing ? "Edit model" : "Add model"}</h3>
+              <p>
+                {isEditing
+                  ? "Update the model identity or change how Companion authenticates it."
+                  : "Use a reusable saved key or keep a manual key scoped only to this model."}
+              </p>
             </div>
             <button
               className="credential-form__close"
               type="button"
-              aria-label="Close add model form"
+              aria-label={`Close ${isEditing ? "edit" : "add"} model form`}
               onClick={closeForm}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -330,7 +381,9 @@ export function ConfiguredModelStore() {
               ) : (
                 <div className="model-credential-source__empty">
                   <span>No saved {selectedProvider?.name ?? "provider"} key yet.</span>
-                  <button type="button" onClick={() => setCredentialKind("manual")}>Use a manual key</button>
+                  <button type="button" onClick={() => setCredentialKind("manual")}>
+                    Use a manual key
+                  </button>
                 </div>
               )
             ) : (
@@ -340,13 +393,21 @@ export function ConfiguredModelStore() {
                   type="password"
                   autoComplete="off"
                   spellCheck="false"
-                  required
+                  required={!canKeepManualKey}
                   minLength={8}
                   value={manualApiKey}
-                  placeholder={selectedProvider?.keyPlaceholder ?? "Enter API key"}
+                  placeholder={
+                    canKeepManualKey
+                      ? "Leave blank to keep the current key"
+                      : (selectedProvider?.keyPlaceholder ?? "Enter API key")
+                  }
                   onChange={(event) => setManualApiKey(event.target.value)}
                 />
-                <small>This key stays private to this model configuration.</small>
+                <small>
+                  {canKeepManualKey
+                    ? "Leave blank to keep the current key, or enter a replacement."
+                    : "This key stays private to this model configuration."}
+                </small>
               </label>
             )}
           </fieldset>
@@ -370,7 +431,7 @@ export function ConfiguredModelStore() {
               className="credential-button credential-button--primary"
               disabled={isSaving || !canSubmit}
             >
-              {isSaving ? "Adding…" : "Add model"}
+              {isSaving ? "Saving…" : isEditing ? "Save changes" : "Add model"}
             </button>
           </div>
         </form>
@@ -398,35 +459,49 @@ export function ConfiguredModelStore() {
           </div>
         ) : (
           <ul>
-            {models.map((model) => (
-              <li key={model.id}>
-                <div className="model-list__provider" aria-hidden="true">
-                  {(providerNames.get(model.providerId) ?? model.providerId)
-                    .charAt(0)
-                    .toUpperCase()}
-                </div>
-                <div className="model-list__identity">
-                  <strong>{model.displayName}</strong>
-                  <span>
-                    {providerNames.get(model.providerId) ?? model.providerId} · {model.modelId}
-                  </span>
-                </div>
-                <div className="model-list__credential">
-                  <span className={`model-list__source is-${model.credentialKind}`}>
-                    {model.credentialKind === "saved" ? "Saved" : "Manual"}
-                  </span>
-                  <small>{model.credentialLabel} · {model.keyHint}</small>
-                </div>
-                <ConfirmDeleteButton
-                  label={model.displayName}
-                  isConfirming={pendingDeleteId === model.id}
-                  isDeleting={deletingId === model.id}
-                  onRequestConfirmation={() => setPendingDeleteId(model.id)}
-                  onCancel={() => setPendingDeleteId(null)}
-                  onConfirm={() => void handleDelete(model.id)}
-                />
-              </li>
-            ))}
+            {models.map((model) => {
+              const savedCredential =
+                model.credentialKind === "saved"
+                  ? credentials.find((credential) => credential.id === model.credentialId)
+                  : undefined;
+              const credentialLabel = savedCredential?.label ?? model.credentialLabel;
+              const credentialHint = savedCredential?.keyHint ?? model.keyHint;
+
+              return (
+                <li key={model.id}>
+                  <div className="model-list__provider" aria-hidden="true">
+                    {(providerNames.get(model.providerId) ?? model.providerId)
+                      .charAt(0)
+                      .toUpperCase()}
+                  </div>
+                  <div className="model-list__identity">
+                    <strong>{model.displayName}</strong>
+                    <span>
+                      {providerNames.get(model.providerId) ?? model.providerId} · {model.modelId}
+                    </span>
+                  </div>
+                  <div className="model-list__credential">
+                    <span className={`model-list__source is-${model.credentialKind}`}>
+                      {model.credentialKind === "saved" ? "Saved" : "Manual"}
+                    </span>
+                    <small>
+                      {credentialLabel} · {credentialHint}
+                    </small>
+                  </div>
+                  <div className="credential-list__actions">
+                    <EditButton label={model.displayName} onClick={() => openEditForm(model)} />
+                    <ConfirmDeleteButton
+                      label={model.displayName}
+                      isConfirming={pendingDeleteId === model.id}
+                      isDeleting={deletingId === model.id}
+                      onRequestConfirmation={() => setPendingDeleteId(model.id)}
+                      onCancel={() => setPendingDeleteId(null)}
+                      onConfirm={() => void handleDelete(model.id)}
+                    />
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

@@ -1,5 +1,6 @@
-import { useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
+import { onConversationScrollToEnd } from "../features/chat/chatScrollEvents";
 import type { ChatMessage } from "../features/chat/types";
 import type { ConfiguredModel } from "../features/models/configuredModels/types";
 import { EmptyState } from "./EmptyState";
@@ -21,6 +22,7 @@ function SendIcon() {
 }
 
 interface ChatSurfaceProps {
+  activeConversationId: string | null;
   messages: ChatMessage[];
   isLoading: boolean;
   isSending: boolean;
@@ -32,6 +34,7 @@ interface ChatSurfaceProps {
 }
 
 export function ChatSurface({
+  activeConversationId,
   messages,
   isLoading,
   isSending,
@@ -42,7 +45,30 @@ export function ChatSurface({
   onSend,
 }: ChatSurfaceProps) {
   const [content, setContent] = useState("");
+  const threadRef = useRef<HTMLElement>(null);
+  const activeConversationIdRef = useRef(activeConversationId);
+  activeConversationIdRef.current = activeConversationId;
   const hasMessages = messages.length > 0;
+
+  useEffect(() => {
+    let frameId: number | null = null;
+    let requestedConversationId: string | null = null;
+    const stopListening = onConversationScrollToEnd((conversationId) => {
+      requestedConversationId = conversationId;
+      if (frameId !== null) cancelAnimationFrame(frameId);
+      frameId = requestAnimationFrame(() => {
+        frameId = null;
+        if (requestedConversationId !== activeConversationIdRef.current) return;
+        const thread = threadRef.current;
+        if (thread) thread.scrollTop = thread.scrollHeight;
+      });
+    });
+
+    return () => {
+      if (frameId !== null) cancelAnimationFrame(frameId);
+      stopListening();
+    };
+  }, []);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -62,7 +88,12 @@ export function ChatSurface({
   return (
     <main className={`chat-surface ${hasMessages ? "has-messages" : ""}`} id="chat">
       {hasMessages ? (
-        <section className="chat-thread" aria-label="Conversation messages" aria-live="polite">
+        <section
+          className="chat-thread"
+          ref={threadRef}
+          aria-label="Conversation messages"
+          aria-live="polite"
+        >
           {messages.map((message) => (
             <article
               className={`chat-message chat-message--${message.role}`}

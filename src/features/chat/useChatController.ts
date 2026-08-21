@@ -6,6 +6,7 @@ import {
 } from "../models/configuredModels/modelService";
 import type { ConfiguredModel } from "../models/configuredModels/types";
 import { getConversationThread, listConversations, submitMessage } from "./chatService";
+import { requestConversationScrollToEnd } from "./chatScrollEvents";
 import type {
   AcceptedMessage,
   ChatEvent,
@@ -76,6 +77,20 @@ function reconcileMessage(messages: ChatMessage[], message: ChatMessage): ChatMe
 
 function acceptedEvent(accepted: AcceptedMessage): ChatEvent {
   return { kind: "accepted", ...accepted };
+}
+
+function requestScrollForChatEvent(event: ChatEvent): void {
+  if (event.kind === "accepted") {
+    requestConversationScrollToEnd(event.conversation.id);
+  } else if (
+    event.kind === "assistantStarted" ||
+    event.kind === "assistantDelta" ||
+    event.kind === "assistantCompleted"
+  ) {
+    requestConversationScrollToEnd(
+      event.kind === "assistantDelta" ? event.conversationId : event.message.conversationId,
+    );
+  }
 }
 
 function reducer(state: ChatControllerState, action: ChatAction): ChatControllerState {
@@ -265,15 +280,19 @@ export function useChatController() {
       if (state.isSending || content.trim().length === 0) return;
       dispatch({ type: "sendStarted" });
       try {
+        const handleChatEvent = (event: ChatEvent) => {
+          dispatch({ type: "chatEvent", event });
+          requestScrollForChatEvent(event);
+        };
         const accepted = await submitMessage(
           {
             conversationId: state.activeConversationId,
             configuredModelId: state.selectedModelId,
             content,
           },
-          (event) => dispatch({ type: "chatEvent", event }),
+          handleChatEvent,
         );
-        dispatch({ type: "chatEvent", event: acceptedEvent(accepted) });
+        handleChatEvent(acceptedEvent(accepted));
       } catch (error) {
         dispatch({ type: "failed", message: errorMessage(error) });
       } finally {

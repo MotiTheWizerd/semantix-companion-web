@@ -6,6 +6,7 @@ import type {
   CredentialChangedEvent,
   ModelProvider,
   ProviderCredential,
+  UpdateProviderCredentialInput,
 } from "./types";
 
 const CREDENTIALS_CHANGED_EVENT = "credentials://changed";
@@ -22,6 +23,12 @@ export function createProviderCredential(
   input: CreateProviderCredentialInput,
 ): Promise<ProviderCredential> {
   return invoke<ProviderCredential>("create_provider_credential", { input });
+}
+
+export function updateProviderCredential(
+  input: UpdateProviderCredentialInput,
+): Promise<ProviderCredential> {
+  return invoke<ProviderCredential>("update_provider_credential", { input });
 }
 
 export function deleteProviderCredential(credentialId: string): Promise<void> {

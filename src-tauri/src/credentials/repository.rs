@@ -78,6 +78,31 @@ impl CredentialRepository {
         Ok(())
     }
 
+    pub(crate) fn update(&self, record: &CredentialRecord) -> Result<(), AppError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "UPDATE provider_credentials
+                 SET provider_id = ?2,
+                     label = ?3,
+                     key_hint = ?4,
+                     updated_at = ?5,
+                     last_used_at = ?6
+                 WHERE id = ?1",
+                params![
+                    record.metadata.id,
+                    record.metadata.provider_id,
+                    record.metadata.label,
+                    record.metadata.key_hint,
+                    record.metadata.updated_at,
+                    record.metadata.last_used_at,
+                ],
+            )
+            .map_err(AppError::database)?;
+
+        Ok(())
+    }
+
     pub(crate) fn get(&self, id: &str) -> Result<Option<CredentialRecord>, AppError> {
         let connection = self.connection()?;
         connection

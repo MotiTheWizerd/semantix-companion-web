@@ -5,6 +5,7 @@ import type {
   ConfiguredModel,
   CreateConfiguredModelInput,
   ModelChangedEvent,
+  UpdateConfiguredModelInput,
 } from "./types";
 
 const MODELS_CHANGED_EVENT = "models://changed";
@@ -19,6 +20,12 @@ export function createConfiguredModel(
   return invoke<ConfiguredModel>("create_configured_model", { input });
 }
 
+export function updateConfiguredModel(
+  input: UpdateConfiguredModelInput,
+): Promise<ConfiguredModel> {
+  return invoke<ConfiguredModel>("update_configured_model", { input });
+}
+
 export function deleteConfiguredModel(modelId: string): Promise<void> {
   return invoke<void>("delete_configured_model", { modelId });
 }
@@ -30,4 +37,3 @@ export function onModelsChanged(
     handler(payload);
   });
 }
-

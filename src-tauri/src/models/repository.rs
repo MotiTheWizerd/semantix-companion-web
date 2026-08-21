@@ -87,6 +87,35 @@ impl ModelRepository {
         Ok(())
     }
 
+    pub(crate) fn update(&self, record: &ModelRecord) -> Result<(), AppError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "UPDATE configured_models
+                 SET provider_id = ?2,
+                     model_id = ?3,
+                     display_name = ?4,
+                     credential_id = ?5,
+                     secret_ref = ?6,
+                     manual_key_hint = ?7,
+                     updated_at = ?8
+                 WHERE id = ?1",
+                params![
+                    record.model.id,
+                    record.model.provider_id,
+                    record.model.model_id,
+                    record.model.display_name,
+                    record.model.credential_id,
+                    record.secret_ref,
+                    record.manual_key_hint,
+                    record.model.updated_at,
+                ],
+            )
+            .map_err(AppError::database)?;
+
+        Ok(())
+    }
+
     pub(crate) fn get(&self, id: &str) -> Result<Option<ModelRecord>, AppError> {
         let connection = self.connection()?;
         connection

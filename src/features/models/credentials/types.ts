@@ -20,7 +20,14 @@ export interface CreateProviderCredentialInput {
   apiKey: string;
 }
 
+export interface UpdateProviderCredentialInput {
+  credentialId: string;
+  providerId: string;
+  label: string;
+  apiKey: string | null;
+}
+
 export type CredentialChangedEvent =
   | { kind: "created"; credential: ProviderCredential }
+  | { kind: "updated"; credential: ProviderCredential }
   | { kind: "deleted"; credentialId: string };
-

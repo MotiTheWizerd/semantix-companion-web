@@ -2,12 +2,14 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { ConfirmDeleteButton } from "../../../components/ConfirmDeleteButton";
+import { EditButton } from "../../../components/EditButton";
 import {
   createProviderCredential,
   deleteProviderCredential,
   listKnownModelProviders,
   listProviderCredentials,
   onCredentialsChanged,
+  updateProviderCredential,
 } from "./credentialService";
 import type {
   CredentialChangedEvent,
@@ -41,6 +43,7 @@ export function ProviderApiKeyStore() {
   const [isLoading, setIsLoading] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [providerId, setProviderId] = useState("");
@@ -56,6 +59,12 @@ export function ProviderApiKeyStore() {
     () => new Map(providers.map((provider) => [provider.id, provider.name])),
     [providers],
   );
+  const isEditing = editingId !== null;
+  const canSave =
+    providerId.length > 0 &&
+    (isEditing
+      ? apiKey.trim().length === 0 || apiKey.trim().length >= 8
+      : apiKey.trim().length >= 8);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,23 +109,50 @@ export function ProviderApiKeyStore() {
 
   const closeForm = () => {
     resetForm();
+    setEditingId(null);
     setIsAdding(false);
+  };
+
+  const openCreateForm = () => {
+    resetForm();
+    setEditingId(null);
+    setProviderId(providers[0]?.id ?? "");
+    setIsAdding(true);
+  };
+
+  const openEditForm = (credential: ProviderCredential) => {
+    resetForm();
+    setEditingId(credential.id);
+    setProviderId(credential.providerId);
+    setLabel(credential.label);
+    setPendingDeleteId(null);
+    setIsAdding(true);
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!providerId || !apiKey.trim()) return;
+    if (!canSave) return;
 
     setError(null);
     setIsSaving(true);
     try {
-      const credential = await createProviderCredential({
-        providerId,
-        label,
-        apiKey,
-      });
+      const credential = isEditing
+        ? await updateProviderCredential({
+            credentialId: editingId,
+            providerId,
+            label,
+            apiKey: apiKey.trim() || null,
+          })
+        : await createProviderCredential({
+            providerId,
+            label,
+            apiKey,
+          });
       setCredentials((current) =>
-        reconcileCredentialEvent(current, { kind: "created", credential }),
+        reconcileCredentialEvent(current, {
+          kind: isEditing ? "updated" : "created",
+          credential,
+        }),
       );
       closeForm();
     } catch (saveError) {
@@ -139,6 +175,7 @@ export function ProviderApiKeyStore() {
       setCredentials((current) =>
         reconcileCredentialEvent(current, { kind: "deleted", credentialId }),
       );
+      if (editingId === credentialId) closeForm();
       setPendingDeleteId(null);
     } catch (deleteError) {
       setError(errorMessage(deleteError));
@@ -158,10 +195,7 @@ export function ProviderApiKeyStore() {
           className="credential-store__add-button"
           type="button"
           aria-expanded={isAdding}
-          onClick={() => {
-            setError(null);
-            setIsAdding((current) => !current);
-          }}
+          onClick={() => (isAdding ? closeForm() : openCreateForm())}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 5v14M5 12h14" />
@@ -174,13 +208,17 @@ export function ProviderApiKeyStore() {
         <form className="credential-form" onSubmit={handleSubmit}>
           <div className="credential-form__heading">
             <div>
-              <h3>Add provider key</h3>
-              <p>The secret is stored by your operating system, not in Companion's database.</p>
+              <h3>{isEditing ? "Edit provider key" : "Add provider key"}</h3>
+              <p>
+                {isEditing
+                  ? "Change its metadata or enter a new secret to rotate the saved key."
+                  : "The secret is stored by your operating system, not in Companion's database."}
+              </p>
             </div>
             <button
               className="credential-form__close"
               type="button"
-              aria-label="Close add API key form"
+              aria-label={`Close ${isEditing ? "edit" : "add"} API key form`}
               onClick={closeForm}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -217,15 +255,21 @@ export function ProviderApiKeyStore() {
             </label>
 
             <label className="credential-field credential-field--wide">
-              <span>API key</span>
+              <span>
+                API key {isEditing ? <small>Leave blank to keep current</small> : null}
+              </span>
               <input
                 type="password"
                 autoComplete="off"
                 spellCheck="false"
-                required
+                required={!isEditing}
                 minLength={8}
                 value={apiKey}
-                placeholder={selectedProvider?.keyPlaceholder ?? "Enter API key"}
+                placeholder={
+                  isEditing
+                    ? "Leave blank to keep the saved secret"
+                    : (selectedProvider?.keyPlaceholder ?? "Enter API key")
+                }
                 onChange={(event) => setApiKey(event.target.value)}
               />
             </label>
@@ -248,9 +292,9 @@ export function ProviderApiKeyStore() {
             <button
               type="submit"
               className="credential-button credential-button--primary"
-              disabled={isSaving || !providerId || apiKey.trim().length < 8}
+              disabled={isSaving || !canSave}
             >
-              {isSaving ? "Saving…" : "Save API key"}
+              {isSaving ? "Saving…" : isEditing ? "Save changes" : "Save API key"}
             </button>
           </div>
         </form>
@@ -290,14 +334,20 @@ export function ProviderApiKeyStore() {
                   <span>{providerNames.get(credential.providerId) ?? credential.providerId}</span>
                 </div>
                 <code>{credential.keyHint}</code>
-                <ConfirmDeleteButton
-                  label={credential.label}
-                  isConfirming={pendingDeleteId === credential.id}
-                  isDeleting={deletingId === credential.id}
-                  onRequestConfirmation={() => setPendingDeleteId(credential.id)}
-                  onCancel={() => setPendingDeleteId(null)}
-                  onConfirm={() => void handleDelete(credential.id)}
-                />
+                <div className="credential-list__actions">
+                  <EditButton
+                    label={credential.label}
+                    onClick={() => openEditForm(credential)}
+                  />
+                  <ConfirmDeleteButton
+                    label={credential.label}
+                    isConfirming={pendingDeleteId === credential.id}
+                    isDeleting={deletingId === credential.id}
+                    onRequestConfirmation={() => setPendingDeleteId(credential.id)}
+                    onCancel={() => setPendingDeleteId(null)}
+                    onConfirm={() => void handleDelete(credential.id)}
+                  />
+                </div>
               </li>
             ))}
           </ul>

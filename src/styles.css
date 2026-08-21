@@ -446,7 +446,7 @@ a {
 }
 
 .chat-thread {
-  width: min(760px, 100%);
+  width: 100%;
   min-height: 0;
   flex: 1;
   overflow-y: auto;
@@ -537,7 +537,7 @@ a {
 }
 
 .chat-composer {
-  width: min(720px, 100%);
+  width: 100%;
   padding: 13px 13px 10px;
   background: rgba(22, 22, 22, 0.9);
   border: 1px solid #292929;
@@ -981,6 +981,41 @@ a {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 10.5px;
   letter-spacing: 0.02em;
+}
+
+.credential-list__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+}
+
+.credential-list__edit {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  place-items: center;
+  cursor: pointer;
+  background: transparent;
+  border-radius: 7px;
+  color: #606060;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.credential-list__edit:hover {
+  background: var(--surface-hover);
+  color: #879eae;
+}
+
+.credential-list__edit svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.45;
 }
 
 .credential-list__delete {
@@ -1488,6 +1523,10 @@ a {
   }
 
   .model-list__credential {
+    display: none;
+  }
+
+  .credential-list code {
     display: none;
   }
 }

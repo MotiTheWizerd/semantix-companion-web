@@ -41,6 +41,7 @@ export function App() {
           <SettingsScreen />
         ) : (
           <ChatSurface
+            activeConversationId={chat.activeConversationId}
             messages={chat.messages}
             isLoading={chat.isLoading}
             isSending={chat.isSending}
