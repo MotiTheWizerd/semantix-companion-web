@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
+import {
+  listConfiguredModels,
+  onModelsChanged,
+} from "../models/configuredModels/modelService";
+import type { ConfiguredModel } from "../models/configuredModels/types";
 import { getConversationThread, listConversations, submitMessage } from "./chatService";
 import type {
   AcceptedMessage,
@@ -11,6 +16,8 @@ import type {
 
 interface ChatControllerState {
   conversations: Conversation[];
+  configuredModels: ConfiguredModel[];
+  selectedModelId: string | null;
   activeConversationId: string | null;
   messages: ChatMessage[];
   isLoading: boolean;
@@ -19,7 +26,14 @@ interface ChatControllerState {
 }
 
 type ChatAction =
-  | { type: "initialised"; conversations: Conversation[]; thread: ConversationThread | null }
+  | {
+      type: "initialised";
+      conversations: Conversation[];
+      thread: ConversationThread | null;
+      configuredModels: ConfiguredModel[];
+    }
+  | { type: "modelsLoaded"; configuredModels: ConfiguredModel[] }
+  | { type: "modelSelected"; modelId: string | null }
   | { type: "selectionStarted"; conversationId: string }
   | { type: "selectionLoaded"; thread: ConversationThread }
   | { type: "newConversation" }
@@ -30,6 +44,8 @@ type ChatAction =
 
 const initialState: ChatControllerState = {
   conversations: [],
+  configuredModels: [],
+  selectedModelId: null,
   activeConversationId: null,
   messages: [],
   isLoading: true,
@@ -68,11 +84,28 @@ function reducer(state: ChatControllerState, action: ChatAction): ChatController
       return {
         ...state,
         conversations: action.conversations,
+        configuredModels: action.configuredModels,
+        selectedModelId:
+          action.thread?.conversation.selectedModelId ?? action.configuredModels[0]?.id ?? null,
         activeConversationId: action.thread?.conversation.id ?? null,
         messages: action.thread?.messages ?? [],
         isLoading: false,
         error: null,
       };
+    case "modelsLoaded": {
+      const selectedStillExists = action.configuredModels.some(
+        (model) => model.id === state.selectedModelId,
+      );
+      return {
+        ...state,
+        configuredModels: action.configuredModels,
+        selectedModelId: selectedStillExists
+          ? state.selectedModelId
+          : (action.configuredModels[0]?.id ?? null),
+      };
+    }
+    case "modelSelected":
+      return { ...state, selectedModelId: action.modelId };
     case "selectionStarted":
       return {
         ...state,
@@ -86,6 +119,7 @@ function reducer(state: ChatControllerState, action: ChatAction): ChatController
         ...state,
         conversations: reconcileConversation(state.conversations, action.thread.conversation),
         activeConversationId: action.thread.conversation.id,
+        selectedModelId: action.thread.conversation.selectedModelId,
         messages: action.thread.messages,
         isLoading: false,
         error: null,
@@ -166,11 +200,16 @@ export function useChatController() {
 
     const initialise = async () => {
       try {
-        const conversations = await listConversations();
+        const [conversations, configuredModels] = await Promise.all([
+          listConversations(),
+          listConfiguredModels(),
+        ]);
         const thread = conversations[0]
           ? await getConversationThread(conversations[0].id)
           : null;
-        if (!cancelled) dispatch({ type: "initialised", conversations, thread });
+        if (!cancelled) {
+          dispatch({ type: "initialised", conversations, thread, configuredModels });
+        }
       } catch (error) {
         if (!cancelled) dispatch({ type: "failed", message: errorMessage(error) });
       }
@@ -179,6 +218,23 @@ export function useChatController() {
     void initialise();
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void onModelsChanged(() => {
+      void listConfiguredModels().then((configuredModels) => {
+        if (!cancelled) dispatch({ type: "modelsLoaded", configuredModels });
+      });
+    }).then((stopListening) => {
+      if (cancelled) stopListening();
+      else unlisten = stopListening;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 
@@ -200,13 +256,21 @@ export function useChatController() {
     dispatch({ type: "newConversation" });
   }, []);
 
+  const selectModel = useCallback((modelId: string | null) => {
+    dispatch({ type: "modelSelected", modelId });
+  }, []);
+
   const send = useCallback(
     async (content: string) => {
       if (state.isSending || content.trim().length === 0) return;
       dispatch({ type: "sendStarted" });
       try {
         const accepted = await submitMessage(
-          { conversationId: state.activeConversationId, content },
+          {
+            conversationId: state.activeConversationId,
+            configuredModelId: state.selectedModelId,
+            content,
+          },
           (event) => dispatch({ type: "chatEvent", event }),
         );
         dispatch({ type: "chatEvent", event: acceptedEvent(accepted) });
@@ -216,7 +280,7 @@ export function useChatController() {
         dispatch({ type: "sendFinished" });
       }
     },
-    [state.activeConversationId, state.isSending],
+    [state.activeConversationId, state.isSending, state.selectedModelId],
   );
 
   const activeConversation = useMemo(
@@ -231,6 +295,7 @@ export function useChatController() {
     activeConversation,
     selectConversation,
     startNewConversation,
+    selectModel,
     send,
   };
 }

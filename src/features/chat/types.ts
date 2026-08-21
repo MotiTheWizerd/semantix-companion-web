@@ -37,6 +37,7 @@ export interface AcceptedMessage {
 
 export interface SubmitMessageInput {
   conversationId: string | null;
+  configuredModelId: string | null;
   content: string;
 }
 

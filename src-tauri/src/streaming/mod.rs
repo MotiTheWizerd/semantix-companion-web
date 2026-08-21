@@ -1,20 +1,11 @@
-mod test_source;
-
 use std::{fmt::Display, sync::Arc};
 
 use async_trait::async_trait;
 
-pub(crate) use test_source::TestTextSource;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TextStreamRequest {
-    pub(crate) input: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TextStreamEvent {
+pub(crate) enum StreamEvent<Delta> {
     Started,
-    Delta { sequence: u64, text: String },
+    Delta { sequence: u64, payload: Delta },
     Completed,
     Failed { message: String },
 }
@@ -40,44 +31,51 @@ impl Display for StreamError {
 
 impl std::error::Error for StreamError {}
 
-pub(crate) trait TextDeltaSink: Send + Sync {
-    fn emit_delta(&self, text: String) -> Result<(), StreamError>;
+pub(crate) trait DeltaSink<Delta>: Send + Sync {
+    fn emit_delta(&self, payload: Delta) -> Result<(), StreamError>;
 }
 
-pub(crate) trait TextStreamSink: Send + Sync {
-    fn emit(&self, event: TextStreamEvent) -> Result<(), StreamError>;
+pub(crate) trait StreamSink<Delta>: Send + Sync {
+    fn emit(&self, event: StreamEvent<Delta>) -> Result<(), StreamError>;
 }
 
 #[async_trait]
-pub(crate) trait TextStreamSource: Send + Sync {
+pub(crate) trait StreamSource: Send + Sync {
+    type Request: Send + Sync;
+    type Delta: Send + Sync;
+
     async fn stream(
         &self,
-        request: &TextStreamRequest,
-        sink: &dyn TextDeltaSink,
+        request: &Self::Request,
+        sink: &dyn DeltaSink<Self::Delta>,
     ) -> Result<(), StreamError>;
 }
 
-pub(crate) struct StreamingService {
-    source: Arc<dyn TextStreamSource>,
+pub(crate) struct StreamingService<Request, Delta> {
+    source: Arc<dyn StreamSource<Request = Request, Delta = Delta>>,
 }
 
-impl StreamingService {
-    pub(crate) fn new(source: Arc<dyn TextStreamSource>) -> Self {
+impl<Request, Delta> StreamingService<Request, Delta>
+where
+    Request: Send + Sync,
+    Delta: Send + Sync,
+{
+    pub(crate) fn new(source: Arc<dyn StreamSource<Request = Request, Delta = Delta>>) -> Self {
         Self { source }
     }
 
     pub(crate) async fn stream(
         &self,
-        request: &TextStreamRequest,
-        sink: &dyn TextStreamSink,
+        request: &Request,
+        sink: &dyn StreamSink<Delta>,
     ) -> Result<(), StreamError> {
-        sink.emit(TextStreamEvent::Started)?;
+        sink.emit(StreamEvent::Started)?;
         let sequenced_sink = SequencedDeltaSink::new(sink);
 
         match self.source.stream(request, &sequenced_sink).await {
-            Ok(()) => sink.emit(TextStreamEvent::Completed),
+            Ok(()) => sink.emit(StreamEvent::Completed),
             Err(error) => {
-                let _ = sink.emit(TextStreamEvent::Failed {
+                let _ = sink.emit(StreamEvent::Failed {
                     message: error.to_string(),
                 });
                 Err(error)
@@ -86,13 +84,13 @@ impl StreamingService {
     }
 }
 
-struct SequencedDeltaSink<'a> {
-    sink: &'a dyn TextStreamSink,
+struct SequencedDeltaSink<'a, Delta> {
+    sink: &'a dyn StreamSink<Delta>,
     next_sequence: std::sync::atomic::AtomicU64,
 }
 
-impl<'a> SequencedDeltaSink<'a> {
-    fn new(sink: &'a dyn TextStreamSink) -> Self {
+impl<'a, Delta> SequencedDeltaSink<'a, Delta> {
+    fn new(sink: &'a dyn StreamSink<Delta>) -> Self {
         Self {
             sink,
             next_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -100,12 +98,12 @@ impl<'a> SequencedDeltaSink<'a> {
     }
 }
 
-impl TextDeltaSink for SequencedDeltaSink<'_> {
-    fn emit_delta(&self, text: String) -> Result<(), StreamError> {
+impl<Delta: Send + Sync> DeltaSink<Delta> for SequencedDeltaSink<'_, Delta> {
+    fn emit_delta(&self, payload: Delta) -> Result<(), StreamError> {
         let sequence = self
             .next_sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.sink.emit(TextStreamEvent::Delta { sequence, text })
+        self.sink.emit(StreamEvent::Delta { sequence, payload })
     }
 }
 
@@ -115,19 +113,19 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use super::{
-        StreamError, StreamingService, TextDeltaSink, TextStreamEvent, TextStreamRequest,
-        TextStreamSink, TextStreamSource,
-    };
+    use super::{DeltaSink, StreamError, StreamEvent, StreamSink, StreamSource, StreamingService};
 
     struct TwoChunkSource;
 
     #[async_trait]
-    impl TextStreamSource for TwoChunkSource {
+    impl StreamSource for TwoChunkSource {
+        type Request = String;
+        type Delta = String;
+
         async fn stream(
             &self,
-            _request: &TextStreamRequest,
-            sink: &dyn TextDeltaSink,
+            _request: &String,
+            sink: &dyn DeltaSink<String>,
         ) -> Result<(), StreamError> {
             sink.emit_delta("one ".to_owned())?;
             sink.emit_delta("two".to_owned())
@@ -136,11 +134,11 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSink {
-        events: Mutex<Vec<TextStreamEvent>>,
+        events: Mutex<Vec<StreamEvent<String>>>,
     }
 
-    impl TextStreamSink for RecordingSink {
-        fn emit(&self, event: TextStreamEvent) -> Result<(), StreamError> {
+    impl StreamSink<String> for RecordingSink {
+        fn emit(&self, event: StreamEvent<String>) -> Result<(), StreamError> {
             self.events
                 .lock()
                 .expect("recording sink should not be poisoned")
@@ -155,28 +153,23 @@ mod tests {
         let sink = RecordingSink::default();
 
         service
-            .stream(
-                &TextStreamRequest {
-                    input: "test".to_owned(),
-                },
-                &sink,
-            )
+            .stream(&"test".to_owned(), &sink)
             .await
             .expect("stream should complete");
 
         assert_eq!(
             *sink.events.lock().expect("events should be readable"),
             vec![
-                TextStreamEvent::Started,
-                TextStreamEvent::Delta {
+                StreamEvent::Started,
+                StreamEvent::Delta {
                     sequence: 0,
-                    text: "one ".to_owned(),
+                    payload: "one ".to_owned(),
                 },
-                TextStreamEvent::Delta {
+                StreamEvent::Delta {
                     sequence: 1,
-                    text: "two".to_owned(),
+                    payload: "two".to_owned(),
                 },
-                TextStreamEvent::Completed,
+                StreamEvent::Completed,
             ]
         );
     }

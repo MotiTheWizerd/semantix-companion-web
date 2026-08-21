@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type KeyboardEvent } from "react";
 
 import type { ChatMessage } from "../features/chat/types";
+import type { ConfiguredModel } from "../features/models/configuredModels/types";
 import { EmptyState } from "./EmptyState";
 
 function AttachIcon() {
@@ -24,6 +25,9 @@ interface ChatSurfaceProps {
   isLoading: boolean;
   isSending: boolean;
   error: string | null;
+  configuredModels: ConfiguredModel[];
+  selectedModelId: string | null;
+  onModelSelect: (modelId: string | null) => void;
   onSend: (content: string) => Promise<void>;
 }
 
@@ -32,6 +36,9 @@ export function ChatSurface({
   isLoading,
   isSending,
   error,
+  configuredModels,
+  selectedModelId,
+  onModelSelect,
   onSend,
 }: ChatSurfaceProps) {
   const [content, setContent] = useState("");
@@ -91,7 +98,23 @@ export function ChatSurface({
           <button className="composer-button" type="button" aria-label="Attach context">
             <AttachIcon />
           </button>
-          <span className="chat-composer__model">Companion</span>
+          <label className="sr-only" htmlFor="companion-model">
+            Response model
+          </label>
+          <select
+            className="chat-composer__model"
+            id="companion-model"
+            value={selectedModelId ?? ""}
+            disabled={isLoading || isSending}
+            onChange={(event) => onModelSelect(event.target.value || null)}
+          >
+            <option value="">Test stream</option>
+            {configuredModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.displayName}
+              </option>
+            ))}
+          </select>
           <button
             className="composer-send"
             type="submit"

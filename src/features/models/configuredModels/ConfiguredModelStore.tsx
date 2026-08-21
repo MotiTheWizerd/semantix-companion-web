@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
+import { ConfirmDeleteButton } from "../../../components/ConfirmDeleteButton";
 import {
   listKnownModelProviders,
   listProviderCredentials,
@@ -416,28 +417,14 @@ export function ConfiguredModelStore() {
                   </span>
                   <small>{model.credentialLabel} · {model.keyHint}</small>
                 </div>
-                <button
-                  className={`credential-list__delete${pendingDeleteId === model.id ? " is-confirming" : ""}`}
-                  type="button"
-                  disabled={deletingId === model.id}
-                  aria-label={
-                    pendingDeleteId === model.id
-                      ? `Confirm removal of ${model.displayName}`
-                      : `Remove ${model.displayName}`
-                  }
-                  onBlur={() =>
-                    setPendingDeleteId((current) => (current === model.id ? null : current))
-                  }
-                  onClick={() => void handleDelete(model.id)}
-                >
-                  {pendingDeleteId === model.id ? (
-                    deletingId === model.id ? "Removing…" : "Remove?"
-                  ) : (
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
-                    </svg>
-                  )}
-                </button>
+                <ConfirmDeleteButton
+                  label={model.displayName}
+                  isConfirming={pendingDeleteId === model.id}
+                  isDeleting={deletingId === model.id}
+                  onRequestConfirmation={() => setPendingDeleteId(model.id)}
+                  onCancel={() => setPendingDeleteId(null)}
+                  onConfirm={() => void handleDelete(model.id)}
+                />
               </li>
             ))}
           </ul>
@@ -446,4 +433,3 @@ export function ConfiguredModelStore() {
     </section>
   );
 }
-

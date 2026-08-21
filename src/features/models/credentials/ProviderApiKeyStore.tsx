@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
+import { ConfirmDeleteButton } from "../../../components/ConfirmDeleteButton";
 import {
   createProviderCredential,
   deleteProviderCredential,
@@ -289,30 +290,14 @@ export function ProviderApiKeyStore() {
                   <span>{providerNames.get(credential.providerId) ?? credential.providerId}</span>
                 </div>
                 <code>{credential.keyHint}</code>
-                <button
-                  className={`credential-list__delete${pendingDeleteId === credential.id ? " is-confirming" : ""}`}
-                  type="button"
-                  disabled={deletingId === credential.id}
-                  aria-label={
-                    pendingDeleteId === credential.id
-                      ? `Confirm removal of ${credential.label}`
-                      : `Remove ${credential.label}`
-                  }
-                  onBlur={() =>
-                    setPendingDeleteId((current) =>
-                      current === credential.id ? null : current,
-                    )
-                  }
-                  onClick={() => void handleDelete(credential.id)}
-                >
-                  {pendingDeleteId === credential.id ? (
-                    deletingId === credential.id ? "Removing…" : "Remove?"
-                  ) : (
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
-                    </svg>
-                  )}
-                </button>
+                <ConfirmDeleteButton
+                  label={credential.label}
+                  isConfirming={pendingDeleteId === credential.id}
+                  isDeleting={deletingId === credential.id}
+                  onRequestConfirmation={() => setPendingDeleteId(credential.id)}
+                  onCancel={() => setPendingDeleteId(null)}
+                  onConfirm={() => void handleDelete(credential.id)}
+                />
               </li>
             ))}
           </ul>

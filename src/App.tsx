@@ -45,6 +45,9 @@ export function App() {
             isLoading={chat.isLoading}
             isSending={chat.isSending}
             error={chat.error}
+            configuredModels={chat.configuredModels}
+            selectedModelId={chat.selectedModelId}
+            onModelSelect={chat.selectModel}
             onSend={chat.send}
           />
         )}

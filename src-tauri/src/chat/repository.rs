@@ -12,6 +12,16 @@ pub(crate) struct ChatRepository {
     connection: Mutex<Connection>,
 }
 
+pub(crate) struct CommitUserMessage<'a> {
+    pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) selected_model_id: Option<&'a str>,
+    pub(crate) content: &'a str,
+    pub(crate) title: &'a str,
+    pub(crate) timestamp: i64,
+    pub(crate) new_conversation_id: &'a str,
+    pub(crate) message_id: &'a str,
+}
+
 impl ChatRepository {
     pub(crate) fn open(path: &Path) -> Result<Self, AppError> {
         Ok(Self {
@@ -96,18 +106,22 @@ impl ChatRepository {
 
     pub(crate) fn commit_user_message(
         &self,
-        conversation_id: Option<&str>,
-        content: &str,
-        title: &str,
-        timestamp: i64,
-        new_conversation_id: &str,
-        message_id: &str,
+        input: CommitUserMessage<'_>,
     ) -> Result<AcceptedMessage, AppError> {
+        let CommitUserMessage {
+            conversation_id,
+            selected_model_id,
+            content,
+            title,
+            timestamp,
+            new_conversation_id,
+            message_id,
+        } = input;
         let mut connection = self.connection()?;
         let transaction = connection.transaction().map_err(AppError::database)?;
 
         let conversation = if let Some(conversation_id) = conversation_id {
-            transaction
+            let mut conversation = transaction
                 .query_row(
                     "SELECT id, title, selected_model_id, created_at, updated_at, archived_at
                      FROM conversations
@@ -117,21 +131,29 @@ impl ChatRepository {
                 )
                 .optional()
                 .map_err(AppError::database)?
-                .ok_or_else(|| AppError::validation("That conversation no longer exists."))?
+                .ok_or_else(|| AppError::validation("That conversation no longer exists."))?;
+            transaction
+                .execute(
+                    "UPDATE conversations SET selected_model_id = ?2 WHERE id = ?1",
+                    params![conversation_id, selected_model_id],
+                )
+                .map_err(AppError::database)?;
+            conversation.selected_model_id = selected_model_id.map(str::to_owned);
+            conversation
         } else {
             transaction
                 .execute(
                     "INSERT INTO conversations (
                         id, title, selected_model_id, created_at, updated_at, archived_at
-                     ) VALUES (?1, ?2, NULL, ?3, ?3, NULL)",
-                    params![new_conversation_id, title, timestamp],
+                     ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)",
+                    params![new_conversation_id, title, selected_model_id, timestamp],
                 )
                 .map_err(AppError::database)?;
 
             Conversation {
                 id: new_conversation_id.to_owned(),
                 title: title.to_owned(),
-                selected_model_id: None,
+                selected_model_id: selected_model_id.map(str::to_owned),
                 created_at: timestamp,
                 updated_at: timestamp,
                 archived_at: None,
@@ -192,6 +214,8 @@ impl ChatRepository {
         &self,
         conversation_id: &str,
         message_id: &str,
+        provider_id: &str,
+        model_id: &str,
         timestamp: i64,
     ) -> Result<Message, AppError> {
         let mut connection = self.connection()?;
@@ -225,8 +249,15 @@ impl ChatRepository {
                 "INSERT INTO messages (
                     id, conversation_id, sequence, role, status, content,
                     provider_id, model_id, error_message, created_at, updated_at, completed_at
-                 ) VALUES (?1, ?2, ?3, 'assistant', 'streaming', '', NULL, NULL, NULL, ?4, ?4, NULL)",
-                params![message_id, conversation_id, sequence, timestamp],
+                 ) VALUES (?1, ?2, ?3, 'assistant', 'streaming', '', ?4, ?5, NULL, ?6, ?6, NULL)",
+                params![
+                    message_id,
+                    conversation_id,
+                    sequence,
+                    provider_id,
+                    model_id,
+                    timestamp
+                ],
             )
             .map_err(AppError::database)?;
         transaction
@@ -244,8 +275,8 @@ impl ChatRepository {
             role: "assistant".to_owned(),
             status: "streaming".to_owned(),
             content: String::new(),
-            provider_id: None,
-            model_id: None,
+            provider_id: Some(provider_id.to_owned()),
+            model_id: Some(model_id.to_owned()),
             error_message: None,
             created_at: timestamp,
             updated_at: timestamp,

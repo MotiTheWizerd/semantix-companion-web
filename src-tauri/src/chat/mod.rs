@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use repository::ChatRepository;
+use repository::{ChatRepository, CommitUserMessage};
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, State};
 use uuid::Uuid;
@@ -13,10 +13,12 @@ use uuid::Uuid;
 use crate::{
     app_error::AppError,
     credentials::unix_timestamp_ms,
-    streaming::{
-        StreamError, StreamingService, TestTextSource, TextStreamEvent, TextStreamRequest,
-        TextStreamSink,
+    inference::{
+        InferenceDelta, InferenceExecution, InferenceGateway, InferenceMessage, InferenceRequest,
+        ModelTarget, ProviderCredential, Role,
     },
+    models::ModelResolver,
+    streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,6 +67,7 @@ pub(crate) struct AcceptedMessage {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SubmitMessageInput {
     conversation_id: Option<String>,
+    configured_model_id: Option<String>,
     content: String,
 }
 
@@ -109,7 +112,8 @@ impl ChatState {
         Ok(Self {
             service: Arc::new(ChatService::new(
                 repository,
-                StreamingService::new(Arc::new(TestTextSource::default())),
+                ModelResolver::open(database_path)?,
+                StreamingService::new(Arc::new(InferenceGateway::default())),
             )),
         })
     }
@@ -117,13 +121,19 @@ impl ChatState {
 
 struct ChatService {
     repository: ChatRepository,
-    streaming: StreamingService,
+    model_resolver: ModelResolver,
+    streaming: StreamingService<InferenceExecution, InferenceDelta>,
 }
 
 impl ChatService {
-    fn new(repository: ChatRepository, streaming: StreamingService) -> Self {
+    fn new(
+        repository: ChatRepository,
+        model_resolver: ModelResolver,
+        streaming: StreamingService<InferenceExecution, InferenceDelta>,
+    ) -> Self {
         Self {
             repository,
+            model_resolver,
             streaming,
         }
     }
@@ -138,7 +148,7 @@ impl ChatService {
             .ok_or_else(|| AppError::validation("That conversation no longer exists."))
     }
 
-    fn submit(&self, input: SubmitMessageInput) -> Result<AcceptedMessage, AppError> {
+    fn submit(&self, input: SubmitMessageInput) -> Result<PreparedSubmission, AppError> {
         let content = input.content.trim();
         if content.is_empty() {
             return Err(AppError::validation("Write a message before sending."));
@@ -154,21 +164,78 @@ impl ChatService {
             .as_deref()
             .map(str::trim)
             .filter(|id| !id.is_empty());
+        let configured_model_id = input
+            .configured_model_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        let (selected_model_id, target, credential) =
+            if let Some(configured_model_id) = configured_model_id {
+                let model = self.model_resolver.resolve(configured_model_id)?;
+                let selected_model_id = model.configured_model_id.clone();
+                (
+                    Some(selected_model_id),
+                    ModelTarget {
+                        provider_id: model.provider_id,
+                        model_id: model.model_id,
+                    },
+                    ProviderCredential::ApiKey(model.api_key),
+                )
+            } else {
+                (
+                    None,
+                    ModelTarget {
+                        provider_id: "test".to_owned(),
+                        model_id: "test-stream".to_owned(),
+                    },
+                    ProviderCredential::None,
+                )
+            };
         let timestamp = unix_timestamp_ms()?;
-        self.repository.commit_user_message(
+        let new_conversation_id = Uuid::new_v4().to_string();
+        let message_id = Uuid::new_v4().to_string();
+        let title = conversation_title(content);
+        let accepted = self.repository.commit_user_message(CommitUserMessage {
             conversation_id,
+            selected_model_id: selected_model_id.as_deref(),
             content,
-            &conversation_title(content),
+            title: &title,
             timestamp,
-            &Uuid::new_v4().to_string(),
-            &Uuid::new_v4().to_string(),
-        )
+            new_conversation_id: &new_conversation_id,
+            message_id: &message_id,
+        })?;
+        let thread = self
+            .repository
+            .get_thread(&accepted.conversation.id)?
+            .ok_or_else(|| AppError::internal("the accepted conversation could not be reloaded"))?;
+        let messages = canonical_messages(&thread.messages);
+
+        Ok(PreparedSubmission {
+            provider_id: target.provider_id.clone(),
+            model_id: target.model_id.clone(),
+            accepted,
+            execution: InferenceExecution {
+                request: InferenceRequest {
+                    id: Uuid::new_v4().to_string(),
+                    target,
+                    messages,
+                },
+                credential,
+            },
+        })
     }
 
-    fn begin_assistant(&self, conversation_id: &str) -> Result<Message, AppError> {
+    fn begin_assistant(
+        &self,
+        conversation_id: &str,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<Message, AppError> {
         self.repository.begin_assistant_message(
             conversation_id,
             &Uuid::new_v4().to_string(),
+            provider_id,
+            model_id,
             unix_timestamp_ms()?,
         )
     }
@@ -182,6 +249,13 @@ impl ChatService {
         self.repository
             .fail_assistant_message(message_id, message, unix_timestamp_ms()?)
     }
+}
+
+struct PreparedSubmission {
+    accepted: AcceptedMessage,
+    execution: InferenceExecution,
+    provider_id: String,
+    model_id: String,
 }
 
 struct ChatStreamAdapter {
@@ -211,27 +285,29 @@ impl ChatStreamAdapter {
     }
 }
 
-impl TextStreamSink for ChatStreamAdapter {
-    fn emit(&self, event: TextStreamEvent) -> Result<(), StreamError> {
+impl StreamSink<InferenceDelta> for ChatStreamAdapter {
+    fn emit(&self, event: StreamEvent<InferenceDelta>) -> Result<(), StreamError> {
         match event {
-            TextStreamEvent::Started => {
+            StreamEvent::Started => {
                 let _ = self.on_event.send(ChatEvent::AssistantStarted {
                     message: self.assistant.clone(),
                 });
             }
-            TextStreamEvent::Delta { sequence, text } => {
-                self.content
-                    .lock()
-                    .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))?
-                    .push_str(&text);
-                let _ = self.on_event.send(ChatEvent::AssistantDelta {
-                    conversation_id: self.conversation_id.clone(),
-                    message_id: self.message_id.clone(),
-                    sequence,
-                    delta: text,
-                });
+            StreamEvent::Delta { sequence, payload } => {
+                if let InferenceDelta::Text { text } = payload {
+                    self.content
+                        .lock()
+                        .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))?
+                        .push_str(&text);
+                    let _ = self.on_event.send(ChatEvent::AssistantDelta {
+                        conversation_id: self.conversation_id.clone(),
+                        message_id: self.message_id.clone(),
+                        sequence,
+                        delta: text,
+                    });
+                }
             }
-            TextStreamEvent::Completed | TextStreamEvent::Failed { .. } => {}
+            StreamEvent::Completed | StreamEvent::Failed { .. } => {}
         }
         Ok(())
     }
@@ -268,10 +344,16 @@ pub(crate) async fn submit_message(
 ) -> Result<AcceptedMessage, String> {
     let service = Arc::clone(&state.service);
     let submit_service = Arc::clone(&service);
-    let accepted = tauri::async_runtime::spawn_blocking(move || submit_service.submit(input))
+    let prepared = tauri::async_runtime::spawn_blocking(move || submit_service.submit(input))
         .await
         .map_err(|error| format!("Message task failed: {error}"))?
         .map_err(String::from)?;
+    let PreparedSubmission {
+        accepted,
+        execution,
+        provider_id,
+        model_id,
+    } = prepared;
 
     let _ = on_event.send(ChatEvent::Accepted {
         conversation: accepted.conversation.clone(),
@@ -282,7 +364,7 @@ pub(crate) async fn submit_message(
     let assistant_service = Arc::clone(&service);
     let assistant_conversation_id = conversation_id.clone();
     let assistant = match tauri::async_runtime::spawn_blocking(move || {
-        assistant_service.begin_assistant(&assistant_conversation_id)
+        assistant_service.begin_assistant(&assistant_conversation_id, &provider_id, &model_id)
     })
     .await
     .map_err(|error| format!("Assistant task failed: {error}"))?
@@ -300,11 +382,7 @@ pub(crate) async fn submit_message(
     };
 
     let adapter = ChatStreamAdapter::new(assistant.clone(), on_event.clone());
-    let request = TextStreamRequest {
-        input: accepted.message.content.clone(),
-    };
-
-    if let Err(error) = service.streaming.stream(&request, &adapter).await {
+    if let Err(error) = service.streaming.stream(&execution, &adapter).await {
         let message = error.to_string();
         return Err(fail_stream(
             Arc::clone(&service),
@@ -375,6 +453,22 @@ async fn fail_stream(
     message
 }
 
+fn canonical_messages(messages: &[Message]) -> Vec<InferenceMessage> {
+    messages
+        .iter()
+        .filter(|message| message.status == "completed")
+        .filter_map(|message| {
+            let role = match message.role.as_str() {
+                "system" => Role::System,
+                "user" => Role::User,
+                "assistant" => Role::Assistant,
+                _ => return None,
+            };
+            Some(InferenceMessage::text(role, message.content.clone()))
+        })
+        .collect()
+}
+
 fn conversation_title(content: &str) -> String {
     let title = content
         .split_whitespace()
@@ -397,10 +491,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        conversation_title, repository::ChatRepository, ChatEvent, ChatService, StreamingService,
-        SubmitMessageInput, TestTextSource,
+        conversation_title, repository::ChatRepository, ChatEvent, ChatService, SubmitMessageInput,
     };
-    use crate::database;
+    use crate::{
+        database, inference::InferenceGateway, models::ModelResolver, streaming::StreamingService,
+    };
 
     #[test]
     fn conversation_titles_are_compact_and_single_line() {
@@ -440,11 +535,13 @@ mod tests {
         {
             let service = ChatService::new(
                 ChatRepository::open(&database_path).expect("chat repository should open"),
-                StreamingService::new(Arc::new(TestTextSource::default())),
+                ModelResolver::open(&database_path).expect("model resolver should open"),
+                StreamingService::new(Arc::new(InferenceGateway::default())),
             );
             let accepted = service
                 .submit(SubmitMessageInput {
                     conversation_id: None,
+                    configured_model_id: None,
                     content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
                 })
                 .expect("message should persist");
@@ -453,20 +550,23 @@ mod tests {
                 .list_conversations()
                 .expect("conversations should reload");
             assert_eq!(conversations.len(), 1);
-            assert_eq!(conversations[0].id, accepted.conversation.id);
+            assert_eq!(conversations[0].id, accepted.accepted.conversation.id);
 
             let assistant = service
-                .begin_assistant(&accepted.conversation.id)
+                .begin_assistant(&accepted.accepted.conversation.id, "test", "test-stream")
                 .expect("assistant message should begin");
             let completed = service
                 .complete_assistant(&assistant.id, "A persisted streamed response.")
                 .expect("assistant message should complete");
 
             let thread = service
-                .get_thread(&accepted.conversation.id)
+                .get_thread(&accepted.accepted.conversation.id)
                 .expect("completed thread should reload");
             assert_eq!(thread.messages.len(), 2);
-            assert_eq!(thread.messages[0].content, accepted.message.content);
+            assert_eq!(
+                thread.messages[0].content,
+                accepted.accepted.message.content
+            );
             assert_eq!(thread.messages[0].role, "user");
             assert_eq!(thread.messages[0].status, "completed");
             assert_eq!(thread.messages[1].id, completed.id);
@@ -475,7 +575,7 @@ mod tests {
             assert_eq!(thread.messages[1].content, "A persisted streamed response.");
 
             let interrupted = service
-                .begin_assistant(&accepted.conversation.id)
+                .begin_assistant(&accepted.accepted.conversation.id, "test", "test-stream")
                 .expect("a second assistant message should begin");
             assert_eq!(
                 service
@@ -485,7 +585,7 @@ mod tests {
                 1
             );
             let recovered = service
-                .get_thread(&accepted.conversation.id)
+                .get_thread(&accepted.accepted.conversation.id)
                 .expect("recovered thread should reload");
             assert_eq!(recovered.messages[2].status, "failed");
             assert_eq!(

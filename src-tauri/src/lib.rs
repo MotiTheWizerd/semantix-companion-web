@@ -2,6 +2,7 @@ mod app_error;
 mod chat;
 mod credentials;
 mod database;
+mod inference;
 mod models;
 mod secret_vault;
 mod streaming;

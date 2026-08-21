@@ -1,4 +1,5 @@
 use keyring::{Entry, Error as KeyringError};
+use zeroize::Zeroizing;
 
 use crate::app_error::AppError;
 
@@ -19,6 +20,13 @@ impl SecretVault {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(error) => Err(AppError::keyring(error)),
         }
+    }
+
+    pub(crate) fn get(secret_ref: &str) -> Result<Zeroizing<String>, AppError> {
+        Self::entry(secret_ref)?
+            .get_password()
+            .map(Zeroizing::new)
+            .map_err(AppError::keyring)
     }
 
     fn entry(secret_ref: &str) -> Result<Entry, AppError> {

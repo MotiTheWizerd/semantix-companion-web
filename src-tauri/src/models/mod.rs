@@ -76,6 +76,57 @@ pub(crate) struct ModelState {
     service: Arc<ModelService>,
 }
 
+pub(crate) struct ResolvedConfiguredModel {
+    pub(crate) configured_model_id: String,
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) api_key: Zeroizing<String>,
+}
+
+pub(crate) struct ModelResolver {
+    repository: ModelRepository,
+    credentials: CredentialRepository,
+}
+
+impl ModelResolver {
+    pub(crate) fn open(database_path: &Path) -> Result<Self, AppError> {
+        Ok(Self {
+            repository: ModelRepository::open(database_path)?,
+            credentials: CredentialRepository::open(database_path)?,
+        })
+    }
+
+    pub(crate) fn resolve(&self, id: &str) -> Result<ResolvedConfiguredModel, AppError> {
+        let record = self
+            .repository
+            .get(id)?
+            .ok_or_else(|| AppError::validation("That configured model no longer exists."))?;
+        let secret_ref = if let Some(secret_ref) = record.secret_ref {
+            secret_ref
+        } else {
+            let credential_id = record.model.credential_id.as_deref().ok_or_else(|| {
+                AppError::internal("the configured model has no credential reference")
+            })?;
+            let credential = self.credentials.get(credential_id)?.ok_or_else(|| {
+                AppError::validation("The saved API key for this model no longer exists.")
+            })?;
+            if credential.metadata.provider_id != record.model.provider_id {
+                return Err(AppError::internal(
+                    "the model and saved credential providers do not match",
+                ));
+            }
+            credential.secret_ref
+        };
+
+        Ok(ResolvedConfiguredModel {
+            configured_model_id: record.model.id,
+            provider_id: record.model.provider_id,
+            model_id: record.model.model_id,
+            api_key: SecretVault::get(&secret_ref)?,
+        })
+    }
+}
+
 impl ModelState {
     pub(crate) fn open(database_path: &Path) -> Result<Self, AppError> {
         Ok(Self {

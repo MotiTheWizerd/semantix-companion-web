@@ -593,9 +593,27 @@ a {
 }
 
 .chat-composer__model {
+  max-width: 260px;
+  padding: 4px 20px 4px 6px;
+  outline: none;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
   color: var(--text-faint);
+  cursor: pointer;
   font-size: 10.5px;
   font-weight: 550;
+}
+
+.chat-composer__model:hover,
+.chat-composer__model:focus-visible {
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-muted);
+}
+
+.chat-composer__model:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .composer-send {
@@ -983,15 +1001,6 @@ a {
   color: #ad7777;
 }
 
-.credential-list__delete.is-confirming {
-  width: auto;
-  padding: 0 9px;
-  background: rgba(180, 77, 77, 0.1);
-  color: #c98787;
-  font-size: 10px;
-  font-weight: 620;
-}
-
 .credential-list__delete:disabled {
   cursor: wait;
   opacity: 0.6;
@@ -1005,6 +1014,53 @@ a {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.45;
+}
+
+.credential-list__delete-confirmation {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+}
+
+.credential-list__delete-cancel,
+.credential-list__delete-confirm {
+  height: 30px;
+  padding: 0 9px;
+  cursor: pointer;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 620;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.credential-list__delete-cancel {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.credential-list__delete-cancel:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.credential-list__delete-confirm {
+  background: rgba(180, 77, 77, 0.12);
+  border: 1px solid rgba(199, 91, 91, 0.24);
+  color: #c98787;
+}
+
+.credential-list__delete-confirm:hover {
+  background: rgba(180, 77, 77, 0.2);
+  border-color: rgba(199, 91, 91, 0.36);
+  color: #dda0a0;
+}
+
+.credential-list__delete-cancel:disabled,
+.credential-list__delete-confirm:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .credential-list__empty,
