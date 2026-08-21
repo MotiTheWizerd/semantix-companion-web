@@ -13,10 +13,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+async-trait = "0.1.89"
 keyring = "4.1.6"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 uuid = { version = "1.24.1", features = ["v4"] }
 zeroize = "1.9.0"
 

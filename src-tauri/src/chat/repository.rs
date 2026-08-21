@@ -38,6 +38,21 @@ impl ChatRepository {
         Ok(conversations)
     }
 
+    pub(crate) fn fail_interrupted_streams(&self, timestamp: i64) -> Result<usize, AppError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "UPDATE messages
+                 SET status = 'failed',
+                     error_message = 'Response interrupted before completion.',
+                     updated_at = ?1,
+                     completed_at = ?1
+                 WHERE role = 'assistant' AND status = 'streaming'",
+                [timestamp],
+            )
+            .map_err(AppError::database)
+    }
+
     pub(crate) fn get_thread(
         &self,
         conversation_id: &str,
@@ -173,6 +188,122 @@ impl ChatRepository {
         })
     }
 
+    pub(crate) fn begin_assistant_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        timestamp: i64,
+    ) -> Result<Message, AppError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction().map_err(AppError::database)?;
+
+        let conversation_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM conversations WHERE id = ?1 AND archived_at IS NULL
+                 )",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::database)?;
+        if !conversation_exists {
+            return Err(AppError::validation("That conversation no longer exists."));
+        }
+
+        let sequence: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sequence) + 1, 0)
+                 FROM messages
+                 WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::database)?;
+
+        transaction
+            .execute(
+                "INSERT INTO messages (
+                    id, conversation_id, sequence, role, status, content,
+                    provider_id, model_id, error_message, created_at, updated_at, completed_at
+                 ) VALUES (?1, ?2, ?3, 'assistant', 'streaming', '', NULL, NULL, NULL, ?4, ?4, NULL)",
+                params![message_id, conversation_id, sequence, timestamp],
+            )
+            .map_err(AppError::database)?;
+        transaction
+            .execute(
+                "UPDATE conversations SET updated_at = ?2 WHERE id = ?1",
+                params![conversation_id, timestamp],
+            )
+            .map_err(AppError::database)?;
+        transaction.commit().map_err(AppError::database)?;
+
+        Ok(Message {
+            id: message_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            sequence,
+            role: "assistant".to_owned(),
+            status: "streaming".to_owned(),
+            content: String::new(),
+            provider_id: None,
+            model_id: None,
+            error_message: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+            completed_at: None,
+        })
+    }
+
+    pub(crate) fn complete_assistant_message(
+        &self,
+        message_id: &str,
+        content: &str,
+        timestamp: i64,
+    ) -> Result<Message, AppError> {
+        let connection = self.connection()?;
+        let updated = connection
+            .execute(
+                "UPDATE messages
+                 SET status = 'completed', content = ?2, error_message = NULL,
+                     updated_at = ?3, completed_at = ?3
+                 WHERE id = ?1 AND role = 'assistant' AND status = 'streaming'",
+                params![message_id, content, timestamp],
+            )
+            .map_err(AppError::database)?;
+        if updated != 1 {
+            return Err(AppError::internal(
+                "the assistant message was not in a streamable state",
+            ));
+        }
+        message_by_id(&connection, message_id)?.ok_or_else(|| {
+            AppError::internal("the completed assistant message could not be reloaded")
+        })
+    }
+
+    pub(crate) fn fail_assistant_message(
+        &self,
+        message_id: &str,
+        error_message: &str,
+        timestamp: i64,
+    ) -> Result<Message, AppError> {
+        let connection = self.connection()?;
+        let updated = connection
+            .execute(
+                "UPDATE messages
+                 SET status = 'failed', error_message = ?2,
+                     updated_at = ?3, completed_at = ?3
+                 WHERE id = ?1 AND role = 'assistant' AND status = 'streaming'",
+                params![message_id, error_message, timestamp],
+            )
+            .map_err(AppError::database)?;
+        if updated != 1 {
+            return Err(AppError::internal(
+                "the assistant message was not in a streamable state",
+            ));
+        }
+        message_by_id(&connection, message_id)?
+            .ok_or_else(|| AppError::internal("the failed assistant message could not be reloaded"))
+    }
+
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, AppError> {
         self.connection
             .lock()
@@ -206,4 +337,18 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         updated_at: row.get(10)?,
         completed_at: row.get(11)?,
     })
+}
+
+fn message_by_id(connection: &Connection, message_id: &str) -> Result<Option<Message>, AppError> {
+    connection
+        .query_row(
+            "SELECT id, conversation_id, sequence, role, status, content,
+                    provider_id, model_id, error_message, created_at, updated_at, completed_at
+             FROM messages
+             WHERE id = ?1",
+            [message_id],
+            message_from_row,
+        )
+        .optional()
+        .map_err(AppError::database)
 }

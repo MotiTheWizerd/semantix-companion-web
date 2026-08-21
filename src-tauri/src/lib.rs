@@ -4,6 +4,7 @@ mod credentials;
 mod database;
 mod models;
 mod secret_vault;
+mod streaming;
 
 use std::fs;
 

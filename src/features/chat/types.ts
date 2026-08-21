@@ -43,7 +43,13 @@ export interface SubmitMessageInput {
 export type ChatEvent =
   | ({ kind: "accepted" } & AcceptedMessage)
   | { kind: "assistantStarted"; message: ChatMessage }
-  | { kind: "assistantDelta"; conversationId: string; messageId: string; delta: string }
+  | {
+      kind: "assistantDelta";
+      conversationId: string;
+      messageId: string;
+      sequence: number;
+      delta: string;
+    }
   | { kind: "assistantCompleted"; message: ChatMessage }
   | {
       kind: "failed";
