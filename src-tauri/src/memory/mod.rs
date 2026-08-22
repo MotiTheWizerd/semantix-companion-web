@@ -291,6 +291,39 @@ pub(crate) async fn recall_memories(
         .map_err(|error| format!("The recall result could not be read: {error}"))
 }
 
+/// Write one memory into the organ — the pen behind the model's `carve_memory`
+/// tool. Not a command: the chat tool loop is the only caller. The organ
+/// upserts by name (created=false means an existing memory was overwritten)
+/// and embeds server-side; project_tag pins the carve to companion's shelf.
+pub(crate) async fn write_memory(
+    agent_id: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let bearer = organ_bearer().await?;
+    let response = reqwest::Client::new()
+        .post(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories"))
+        .bearer_auth(&bearer)
+        .json(payload)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|error| format!("The memory organ could not be reached: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .map(|body| body.get("detail").cloned().unwrap_or(body).to_string())
+            .unwrap_or_default();
+        return Err(format!("memory write failed: HTTP {} {detail}", status.as_u16()));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("The write result could not be read: {error}"))
+}
+
 /// One full memory by its exact name — the drill-down behind the model's
 /// `recall_memory` tool. Not a command: the chat tool loop is the only caller.
 pub(crate) async fn fetch_memory(

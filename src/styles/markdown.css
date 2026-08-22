@@ -1,0 +1,192 @@
+/* ── Markdown content styles — Companion skin ─────────────────────────────
+   Ported from the studio's markdown.css (s348 settled-blocks pattern) and
+   re-tokened onto Companion's flat-dark vocabulary: no glass blur/backdrop —
+   Companion surfaces are solid. The structural rules (.md-seg streaming
+   wrappers, :last-child reach-through) are byte-equivalent to the studio's. */
+
+.md-content {
+  color: var(--text);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4,
+.md-content h5,
+.md-content h6 {
+  color: var(--text);
+  font-weight: 600;
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  letter-spacing: -0.01em;
+}
+
+.md-content h1 {
+  font-size: 1.5em;
+}
+
+.md-content h2 {
+  font-size: 1.3em;
+}
+
+.md-content h3 {
+  font-size: 1.1em;
+}
+
+.md-content p {
+  margin-bottom: 0.6em;
+}
+
+/* No phantom space after the final block — bubbles stay vertically balanced. */
+.md-content > :last-child {
+  margin-bottom: 0;
+}
+
+/* Streaming segments (MarkdownRenderer): settled blocks live in their own
+   wrapper so a delta flush re-writes only the open tail's node. contents =
+   the wrapper generates no box — layout is identical to unwrapped children.
+   The :last-child reach-through replaces the rule above for wrapped content
+   (the wrapper itself matches it, but margin on display:contents no-ops). */
+.md-content > .md-seg {
+  display: contents;
+}
+
+.md-content > .md-seg:last-child > :last-child {
+  margin-bottom: 0;
+}
+
+.md-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.md-content a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.md-content code.md-inline-code {
+  background: var(--surface-input);
+  color: var(--accent);
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  font-size: 0.88em;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  border: 1px solid var(--border-subtle);
+}
+
+/* The fence's language tag (emitted as a bare span by the converter) becomes
+   a faint badge floating in the block's top-right corner. */
+.md-content .md-code-block {
+  position: relative;
+}
+
+.md-content .md-code-lang {
+  position: absolute;
+  top: 0.45em;
+  right: 0.7em;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.68em;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  opacity: 0.7;
+  pointer-events: none;
+  user-select: none;
+}
+
+.md-content pre {
+  background: var(--surface-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 0.85em 1em;
+  margin-bottom: 1.5rem;
+  overflow-x: auto;
+}
+
+.md-content pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.88em;
+  line-height: 1.5;
+}
+
+.md-content ul,
+.md-content ol {
+  margin: 0.6em 0;
+  padding-left: 1.4em;
+}
+
+.md-content ul {
+  list-style: disc;
+}
+
+.md-content ul ul {
+  list-style: circle;
+}
+
+.md-content ol {
+  list-style: decimal;
+}
+
+.md-content li {
+  margin: 0.2em 0;
+}
+
+.md-content li::marker {
+  color: var(--text-muted);
+}
+
+.md-content blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: var(--text-secondary);
+}
+
+.md-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+.md-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 0.85em;
+}
+
+.md-content th {
+  padding: 0.7em 1em;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The first column (typically a name/key) shouldn't wrap — give it the width
+   it needs so headings like "Component" stay on one line. */
+.md-content th:first-child,
+.md-content td:first-child {
+  white-space: nowrap;
+}
+
+.md-content td {
+  padding: 0.7em 1em;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.md-content tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.md-content tbody tr:hover {
+  background: var(--surface-hover);
+}

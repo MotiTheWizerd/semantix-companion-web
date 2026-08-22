@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 4;
+const LATEST_SCHEMA_VERSION: i64 = 5;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -158,6 +158,40 @@ fn migration_sql(version: i64) -> &'static str {
                  id, default_model_mode, default_model_id, updated_at
              ) VALUES (1, 'test', NULL, 0);"
         }
+        5 => {
+            // Full-text index over message content — the ground under the
+            // model's search_conversations tool (its "raw memory" drill).
+            // External-content FTS5: the index stores no second copy of the
+            // text, and the triggers keep it in lockstep with messages.
+            "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                 content,
+                 content='messages',
+                 content_rowid='rowid'
+             );
+
+             INSERT INTO messages_fts(rowid, content)
+                 SELECT rowid, content FROM messages;
+
+             CREATE TRIGGER IF NOT EXISTS messages_fts_after_insert
+                 AFTER INSERT ON messages BEGIN
+                     INSERT INTO messages_fts(rowid, content)
+                         VALUES (new.rowid, new.content);
+                 END;
+
+             CREATE TRIGGER IF NOT EXISTS messages_fts_after_delete
+                 AFTER DELETE ON messages BEGIN
+                     INSERT INTO messages_fts(messages_fts, rowid, content)
+                         VALUES ('delete', old.rowid, old.content);
+                 END;
+
+             CREATE TRIGGER IF NOT EXISTS messages_fts_after_update
+                 AFTER UPDATE OF content ON messages BEGIN
+                     INSERT INTO messages_fts(messages_fts, rowid, content)
+                         VALUES ('delete', old.rowid, old.content);
+                     INSERT INTO messages_fts(rowid, content)
+                         VALUES (new.rowid, new.content);
+                 END;"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -280,6 +314,20 @@ mod tests {
                      created_at INTEGER NOT NULL,
                      updated_at INTEGER NOT NULL,
                      archived_at INTEGER
+                 );
+                 CREATE TABLE messages (
+                     id TEXT PRIMARY KEY,
+                     conversation_id TEXT NOT NULL,
+                     sequence INTEGER NOT NULL,
+                     role TEXT NOT NULL,
+                     status TEXT NOT NULL,
+                     content TEXT NOT NULL DEFAULT '',
+                     provider_id TEXT,
+                     model_id TEXT,
+                     error_message TEXT,
+                     created_at INTEGER NOT NULL,
+                     updated_at INTEGER NOT NULL,
+                     completed_at INTEGER
                  );
                  INSERT INTO configured_models VALUES (
                      'model-1', 'test', 'test-model', 'Test', NULL,

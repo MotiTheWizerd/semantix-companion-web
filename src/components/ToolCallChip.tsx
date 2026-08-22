@@ -5,16 +5,32 @@
 
 import type { ToolCallChipItem } from "../features/chat/types";
 
+const MEMORY_VERBS: Record<string, [verb: string, argument: string, fallback: string]> = {
+  recall_memory: ["recalled", "name", "recalled a memory"],
+  carve_memory: ["carved", "name", "carved a memory"],
+  search_conversations: ["searched past conversations for", "query", "searched past conversations"],
+};
+
+const ICONS: Record<string, string> = {
+  carve_memory: "🪶",
+  search_conversations: "🔍",
+};
+
 function callLabel(call: ToolCallChipItem): string {
-  if (call.name !== "recall_memory") return call.name;
+  const labels = MEMORY_VERBS[call.name];
+  if (!labels) return call.name;
+  const [verb, argument, fallback] = labels;
   try {
-    const parsed = JSON.parse(call.arguments) as { name?: unknown };
-    return typeof parsed.name === "string" && parsed.name
-      ? `recalled [${parsed.name}]`
-      : "recalled a memory";
+    const parsed = JSON.parse(call.arguments) as Record<string, unknown>;
+    const value = parsed[argument];
+    return typeof value === "string" && value ? `${verb} [${value}]` : fallback;
   } catch {
-    return "recalled a memory";
+    return fallback;
   }
+}
+
+function callIcon(call: ToolCallChipItem): string {
+  return ICONS[call.name] ?? "📖";
 }
 
 export function ToolCallChip({ calls }: { calls: ToolCallChipItem[] }) {
@@ -27,7 +43,7 @@ export function ToolCallChip({ calls }: { calls: ToolCallChipItem[] }) {
           className={`tool-chip__call tool-chip__call--${call.status}`}
           title={call.arguments}
         >
-          <span aria-hidden="true">📖</span>
+          <span aria-hidden="true">{callIcon(call)}</span>
           <span>{callLabel(call)}</span>
           {call.status === "running" && <span aria-hidden="true">…</span>}
           {call.status === "error" && (

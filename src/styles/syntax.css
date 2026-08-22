@@ -1,0 +1,82 @@
+/* ── highlight.js token colours — VAR-DRIVEN (Moti s371) ──────────────────────
+   Replaces the fixed `highlight.js/styles/atom-one-dark.css` import so the Theme
+   editor's Syntax section can recolour every hljs consumer — the diff widget
+   (EditDiffCard), chat code blocks, and the symbol-intel hover dossier — live,
+   and the colours travel with saved themes via PREF_OVERRIDES like any --theme-*.
+
+   Each colour reads a --syntax-* var with the EXACT atom-one-dark value as its
+   fallback, so out of the box the look is byte-identical to the old import.
+   The structural rules (.hljs layout, emphasis/strong/link) are unchanged. */
+
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em;
+}
+code.hljs {
+  padding: 3px 5px;
+}
+
+.hljs {
+  color: var(--syntax-text, #abb2bf);
+  background: #282c34;
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--syntax-comment, #5c6370);
+  font-style: italic;
+}
+.hljs-doctag,
+.hljs-keyword,
+.hljs-formula {
+  color: var(--syntax-keyword, #c678dd);
+}
+.hljs-section,
+.hljs-name,
+.hljs-selector-tag,
+.hljs-deletion,
+.hljs-subst {
+  color: var(--syntax-tag, #e06c75);
+}
+.hljs-literal {
+  color: var(--syntax-literal, #56b6c2);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: var(--syntax-string, #98c379);
+}
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-selector-class,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-number {
+  color: var(--syntax-number, #d19a66);
+}
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-meta,
+.hljs-selector-id,
+.hljs-title {
+  color: var(--syntax-function, #61aeee);
+}
+.hljs-built_in,
+.hljs-title.class_,
+.hljs-class .hljs-title {
+  color: var(--syntax-class, #e6c07b);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: bold;
+}
+.hljs-link {
+  text-decoration: underline;
+}

@@ -12,6 +12,7 @@ import {
 import type { MemoryRecallChipData } from "../features/memory";
 import { effectiveModelPreference } from "../features/workspace/companionStore";
 import { EmptyState } from "./EmptyState";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 import { MemoryRecallChip } from "./MemoryRecallChip";
 import { ToolCallChip } from "./ToolCallChip";
 
@@ -130,7 +131,11 @@ export function ChatSurface({
                 className={`chat-message chat-message--${message.role}`}
                 key={message.id}
               >
-                <p>{message.content || (message.status === "streaming" ? "Thinking…" : "")}</p>
+                {message.role === "assistant" && message.content ? (
+                  <MarkdownRenderer content={message.content} />
+                ) : (
+                  <p>{message.content || (message.status === "streaming" ? "Thinking…" : "")}</p>
+                )}
                 {message.errorMessage ? (
                   <span className="chat-message__error">{message.errorMessage}</span>
                 ) : null}

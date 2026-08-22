@@ -1,7 +1,7 @@
 pub(crate) mod repository;
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -152,6 +152,7 @@ impl ChatState {
                 ModelResolver::open(database_path)?,
                 PreferenceRepository::open(database_path)?,
                 StreamingService::new(Arc::new(InferenceGateway::default())),
+                database_path.to_owned(),
             )),
         })
     }
@@ -162,6 +163,9 @@ struct ChatService {
     model_resolver: ModelResolver,
     preferences: PreferenceRepository,
     streaming: StreamingService<InferenceExecution, InferenceDelta>,
+    /// Handed to ToolContext so the search_conversations tool can open its
+    /// own read connection — no contention with the streaming writer.
+    database_path: PathBuf,
 }
 
 impl ChatService {
@@ -170,12 +174,14 @@ impl ChatService {
         model_resolver: ModelResolver,
         preferences: PreferenceRepository,
         streaming: StreamingService<InferenceExecution, InferenceDelta>,
+        database_path: PathBuf,
     ) -> Self {
         Self {
             repository,
             model_resolver,
             preferences,
             streaming,
+            database_path,
         }
     }
 
@@ -277,6 +283,8 @@ impl ChatService {
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .map(str::to_owned),
+            archive_database_path: Some(self.database_path.clone()),
+            conversation_id: Some(accepted.conversation.id.clone()),
         };
 
         Ok(PreparedSubmission {
@@ -365,6 +373,31 @@ impl ChatStreamAdapter {
             .lock()
             .map(|mut calls| std::mem::take(&mut *calls))
             .map_err(|_| StreamError::new("the tool call buffer was poisoned"))
+    }
+
+    /// A model often stops mid-sentence to call a tool, and the next round's
+    /// text would glue straight onto it ("…locked in for theCarved." — s486).
+    /// Before a continuation round, close the seam with a paragraph break —
+    /// pushed into the buffer AND emitted as a delta, so the live view and the
+    /// persisted message stay byte-identical.
+    fn separate_rounds(&self) -> Result<(), StreamError> {
+        let mut content = self
+            .content
+            .lock()
+            .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))?;
+        if content.is_empty() || content.ends_with("\n\n") {
+            return Ok(());
+        }
+        let separator = if content.ends_with('\n') { "\n" } else { "\n\n" };
+        content.push_str(separator);
+        drop(content);
+        let _ = self.on_event.send(ChatEvent::AssistantDelta {
+            conversation_id: self.conversation_id.clone(),
+            message_id: self.message_id.clone(),
+            sequence: 0,
+            delta: separator.to_owned(),
+        });
+        Ok(())
     }
 }
 
@@ -576,6 +609,18 @@ pub(crate) async fn submit_message(
                 .messages
                 .push(InferenceMessage::tool_result(call.id, text));
         }
+
+        // Seam between this round's text and the continuation round's.
+        if let Err(error) = adapter.separate_rounds() {
+            return Err(fail_stream(
+                Arc::clone(&service),
+                &on_event,
+                &assistant.conversation_id,
+                &assistant.id,
+                error.to_string(),
+            )
+            .await);
+        }
     }
 
     let content = match adapter.content() {
@@ -727,6 +772,7 @@ mod tests {
                 PreferenceRepository::open(&database_path)
                     .expect("preference repository should open"),
                 StreamingService::new(Arc::new(InferenceGateway::default())),
+                database_path.clone(),
             );
             let accepted = service
                 .submit(SubmitMessageInput {
