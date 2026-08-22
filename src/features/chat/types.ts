@@ -44,6 +44,30 @@ export interface SubmitMessageInput {
   /** Recalled memory + time blocks — rides the inference request as a leading
    *  system message, never persisted into the conversation. */
   memoryContext?: string | null;
+  /** The memory agent backing the recall_memory tool; null = tool undeclared. */
+  memoryAgentId?: string | null;
+}
+
+/** What the 📖 chip renders for one tool call — latest lifecycle state. */
+export interface ToolCallChipItem {
+  callId: string;
+  name: string;
+  arguments: string;
+  status: "running" | "ok" | "error";
+  detail: string | null;
+}
+
+/** One tool call's lifecycle on an assistant message — instrument data,
+ *  runtime-held like the 🧠 chip, never persisted. */
+export interface ToolCallEvent {
+  kind: "toolCall";
+  conversationId: string;
+  messageId: string;
+  callId: string;
+  name: string;
+  arguments: string;
+  status: "running" | "ok" | "error";
+  detail: string | null;
 }
 
 export interface UpdateConversationModelPreferenceInput {
@@ -67,4 +91,5 @@ export type ChatEvent =
       conversationId: string;
       messageId: string | null;
       message: string;
-    };
+    }
+  | ToolCallEvent;

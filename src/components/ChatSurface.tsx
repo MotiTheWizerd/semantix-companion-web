@@ -1,7 +1,7 @@
 import { useEffect, useRef, type FormEvent, type KeyboardEvent } from "react";
 
 import { onConversationScrollToEnd } from "../features/chat/chatScrollEvents";
-import type { ChatMessage } from "../features/chat/types";
+import type { ChatMessage, ToolCallChipItem } from "../features/chat/types";
 import type { ConfiguredModel } from "../features/models/configuredModels/types";
 import {
   modelPreferenceFromValue,
@@ -13,6 +13,7 @@ import type { MemoryRecallChipData } from "../features/memory";
 import { effectiveModelPreference } from "../features/workspace/companionStore";
 import { EmptyState } from "./EmptyState";
 import { MemoryRecallChip } from "./MemoryRecallChip";
+import { ToolCallChip } from "./ToolCallChip";
 
 function AttachIcon() {
   return (
@@ -39,6 +40,8 @@ interface ChatSurfaceProps {
   notice: string | null;
   /** 🧠 chip data per sent user message — live-session only. */
   recallByMessageId: Record<string, MemoryRecallChipData>;
+  /** 📖 tool chips per assistant message — live-session only. */
+  toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
   content: string;
   configuredModels: ConfiguredModel[];
   modelPreference: ModelPreference;
@@ -56,6 +59,7 @@ export function ChatSurface({
   error,
   notice,
   recallByMessageId,
+  toolCallsByMessageId,
   content,
   configuredModels,
   modelPreference,
@@ -120,6 +124,7 @@ export function ChatSurface({
         >
           {messages.map((message) => {
             const recall = recallByMessageId[message.id];
+            const toolCalls = toolCallsByMessageId[message.id];
             return (
               <article
                 className={`chat-message chat-message--${message.role}`}
@@ -130,6 +135,7 @@ export function ChatSurface({
                   <span className="chat-message__error">{message.errorMessage}</span>
                 ) : null}
                 {recall ? <MemoryRecallChip data={recall} /> : null}
+                {toolCalls ? <ToolCallChip calls={toolCalls} /> : null}
               </article>
             );
           })}

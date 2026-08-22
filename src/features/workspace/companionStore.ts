@@ -13,6 +13,7 @@ import type {
   ChatEvent,
   ChatMessage,
   Conversation,
+  ToolCallChipItem,
 } from "../chat/types";
 import {
   listConfiguredModels,
@@ -50,6 +51,8 @@ interface ConversationRuntime {
   /** 🧠 chip per sent user message — live-session instrument, not persisted,
    *  so it dies with the runtime entry (reload = no chips, by design). */
   recallByMessageId: Record<string, MemoryRecallChipData>;
+  /** 📖 tool chips per assistant message — same live-session contract. */
+  toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
 }
 
 interface CompanionStore {
@@ -126,7 +129,19 @@ function emptyRuntime(isLoading = false): ConversationRuntime {
     isStreaming: false,
     error: null,
     recallByMessageId: {},
+    toolCallsByMessageId: {},
   };
+}
+
+/** Upsert one tool-call lifecycle event into a message's chip list —
+ *  "running" appends, "ok"/"error" replaces the running entry in place. */
+function reconcileToolCall(
+  calls: ToolCallChipItem[],
+  event: ToolCallChipItem,
+): ToolCallChipItem[] {
+  const index = calls.findIndex((call) => call.callId === event.callId);
+  if (index < 0) return [...calls, event];
+  return calls.map((call, at) => (at === index ? event : call));
 }
 
 function errorMessage(error: unknown): string {
@@ -316,6 +331,8 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
               error: null,
               recallByMessageId:
                 state.runtimeByConversationId[conversationId]?.recallByMessageId ?? {},
+              toolCallsByMessageId:
+                state.runtimeByConversationId[conversationId]?.toolCallsByMessageId ?? {},
             },
           },
         };
@@ -517,6 +534,29 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
             : event.conversationId;
         const runtimeState =
           state.runtimeByConversationId[conversationId] ?? emptyRuntime();
+        if (event.kind === "toolCall") {
+          return {
+            runtimeByConversationId: {
+              ...state.runtimeByConversationId,
+              [conversationId]: {
+                ...runtimeState,
+                toolCallsByMessageId: {
+                  ...runtimeState.toolCallsByMessageId,
+                  [event.messageId]: reconcileToolCall(
+                    runtimeState.toolCallsByMessageId[event.messageId] ?? [],
+                    {
+                      callId: event.callId,
+                      name: event.name,
+                      arguments: event.arguments,
+                      status: event.status,
+                      detail: event.detail,
+                    },
+                  ),
+                },
+              },
+            },
+          };
+        }
         if (event.kind === "assistantStarted") {
           return {
             runtimeByConversationId: {
@@ -607,6 +647,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           modelPreference: tab.modelPreference,
           content: message,
           memoryContext: memory?.injection || null,
+          memoryAgentId: memory?.agentId ?? null,
         },
         handleChatEvent,
       );

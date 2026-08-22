@@ -291,6 +291,33 @@ pub(crate) async fn recall_memories(
         .map_err(|error| format!("The recall result could not be read: {error}"))
 }
 
+/// One full memory by its exact name — the drill-down behind the model's
+/// `recall_memory` tool. Not a command: the chat tool loop is the only caller.
+pub(crate) async fn fetch_memory(
+    agent_id: &str,
+    name: &str,
+) -> Result<serde_json::Value, String> {
+    let bearer = organ_bearer().await?;
+    let response = reqwest::Client::new()
+        .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories/{name}"))
+        .bearer_auth(&bearer)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|error| format!("The memory organ could not be reached: {error}"))?;
+    let status = response.status();
+    if status.as_u16() == 404 {
+        return Err(format!("no memory named \"{name}\" exists"));
+    }
+    if !status.is_success() {
+        return Err(format!("memory fetch failed: HTTP {}", status.as_u16()));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("The memory could not be read: {error}"))
+}
+
 #[tauri::command]
 pub(crate) async fn sleep_conversation(
     state: State<'_, MemoryState>,

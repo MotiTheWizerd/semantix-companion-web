@@ -7,6 +7,6 @@ mod providers;
 pub(crate) use gateway::{InferenceExecution, InferenceGateway};
 pub(crate) use protocol::{
     ContentPart, FinishReason, InferenceDelta, InferenceMessage, InferenceRequest, ModelTarget,
-    Role, TokenUsage,
+    Role, TokenUsage, ToolCall, ToolDeclaration,
 };
 pub(crate) use provider::ProviderCredential;

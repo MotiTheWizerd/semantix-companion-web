@@ -117,6 +117,7 @@ mod tests {
                         model_id: "test-stream".to_owned(),
                     },
                     messages: Vec::new(),
+                    tools: Vec::new(),
                 },
                 &ProviderCredential::None,
                 &collector,

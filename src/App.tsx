@@ -89,6 +89,7 @@ export function App() {
             error={activeTab?.error ?? runtime?.error ?? null}
             notice={activeTab?.notice ?? null}
             recallByMessageId={runtime?.recallByMessageId ?? {}}
+            toolCallsByMessageId={runtime?.toolCallsByMessageId ?? {}}
             content={activeTab?.draft ?? ""}
             configuredModels={configuredModels}
             modelPreference={activeTab?.modelPreference ?? { mode: "inherit" }}

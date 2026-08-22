@@ -7,7 +7,7 @@ use crate::{
     inference::{
         capabilities::ProviderCapabilities,
         provider::{InferenceProvider, ProviderCredential},
-        ContentPart, FinishReason, InferenceDelta, InferenceRequest, Role, TokenUsage,
+        ContentPart, FinishReason, InferenceDelta, InferenceRequest, Role, TokenUsage, ToolCall,
     },
     streaming::{DeltaSink, StreamError},
 };
@@ -66,6 +66,7 @@ impl InferenceProvider for TogetherProvider {
         }
 
         let mut decoder = SseDecoder::default();
+        let mut assembler = ToolCallAssembler::default();
         let mut bytes = response.bytes_stream();
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|error| {
@@ -73,17 +74,19 @@ impl InferenceProvider for TogetherProvider {
             })?;
             for data in decoder.push(&chunk)? {
                 if data == "[DONE]" {
+                    assembler.flush(sink)?;
                     return Ok(());
                 }
-                emit_chunk(&data, sink)?;
+                emit_chunk(&data, sink, &mut assembler)?;
             }
         }
 
         for data in decoder.finish()? {
             if data != "[DONE]" {
-                emit_chunk(&data, sink)?;
+                emit_chunk(&data, sink, &mut assembler)?;
             }
         }
+        assembler.flush(sink)?;
         Ok(())
     }
 }
@@ -91,8 +94,12 @@ impl InferenceProvider for TogetherProvider {
 #[derive(Serialize)]
 struct TogetherRequest<'a> {
     model: &'a str,
-    messages: Vec<TogetherMessage>,
+    messages: Vec<TogetherMessage<'a>>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<TogetherToolDeclaration<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
 }
 
 impl<'a> TogetherRequest<'a> {
@@ -108,6 +115,7 @@ impl<'a> TogetherRequest<'a> {
                     Role::System => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
+                    Role::Tool => "tool",
                 };
                 let content = message
                     .content
@@ -116,22 +124,89 @@ impl<'a> TogetherRequest<'a> {
                         ContentPart::Text { text } => text.as_str(),
                     })
                     .collect::<String>();
-                TogetherMessage { role, content }
+                TogetherMessage {
+                    role,
+                    content,
+                    tool_calls: (!message.tool_calls.is_empty()).then(|| {
+                        message
+                            .tool_calls
+                            .iter()
+                            .map(|call| TogetherToolCallOut {
+                                id: &call.id,
+                                kind: "function",
+                                function: TogetherFunctionOut {
+                                    name: &call.name,
+                                    arguments: &call.arguments,
+                                },
+                            })
+                            .collect()
+                    }),
+                    tool_call_id: message.tool_call_id.as_deref(),
+                }
             })
             .collect();
+
+        let tools = (!request.tools.is_empty()).then(|| {
+            request
+                .tools
+                .iter()
+                .map(|tool| TogetherToolDeclaration {
+                    kind: "function",
+                    function: TogetherFunctionDeclaration {
+                        name: &tool.name,
+                        description: &tool.description,
+                        parameters: &tool.parameters,
+                    },
+                })
+                .collect()
+        });
 
         Ok(Self {
             model: &request.target.model_id,
             messages,
             stream: true,
+            tool_choice: tools.is_some().then_some("auto"),
+            tools,
         })
     }
 }
 
 #[derive(Serialize)]
-struct TogetherMessage {
+struct TogetherMessage<'a> {
     role: &'static str,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<TogetherToolCallOut<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct TogetherToolDeclaration<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: TogetherFunctionDeclaration<'a>,
+}
+
+#[derive(Serialize)]
+struct TogetherFunctionDeclaration<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct TogetherToolCallOut<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: TogetherFunctionOut<'a>,
+}
+
+#[derive(Serialize)]
+struct TogetherFunctionOut<'a> {
+    name: &'a str,
+    arguments: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +243,69 @@ struct TogetherDelta {
     content: Option<String>,
     #[serde(alias = "reasoning_content")]
     reasoning: Option<String>,
+    tool_calls: Option<Vec<TogetherToolCallDelta>>,
+}
+
+/// One streamed tool-call fragment. The first fragment for an `index`
+/// carries the id + name; later ones append `arguments` text.
+#[derive(Deserialize)]
+struct TogetherToolCallDelta {
+    #[serde(default)]
+    index: usize,
+    id: Option<String>,
+    function: Option<TogetherFunctionDelta>,
+}
+
+#[derive(Deserialize)]
+struct TogetherFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+/// Accumulates streamed tool-call fragments; `flush` emits each completed
+/// call exactly once, ahead of the Finish delta the same chunk carries.
+#[derive(Default)]
+struct ToolCallAssembler {
+    calls: Vec<ToolCall>,
+    flushed: bool,
+}
+
+impl ToolCallAssembler {
+    fn absorb(&mut self, fragment: TogetherToolCallDelta) {
+        while self.calls.len() <= fragment.index {
+            self.calls.push(ToolCall {
+                id: String::new(),
+                name: String::new(),
+                arguments: String::new(),
+            });
+        }
+        let call = &mut self.calls[fragment.index];
+        if let Some(id) = fragment.id.filter(|id| !id.is_empty()) {
+            call.id = id;
+        }
+        if let Some(function) = fragment.function {
+            if let Some(name) = function.name.filter(|name| !name.is_empty()) {
+                call.name = name;
+            }
+            if let Some(arguments) = function.arguments {
+                call.arguments.push_str(&arguments);
+            }
+        }
+    }
+
+    fn flush(&mut self, sink: &dyn DeltaSink<InferenceDelta>) -> Result<(), StreamError> {
+        if self.flushed {
+            return Ok(());
+        }
+        self.flushed = true;
+        for call in self.calls.drain(..) {
+            if call.name.is_empty() {
+                continue;
+            }
+            sink.emit_delta(InferenceDelta::ToolCall(call))?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -177,7 +315,11 @@ struct TogetherUsage {
     total_tokens: u64,
 }
 
-fn emit_chunk(data: &str, sink: &dyn DeltaSink<InferenceDelta>) -> Result<(), StreamError> {
+fn emit_chunk(
+    data: &str,
+    sink: &dyn DeltaSink<InferenceDelta>,
+    assembler: &mut ToolCallAssembler,
+) -> Result<(), StreamError> {
     let chunk: TogetherChunk = serde_json::from_str(data).map_err(|error| {
         StreamError::new(format!("Together sent an invalid stream event: {error}"))
     })?;
@@ -194,7 +336,13 @@ fn emit_chunk(data: &str, sink: &dyn DeltaSink<InferenceDelta>) -> Result<(), St
         if let Some(text) = choice.delta.reasoning.filter(|text| !text.is_empty()) {
             sink.emit_delta(InferenceDelta::Reasoning { text })?;
         }
+        for fragment in choice.delta.tool_calls.into_iter().flatten() {
+            assembler.absorb(fragment);
+        }
         if let Some(reason) = choice.finish_reason {
+            // Assembled calls must land before Finish — the chat loop reads
+            // them off the sink to decide whether another round is owed.
+            assembler.flush(sink)?;
             sink.emit_delta(InferenceDelta::Finish(FinishReason::from_provider(&reason)))?;
         }
     }
@@ -303,8 +451,8 @@ mod tests {
     use super::{emit_chunk, together_http_error, SseDecoder, TogetherRequest};
     use crate::{
         inference::{
-            ContentPart, FinishReason, InferenceDelta, InferenceMessage, InferenceRequest,
-            ModelTarget, Role,
+            FinishReason, InferenceDelta, InferenceMessage, InferenceRequest, ModelTarget, Role,
+            ToolCall,
         },
         streaming::{DeltaSink, StreamError},
     };
@@ -327,12 +475,8 @@ mod tests {
                 provider_id: "together".to_owned(),
                 model_id: "meta-llama/test".to_owned(),
             },
-            messages: vec![InferenceMessage {
-                role: Role::System,
-                content: vec![ContentPart::Text {
-                    text: "Be concise.".to_owned(),
-                }],
-            }],
+            messages: vec![InferenceMessage::text(Role::System, "Be concise.")],
+            tools: Vec::new(),
         };
         let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
         let value = serde_json::to_value(mapped).expect("request should serialize");
@@ -340,6 +484,81 @@ mod tests {
         assert_eq!(value["messages"][0]["role"], "system");
         assert_eq!(value["messages"][0]["content"], "Be concise.");
         assert_eq!(value["stream"], true);
+        assert!(value.get("tools").is_none());
+        assert!(value.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn tool_declarations_and_results_map_to_the_openai_wire_shape() {
+        let request = InferenceRequest {
+            id: "request-2".to_owned(),
+            target: ModelTarget {
+                provider_id: "together".to_owned(),
+                model_id: "meta-llama/test".to_owned(),
+            },
+            messages: vec![
+                InferenceMessage::text(Role::User, "What do you remember?"),
+                InferenceMessage::assistant_tool_calls(
+                    String::new(),
+                    vec![ToolCall {
+                        id: "call-1".to_owned(),
+                        name: "recall_memory".to_owned(),
+                        arguments: r#"{"name":"the-memory"}"#.to_owned(),
+                    }],
+                ),
+                InferenceMessage::tool_result("call-1".to_owned(), "the full body"),
+            ],
+            tools: vec![crate::inference::ToolDeclaration {
+                name: "recall_memory".to_owned(),
+                description: "Fetch one memory.".to_owned(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        };
+        let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
+        let value = serde_json::to_value(mapped).expect("request should serialize");
+        assert_eq!(value["tool_choice"], "auto");
+        assert_eq!(value["tools"][0]["type"], "function");
+        assert_eq!(value["tools"][0]["function"]["name"], "recall_memory");
+        assert_eq!(value["messages"][1]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(
+            value["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            r#"{"name":"the-memory"}"#
+        );
+        assert_eq!(value["messages"][2]["role"], "tool");
+        assert_eq!(value["messages"][2]["tool_call_id"], "call-1");
+        assert_eq!(value["messages"][2]["content"], "the full body");
+    }
+
+    #[test]
+    fn streamed_tool_call_fragments_assemble_and_flush_before_finish() {
+        let collector = Collector::default();
+        let mut assembler = super::ToolCallAssembler::default();
+        emit_chunk(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-9","function":{"name":"recall_memory","arguments":"{\"na"}}]},"finish_reason":null}]}"#,
+            &collector,
+            &mut assembler,
+        )
+        .expect("first fragment should absorb");
+        emit_chunk(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"me\":\"x\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            &collector,
+            &mut assembler,
+        )
+        .expect("final fragment should flush");
+
+        let events = collector.0.lock().expect("collector should lock");
+        assert_eq!(
+            events[0],
+            InferenceDelta::ToolCall(ToolCall {
+                id: "call-9".to_owned(),
+                name: "recall_memory".to_owned(),
+                arguments: r#"{"name":"x"}"#.to_owned(),
+            })
+        );
+        assert_eq!(
+            events[1],
+            InferenceDelta::Finish(FinishReason::ToolCalls)
+        );
     }
 
     #[test]
@@ -363,6 +582,7 @@ mod tests {
         emit_chunk(
             r#"{"choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
             &collector,
+            &mut super::ToolCallAssembler::default(),
         )
         .expect("chunk should normalize");
         let events = collector.0.lock().expect("collector should lock");

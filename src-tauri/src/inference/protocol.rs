@@ -4,17 +4,43 @@ pub(crate) struct ModelTarget {
     pub(crate) model_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InferenceRequest {
     pub(crate) id: String,
     pub(crate) target: ModelTarget,
     pub(crate) messages: Vec<InferenceMessage>,
+    /// Tools the model may call this turn. Empty = plain completion; the
+    /// provider mapping omits the field entirely so tool-less requests stay
+    /// byte-identical to the pre-tooling wire shape.
+    pub(crate) tools: Vec<ToolDeclaration>,
+}
+
+/// One callable tool, provider-agnostic. `parameters` is a JSON Schema for
+/// the arguments object, passed through to the provider untouched.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ToolDeclaration {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) parameters: serde_json::Value,
+}
+
+/// A completed tool call as the model emitted it. `arguments` stays the raw
+/// JSON string the provider streamed — parsing is the executor's business.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ToolCall {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InferenceMessage {
     pub(crate) role: Role,
     pub(crate) content: Vec<ContentPart>,
+    /// Set on an assistant message that requested tool calls.
+    pub(crate) tool_calls: Vec<ToolCall>,
+    /// Set on a `Role::Tool` message: which call this result answers.
+    pub(crate) tool_call_id: Option<String>,
 }
 
 impl InferenceMessage {
@@ -22,6 +48,33 @@ impl InferenceMessage {
         Self {
             role,
             content: vec![ContentPart::Text { text: text.into() }],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// The assistant turn that asked for tools — text the model produced in
+    /// the same round (may be empty) plus the calls themselves.
+    pub(crate) fn assistant_tool_calls(text: String, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentPart::Text { text }]
+            },
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// One executed tool's output, folded back for the model to read.
+    pub(crate) fn tool_result(tool_call_id: String, text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: vec![ContentPart::Text { text: text.into() }],
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id),
         }
     }
 }
@@ -31,6 +84,7 @@ pub(crate) enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +96,9 @@ pub(crate) enum ContentPart {
 pub(crate) enum InferenceDelta {
     Text { text: String },
     Reasoning { text: String },
+    /// A fully assembled tool call — providers accumulate the streamed
+    /// fragments and emit one of these per call, before the Finish delta.
+    ToolCall(ToolCall),
     Usage(TokenUsage),
     Finish(FinishReason),
 }

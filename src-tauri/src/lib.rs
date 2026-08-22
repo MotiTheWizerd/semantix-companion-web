@@ -4,6 +4,7 @@ mod credentials;
 mod database;
 mod inference;
 mod memory;
+mod tools;
 mod models;
 mod preferences;
 mod secret_vault;

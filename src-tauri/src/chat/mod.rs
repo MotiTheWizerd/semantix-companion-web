@@ -15,12 +15,17 @@ use crate::{
     credentials::unix_timestamp_ms,
     inference::{
         InferenceDelta, InferenceExecution, InferenceGateway, InferenceMessage, InferenceRequest,
-        ModelTarget, ProviderCredential, Role,
+        ModelTarget, ProviderCredential, Role, ToolCall,
     },
     models::ModelResolver,
     preferences::{ModelPreference, PreferenceRepository},
     streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
+    tools::{self, ToolContext},
 };
+
+/// Ceiling on execute-and-continue rounds per submission — a runaway model
+/// stops re-calling tools after this many, its last text standing as the reply.
+const MAX_TOOL_ROUNDS: usize = 4;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +80,10 @@ pub(crate) struct SubmitMessageInput {
     /// never persisted, so the stored conversation stays clean of injections.
     #[serde(default)]
     memory_context: Option<String>,
+    /// The memory agent whose store backs the `recall_memory` tool. None =
+    /// memory off for this send, so the tool is never declared.
+    #[serde(default)]
+    memory_agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +120,21 @@ pub(crate) enum ChatEvent {
         #[serde(rename = "messageId")]
         message_id: Option<String>,
         message: String,
+    },
+    /// One tool call's lifecycle on the assistant message — emitted with
+    /// status "running", then again with "ok" or "error". Instrument data
+    /// only, like the 🧠 chip: runtime-held, never persisted.
+    ToolCall {
+        #[serde(rename = "conversationId")]
+        conversation_id: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+        #[serde(rename = "callId")]
+        call_id: String,
+        name: String,
+        arguments: String,
+        status: &'static str,
+        detail: Option<String>,
     },
 }
 
@@ -246,6 +270,15 @@ impl ChatService {
             messages.insert(0, InferenceMessage::text(Role::System, memory_context.to_owned()));
         }
 
+        let tool_context = ToolContext {
+            memory_agent_id: input
+                .memory_agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned),
+        };
+
         Ok(PreparedSubmission {
             provider_id: target.provider_id.clone(),
             model_id: target.model_id.clone(),
@@ -255,9 +288,11 @@ impl ChatService {
                     id: Uuid::new_v4().to_string(),
                     target,
                     messages,
+                    tools: tools::declarations(&tool_context),
                 },
                 credential,
             },
+            tool_context,
         })
     }
 
@@ -292,6 +327,7 @@ struct PreparedSubmission {
     execution: InferenceExecution,
     provider_id: String,
     model_id: String,
+    tool_context: ToolContext,
 }
 
 struct ChatStreamAdapter {
@@ -300,6 +336,9 @@ struct ChatStreamAdapter {
     message_id: String,
     on_event: Channel<ChatEvent>,
     content: Mutex<String>,
+    /// Tool calls the model requested in the round currently streaming;
+    /// drained by the chat loop between rounds.
+    tool_calls: Mutex<Vec<ToolCall>>,
 }
 
 impl ChatStreamAdapter {
@@ -310,6 +349,7 @@ impl ChatStreamAdapter {
             assistant,
             on_event,
             content: Mutex::new(String::new()),
+            tool_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -318,6 +358,13 @@ impl ChatStreamAdapter {
             .lock()
             .map(|content| content.clone())
             .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))
+    }
+
+    fn take_tool_calls(&self) -> Result<Vec<ToolCall>, StreamError> {
+        self.tool_calls
+            .lock()
+            .map(|mut calls| std::mem::take(&mut *calls))
+            .map_err(|_| StreamError::new("the tool call buffer was poisoned"))
     }
 }
 
@@ -329,8 +376,8 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
                     message: self.assistant.clone(),
                 });
             }
-            StreamEvent::Delta { sequence, payload } => {
-                if let InferenceDelta::Text { text } = payload {
+            StreamEvent::Delta { sequence, payload } => match payload {
+                InferenceDelta::Text { text } => {
                     self.content
                         .lock()
                         .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))?
@@ -342,7 +389,16 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
                         delta: text,
                     });
                 }
-            }
+                InferenceDelta::ToolCall(call) => {
+                    self.tool_calls
+                        .lock()
+                        .map_err(|_| StreamError::new("the tool call buffer was poisoned"))?
+                        .push(call);
+                }
+                InferenceDelta::Reasoning { .. }
+                | InferenceDelta::Usage(_)
+                | InferenceDelta::Finish(_) => {}
+            },
             StreamEvent::Completed | StreamEvent::Failed { .. } => {}
         }
         Ok(())
@@ -398,9 +454,10 @@ pub(crate) async fn submit_message(
         .map_err(String::from)?;
     let PreparedSubmission {
         accepted,
-        execution,
+        mut execution,
         provider_id,
         model_id,
+        tool_context,
     } = prepared;
 
     let _ = on_event.send(ChatEvent::Accepted {
@@ -430,16 +487,95 @@ pub(crate) async fn submit_message(
     };
 
     let adapter = ChatStreamAdapter::new(assistant.clone(), on_event.clone());
-    if let Err(error) = service.streaming.stream(&execution, &adapter).await {
-        let message = error.to_string();
-        return Err(fail_stream(
-            Arc::clone(&service),
-            &on_event,
-            &assistant.conversation_id,
-            &assistant.id,
-            message,
-        )
-        .await);
+
+    // The execute-and-continue loop: stream a round; if the model requested
+    // tools, run them backend-side, fold the results into the request, and
+    // stream again. Text keeps landing on the SAME assistant message, so the
+    // UI sees one continuous reply.
+    let mut rounds = 0;
+    loop {
+        let round_start = adapter.content().map(|content| content.len());
+        let round_start = match round_start {
+            Ok(length) => length,
+            Err(error) => {
+                return Err(fail_stream(
+                    Arc::clone(&service),
+                    &on_event,
+                    &assistant.conversation_id,
+                    &assistant.id,
+                    error.to_string(),
+                )
+                .await);
+            }
+        };
+
+        if let Err(error) = service.streaming.stream(&execution, &adapter).await {
+            let message = error.to_string();
+            return Err(fail_stream(
+                Arc::clone(&service),
+                &on_event,
+                &assistant.conversation_id,
+                &assistant.id,
+                message,
+            )
+            .await);
+        }
+
+        let calls = match adapter.take_tool_calls() {
+            Ok(calls) => calls,
+            Err(error) => {
+                return Err(fail_stream(
+                    Arc::clone(&service),
+                    &on_event,
+                    &assistant.conversation_id,
+                    &assistant.id,
+                    error.to_string(),
+                )
+                .await);
+            }
+        };
+        if calls.is_empty() || rounds >= MAX_TOOL_ROUNDS {
+            break;
+        }
+        rounds += 1;
+
+        let round_text = adapter
+            .content()
+            .map(|content| content[round_start..].to_owned())
+            .unwrap_or_default();
+        execution
+            .request
+            .messages
+            .push(InferenceMessage::assistant_tool_calls(round_text, calls.clone()));
+
+        for call in calls {
+            let _ = on_event.send(ChatEvent::ToolCall {
+                conversation_id: assistant.conversation_id.clone(),
+                message_id: assistant.id.clone(),
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                status: "running",
+                detail: None,
+            });
+            let result = tools::execute(&call, &tool_context).await;
+            let _ = on_event.send(ChatEvent::ToolCall {
+                conversation_id: assistant.conversation_id.clone(),
+                message_id: assistant.id.clone(),
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                status: if result.is_ok() { "ok" } else { "error" },
+                detail: result.as_ref().err().cloned(),
+            });
+            // A failed tool becomes a result the model reads and recovers
+            // from — it never kills the stream.
+            let text = result.unwrap_or_else(|error| format!("Tool error: {error}"));
+            execution
+                .request
+                .messages
+                .push(InferenceMessage::tool_result(call.id, text));
+        }
     }
 
     let content = match adapter.content() {
@@ -598,6 +734,7 @@ mod tests {
                     model_preference: ModelPreference::Inherit,
                     content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
                     memory_context: None,
+                    memory_agent_id: None,
                 })
                 .expect("message should persist");
 

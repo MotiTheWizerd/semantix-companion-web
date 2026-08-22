@@ -34,6 +34,9 @@ export interface MemoryRide {
   /** Everything that rides ahead of the user's message; '' = nothing. */
   injection: string;
   chip: MemoryRecallChipData;
+  /** The resolved memory agent — backs the recall_memory tool on this send;
+   *  null when the pass failed before the agent resolved. */
+  agentId: string | null;
 }
 
 /** null = memory did not ride AND has nothing to show (no account, gated off).
@@ -77,6 +80,7 @@ export async function runMemoryPreSend(
     ) => ({ name: hit.memory.name, memType: hit.memory.mem_type, score: hit.score, mirror });
     return {
       injection: report.injection,
+      agentId,
       chip: {
         hits: [
           ...report.hits.map((hit) => toChipHit(hit, false)),
@@ -90,6 +94,7 @@ export async function runMemoryPreSend(
   } catch (error) {
     return {
       injection: "",
+      agentId: null,
       chip: {
         hits: [],
         vectorLeg: null,
