@@ -1,9 +1,18 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, type FormEvent, type KeyboardEvent } from "react";
 
 import { onConversationScrollToEnd } from "../features/chat/chatScrollEvents";
 import type { ChatMessage } from "../features/chat/types";
 import type { ConfiguredModel } from "../features/models/configuredModels/types";
+import {
+  modelPreferenceFromValue,
+  modelPreferenceValue,
+  type ModelPreference,
+  type UserPreferences,
+} from "../features/preferences/types";
+import type { MemoryRecallChipData } from "../features/memory";
+import { effectiveModelPreference } from "../features/workspace/companionStore";
 import { EmptyState } from "./EmptyState";
+import { MemoryRecallChip } from "./MemoryRecallChip";
 
 function AttachIcon() {
   return (
@@ -27,9 +36,15 @@ interface ChatSurfaceProps {
   isLoading: boolean;
   isSending: boolean;
   error: string | null;
+  notice: string | null;
+  /** 🧠 chip data per sent user message — live-session only. */
+  recallByMessageId: Record<string, MemoryRecallChipData>;
+  content: string;
   configuredModels: ConfiguredModel[];
-  selectedModelId: string | null;
-  onModelSelect: (modelId: string | null) => void;
+  modelPreference: ModelPreference;
+  userPreferences: UserPreferences;
+  onContentChange: (content: string) => void;
+  onModelPreferenceChange: (preference: ModelPreference) => void;
   onSend: (content: string) => Promise<void>;
 }
 
@@ -39,16 +54,26 @@ export function ChatSurface({
   isLoading,
   isSending,
   error,
+  notice,
+  recallByMessageId,
+  content,
   configuredModels,
-  selectedModelId,
-  onModelSelect,
+  modelPreference,
+  userPreferences,
+  onContentChange,
+  onModelPreferenceChange,
   onSend,
 }: ChatSurfaceProps) {
-  const [content, setContent] = useState("");
   const threadRef = useRef<HTMLElement>(null);
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
   const hasMessages = messages.length > 0;
+  const inheritedModel = effectiveModelPreference({ mode: "inherit" }, userPreferences);
+  const inheritedModelLabel =
+    inheritedModel.mode === "configured"
+      ? (configuredModels.find((model) => model.id === inheritedModel.modelId)?.displayName ??
+        "Unavailable model")
+      : "Test stream";
 
   useEffect(() => {
     let frameId: number | null = null;
@@ -74,7 +99,6 @@ export function ChatSurface({
     event.preventDefault();
     const message = content.trim();
     if (!message || isSending) return;
-    setContent("");
     await onSend(message);
   };
 
@@ -94,17 +118,21 @@ export function ChatSurface({
           aria-label="Conversation messages"
           aria-live="polite"
         >
-          {messages.map((message) => (
-            <article
-              className={`chat-message chat-message--${message.role}`}
-              key={message.id}
-            >
-              <p>{message.content || (message.status === "streaming" ? "Thinking…" : "")}</p>
-              {message.errorMessage ? (
-                <span className="chat-message__error">{message.errorMessage}</span>
-              ) : null}
-            </article>
-          ))}
+          {messages.map((message) => {
+            const recall = recallByMessageId[message.id];
+            return (
+              <article
+                className={`chat-message chat-message--${message.role}`}
+                key={message.id}
+              >
+                <p>{message.content || (message.status === "streaming" ? "Thinking…" : "")}</p>
+                {message.errorMessage ? (
+                  <span className="chat-message__error">{message.errorMessage}</span>
+                ) : null}
+                {recall ? <MemoryRecallChip data={recall} /> : null}
+              </article>
+            );
+          })}
         </section>
       ) : (
         <EmptyState />
@@ -122,7 +150,7 @@ export function ChatSurface({
           aria-describedby="composer-note"
           value={content}
           disabled={isLoading}
-          onChange={(event) => setContent(event.target.value)}
+          onChange={(event) => onContentChange(event.target.value)}
           onKeyDown={handleKeyDown}
         />
         <div className="chat-composer__toolbar">
@@ -135,13 +163,16 @@ export function ChatSurface({
           <select
             className="chat-composer__model"
             id="companion-model"
-            value={selectedModelId ?? ""}
+            value={modelPreferenceValue(modelPreference)}
             disabled={isLoading || isSending}
-            onChange={(event) => onModelSelect(event.target.value || null)}
+            onChange={(event) =>
+              onModelPreferenceChange(modelPreferenceFromValue(event.target.value))
+            }
           >
-            <option value="">Test stream</option>
+            <option value="inherit">Default · {inheritedModelLabel}</option>
+            <option value="test">Test stream</option>
             {configuredModels.map((model) => (
-              <option key={model.id} value={model.id}>
+              <option key={model.id} value={`configured:${model.id}`}>
                 {model.displayName}
               </option>
             ))}
@@ -157,7 +188,7 @@ export function ChatSurface({
         </div>
       </form>
       <p className="composer-note" id="composer-note">
-        {error ?? "Your conversations stay in your private workspace."}
+        {error ?? notice ?? "Your conversations stay in your private workspace."}
       </p>
     </main>
   );

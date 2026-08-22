@@ -1,4 +1,4 @@
-mod repository;
+pub(crate) mod repository;
 
 use std::{
     path::Path,
@@ -18,6 +18,7 @@ use crate::{
         ModelTarget, ProviderCredential, Role,
     },
     models::ModelResolver,
+    preferences::{ModelPreference, PreferenceRepository},
     streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
 };
 
@@ -26,7 +27,7 @@ use crate::{
 pub(crate) struct Conversation {
     pub(crate) id: String,
     pub(crate) title: String,
-    pub(crate) selected_model_id: Option<String>,
+    pub(crate) model_preference: ModelPreference,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) archived_at: Option<i64>,
@@ -67,8 +68,20 @@ pub(crate) struct AcceptedMessage {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SubmitMessageInput {
     conversation_id: Option<String>,
-    configured_model_id: Option<String>,
+    model_preference: ModelPreference,
     content: String,
+    /// Recalled memory + time blocks composed by the frontend's pre-send
+    /// reflexes. Rides the inference request as a leading system message —
+    /// never persisted, so the stored conversation stays clean of injections.
+    #[serde(default)]
+    memory_context: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateConversationModelPreferenceInput {
+    conversation_id: String,
+    model_preference: ModelPreference,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -113,6 +126,7 @@ impl ChatState {
             service: Arc::new(ChatService::new(
                 repository,
                 ModelResolver::open(database_path)?,
+                PreferenceRepository::open(database_path)?,
                 StreamingService::new(Arc::new(InferenceGateway::default())),
             )),
         })
@@ -122,6 +136,7 @@ impl ChatState {
 struct ChatService {
     repository: ChatRepository,
     model_resolver: ModelResolver,
+    preferences: PreferenceRepository,
     streaming: StreamingService<InferenceExecution, InferenceDelta>,
 }
 
@@ -129,11 +144,13 @@ impl ChatService {
     fn new(
         repository: ChatRepository,
         model_resolver: ModelResolver,
+        preferences: PreferenceRepository,
         streaming: StreamingService<InferenceExecution, InferenceDelta>,
     ) -> Self {
         Self {
             repository,
             model_resolver,
+            preferences,
             streaming,
         }
     }
@@ -146,6 +163,20 @@ impl ChatService {
         self.repository
             .get_thread(conversation_id)?
             .ok_or_else(|| AppError::validation("That conversation no longer exists."))
+    }
+
+    fn update_model_preference(
+        &self,
+        input: UpdateConversationModelPreferenceInput,
+    ) -> Result<Conversation, AppError> {
+        let conversation_id = input.conversation_id.trim();
+        if conversation_id.is_empty() {
+            return Err(AppError::validation("Choose an existing conversation."));
+        }
+        self.preferences
+            .validate_model_preference(&input.model_preference)?;
+        self.repository
+            .update_model_preference(conversation_id, &input.model_preference)
     }
 
     fn submit(&self, input: SubmitMessageInput) -> Result<PreparedSubmission, AppError> {
@@ -164,40 +195,37 @@ impl ChatService {
             .as_deref()
             .map(str::trim)
             .filter(|id| !id.is_empty());
-        let configured_model_id = input
-            .configured_model_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty());
-        let (selected_model_id, target, credential) =
-            if let Some(configured_model_id) = configured_model_id {
-                let model = self.model_resolver.resolve(configured_model_id)?;
-                let selected_model_id = model.configured_model_id.clone();
-                (
-                    Some(selected_model_id),
-                    ModelTarget {
-                        provider_id: model.provider_id,
-                        model_id: model.model_id,
-                    },
-                    ProviderCredential::ApiKey(model.api_key),
-                )
-            } else {
-                (
-                    None,
-                    ModelTarget {
-                        provider_id: "test".to_owned(),
-                        model_id: "test-stream".to_owned(),
-                    },
-                    ProviderCredential::None,
-                )
-            };
+        self.preferences
+            .validate_model_preference(&input.model_preference)?;
+        let configured_model_id = self.preferences.resolve_model_id(&input.model_preference)?;
+        let (target, credential) = if let Some(configured_model_id) = configured_model_id.as_deref()
+        {
+            let model = self.model_resolver.resolve(configured_model_id)?;
+            (
+                ModelTarget {
+                    provider_id: model.provider_id,
+                    model_id: model.model_id,
+                },
+                ProviderCredential::ApiKey(model.api_key),
+            )
+        } else {
+            (
+                ModelTarget {
+                    provider_id: "test".to_owned(),
+                    model_id: "test-stream".to_owned(),
+                },
+                ProviderCredential::None,
+            )
+        };
+        let (_, selected_model_id) = input.model_preference.storage_parts();
         let timestamp = unix_timestamp_ms()?;
         let new_conversation_id = Uuid::new_v4().to_string();
         let message_id = Uuid::new_v4().to_string();
         let title = conversation_title(content);
         let accepted = self.repository.commit_user_message(CommitUserMessage {
             conversation_id,
-            selected_model_id: selected_model_id.as_deref(),
+            model_preference: &input.model_preference,
+            selected_model_id,
             content,
             title: &title,
             timestamp,
@@ -208,7 +236,15 @@ impl ChatService {
             .repository
             .get_thread(&accepted.conversation.id)?
             .ok_or_else(|| AppError::internal("the accepted conversation could not be reloaded"))?;
-        let messages = canonical_messages(&thread.messages);
+        let mut messages = canonical_messages(&thread.messages);
+        if let Some(memory_context) = input
+            .memory_context
+            .as_deref()
+            .map(str::trim)
+            .filter(|context| !context.is_empty())
+        {
+            messages.insert(0, InferenceMessage::text(Role::System, memory_context.to_owned()));
+        }
 
         Ok(PreparedSubmission {
             provider_id: target.provider_id.clone(),
@@ -331,6 +367,18 @@ pub(crate) async fn get_conversation_thread(
 ) -> Result<ConversationThread, String> {
     let service = Arc::clone(&state.service);
     tauri::async_runtime::spawn_blocking(move || service.get_thread(&conversation_id))
+        .await
+        .map_err(|error| format!("Conversation task failed: {error}"))?
+        .map_err(String::from)
+}
+
+#[tauri::command]
+pub(crate) async fn update_conversation_model_preference(
+    state: State<'_, ChatState>,
+    input: UpdateConversationModelPreferenceInput,
+) -> Result<Conversation, String> {
+    let service = Arc::clone(&state.service);
+    tauri::async_runtime::spawn_blocking(move || service.update_model_preference(input))
         .await
         .map_err(|error| format!("Conversation task failed: {error}"))?
         .map_err(String::from)
@@ -494,7 +542,11 @@ mod tests {
         conversation_title, repository::ChatRepository, ChatEvent, ChatService, SubmitMessageInput,
     };
     use crate::{
-        database, inference::InferenceGateway, models::ModelResolver, streaming::StreamingService,
+        database,
+        inference::InferenceGateway,
+        models::ModelResolver,
+        preferences::{ModelPreference, PreferenceRepository},
+        streaming::StreamingService,
     };
 
     #[test]
@@ -536,13 +588,16 @@ mod tests {
             let service = ChatService::new(
                 ChatRepository::open(&database_path).expect("chat repository should open"),
                 ModelResolver::open(&database_path).expect("model resolver should open"),
+                PreferenceRepository::open(&database_path)
+                    .expect("preference repository should open"),
                 StreamingService::new(Arc::new(InferenceGateway::default())),
             );
             let accepted = service
                 .submit(SubmitMessageInput {
                     conversation_id: None,
-                    configured_model_id: None,
+                    model_preference: ModelPreference::Inherit,
                     content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
+                    memory_context: None,
                 })
                 .expect("message should persist");
 

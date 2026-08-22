@@ -1,10 +1,12 @@
+import type { ModelPreference } from "../preferences/types";
+
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type MessageStatus = "pending" | "streaming" | "completed" | "failed" | "cancelled";
 
 export interface Conversation {
   id: string;
   title: string;
-  selectedModelId: string | null;
+  modelPreference: ModelPreference;
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
@@ -37,8 +39,16 @@ export interface AcceptedMessage {
 
 export interface SubmitMessageInput {
   conversationId: string | null;
-  configuredModelId: string | null;
+  modelPreference: ModelPreference;
   content: string;
+  /** Recalled memory + time blocks — rides the inference request as a leading
+   *  system message, never persisted into the conversation. */
+  memoryContext?: string | null;
+}
+
+export interface UpdateConversationModelPreferenceInput {
+  conversationId: string;
+  modelPreference: ModelPreference;
 }
 
 export type ChatEvent =

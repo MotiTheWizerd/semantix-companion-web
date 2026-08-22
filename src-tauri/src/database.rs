@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 3;
+const LATEST_SCHEMA_VERSION: i64 = 4;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -132,6 +132,32 @@ fn migration_sql(version: i64) -> &'static str {
              CREATE INDEX IF NOT EXISTS idx_messages_conversation_sequence
                  ON messages(conversation_id, sequence);"
         }
+        4 => {
+            "ALTER TABLE conversations
+                 ADD COLUMN model_preference_mode TEXT NOT NULL DEFAULT 'test'
+                 CHECK (model_preference_mode IN ('inherit', 'test', 'configured'));
+
+             UPDATE conversations
+                 SET model_preference_mode = CASE
+                     WHEN selected_model_id IS NULL THEN 'test'
+                     ELSE 'configured'
+                 END;
+
+             CREATE TABLE user_preferences (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 default_model_mode TEXT NOT NULL
+                     CHECK (default_model_mode IN ('test', 'configured')),
+                 default_model_id TEXT,
+                 updated_at INTEGER NOT NULL,
+                 FOREIGN KEY (default_model_id)
+                     REFERENCES configured_models(id)
+                     ON DELETE SET NULL
+             );
+
+             INSERT INTO user_preferences (
+                 id, default_model_mode, default_model_id, updated_at
+             ) VALUES (1, 'test', NULL, 0);"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -161,6 +187,7 @@ mod tests {
             "configured_models",
             "conversations",
             "messages",
+            "user_preferences",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -227,5 +254,75 @@ mod tests {
             )
             .expect("chat tables should be queryable");
         assert_eq!(chat_tables, 2);
+    }
+
+    #[test]
+    fn migration_four_preserves_existing_model_selection_semantics() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE configured_models (
+                     id TEXT PRIMARY KEY,
+                     provider_id TEXT NOT NULL,
+                     model_id TEXT NOT NULL,
+                     display_name TEXT NOT NULL,
+                     credential_id TEXT,
+                     secret_ref TEXT,
+                     manual_key_hint TEXT,
+                     created_at INTEGER NOT NULL,
+                     updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE conversations (
+                     id TEXT PRIMARY KEY,
+                     title TEXT NOT NULL,
+                     selected_model_id TEXT,
+                     created_at INTEGER NOT NULL,
+                     updated_at INTEGER NOT NULL,
+                     archived_at INTEGER
+                 );
+                 INSERT INTO configured_models VALUES (
+                     'model-1', 'test', 'test-model', 'Test', NULL,
+                     'secret-1', '•••• 1234', 1, 1
+                 );
+                 INSERT INTO conversations VALUES (
+                     'conversation-configured', 'Configured', 'model-1', 1, 1, NULL
+                 );
+                 INSERT INTO conversations VALUES (
+                     'conversation-test', 'Test', NULL, 2, 2, NULL
+                 );
+                 PRAGMA user_version = 3;",
+            )
+            .expect("version three schema should be created");
+
+        migrate(&mut connection).expect("version three should upgrade");
+
+        let configured_mode: String = connection
+            .query_row(
+                "SELECT model_preference_mode FROM conversations
+                 WHERE id = 'conversation-configured'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("configured conversation should survive");
+        let test_mode: String = connection
+            .query_row(
+                "SELECT model_preference_mode FROM conversations
+                 WHERE id = 'conversation-test'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("test conversation should survive");
+        assert_eq!(configured_mode, "configured");
+        assert_eq!(test_mode, "test");
+
+        let default_mode: String = connection
+            .query_row(
+                "SELECT default_model_mode FROM user_preferences WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("default preference should be created");
+        assert_eq!(default_mode, "test");
     }
 }

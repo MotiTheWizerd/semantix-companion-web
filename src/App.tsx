@@ -1,55 +1,107 @@
-import { useState } from "react";
+import { useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { AppHeader } from "./components/AppHeader";
 import { AppSidebar } from "./components/AppSidebar";
 import { ChatSurface } from "./components/ChatSurface";
+import { ConversationTabs } from "./components/ConversationTabs";
 import { SettingsScreen } from "./components/SettingsScreen";
-import { useChatController } from "./features/chat/useChatController";
+import { useCompanionStore } from "./features/workspace/companionStore";
 
 export function App() {
-  const [activeView, setActiveView] = useState<"chat" | "settings">("chat");
-  const chat = useChatController();
-  const isSettings = activeView === "settings";
+  const {
+    activeView,
+    isInitialising,
+    conversations,
+    configuredModels,
+    userPreferences,
+    tabsById,
+    activeTabId,
+    runtimeByConversationId,
+    submittingByTabId,
+    initialise,
+    setActiveView,
+    openConversation,
+    openNewConversation,
+    setDraft,
+    setTabModelPreference,
+    sendMessage,
+  } = useCompanionStore(
+    useShallow((state) => ({
+      activeView: state.activeView,
+      isInitialising: state.isInitialising,
+      conversations: state.conversations,
+      configuredModels: state.configuredModels,
+      userPreferences: state.userPreferences,
+      tabsById: state.tabsById,
+      activeTabId: state.activeTabId,
+      runtimeByConversationId: state.runtimeByConversationId,
+      submittingByTabId: state.submittingByTabId,
+      initialise: state.initialise,
+      setActiveView: state.setActiveView,
+      openConversation: state.openConversation,
+      openNewConversation: state.openNewConversation,
+      setDraft: state.setDraft,
+      setTabModelPreference: state.setTabModelPreference,
+      sendMessage: state.sendMessage,
+    })),
+  );
 
-  const showChat = () => setActiveView("chat");
-  const startNewConversation = () => {
-    chat.startNewConversation();
-    showChat();
-  };
-  const selectConversation = (conversationId: string) => {
-    void chat.selectConversation(conversationId);
-    showChat();
-  };
+  useEffect(() => {
+    void initialise();
+  }, [initialise]);
+
+  const isSettings = activeView === "settings";
+  const activeTab = activeTabId ? tabsById[activeTabId] : null;
+  const activeConversationId = activeTab?.conversationId ?? null;
+  const runtime = activeConversationId
+    ? runtimeByConversationId[activeConversationId]
+    : undefined;
+  const isSending = Boolean(
+    (activeTabId && submittingByTabId[activeTabId]) || runtime?.isStreaming,
+  );
 
   return (
     <div className="app-shell">
       <AppSidebar
         activeView={activeView}
-        conversations={chat.conversations}
-        activeConversationId={chat.activeConversationId}
+        conversations={conversations}
+        activeConversationId={activeConversationId}
         onViewChange={setActiveView}
-        onNewConversation={startNewConversation}
-        onConversationSelect={selectConversation}
+        onNewConversation={openNewConversation}
+        onConversationSelect={(conversationId) => void openConversation(conversationId)}
       />
-      <div className="app-workspace">
+      <div className={`app-workspace ${isSettings ? "" : "has-conversation-tabs"}`}>
         <AppHeader
           eyebrow={isSettings ? "Companion" : "Conversation"}
-          title={isSettings ? "Settings" : (chat.activeConversation?.title ?? "New conversation")}
+          title={isSettings ? "Settings" : (activeTab?.title ?? "New conversation")}
           showOptions={!isSettings}
         />
+        {isSettings ? null : <ConversationTabs />}
         {isSettings ? (
           <SettingsScreen />
         ) : (
           <ChatSurface
-            activeConversationId={chat.activeConversationId}
-            messages={chat.messages}
-            isLoading={chat.isLoading}
-            isSending={chat.isSending}
-            error={chat.error}
-            configuredModels={chat.configuredModels}
-            selectedModelId={chat.selectedModelId}
-            onModelSelect={chat.selectModel}
-            onSend={chat.send}
+            activeConversationId={activeConversationId}
+            messages={runtime?.messages ?? []}
+            isLoading={isInitialising || Boolean(runtime?.isLoading)}
+            isSending={isSending}
+            error={activeTab?.error ?? runtime?.error ?? null}
+            notice={activeTab?.notice ?? null}
+            recallByMessageId={runtime?.recallByMessageId ?? {}}
+            content={activeTab?.draft ?? ""}
+            configuredModels={configuredModels}
+            modelPreference={activeTab?.modelPreference ?? { mode: "inherit" }}
+            userPreferences={userPreferences}
+            onContentChange={(content) => {
+              if (activeTabId) setDraft(activeTabId, content);
+            }}
+            onModelPreferenceChange={(preference) => {
+              if (activeTabId) void setTabModelPreference(activeTabId, preference);
+            }}
+            onSend={async (content) => {
+              if (activeTabId) await sendMessage(activeTabId, content);
+            }}
           />
         )}
       </div>

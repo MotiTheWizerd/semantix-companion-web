@@ -6,7 +6,7 @@ use std::{
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::{AcceptedMessage, Conversation, ConversationThread, Message};
-use crate::{app_error::AppError, database};
+use crate::{app_error::AppError, database, preferences::ModelPreference};
 
 pub(crate) struct ChatRepository {
     connection: Mutex<Connection>,
@@ -14,6 +14,7 @@ pub(crate) struct ChatRepository {
 
 pub(crate) struct CommitUserMessage<'a> {
     pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) model_preference: &'a ModelPreference,
     pub(crate) selected_model_id: Option<&'a str>,
     pub(crate) content: &'a str,
     pub(crate) title: &'a str,
@@ -33,7 +34,8 @@ impl ChatRepository {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
-                "SELECT id, title, selected_model_id, created_at, updated_at, archived_at
+                "SELECT id, title, model_preference_mode, selected_model_id,
+                        created_at, updated_at, archived_at
                  FROM conversations
                  WHERE archived_at IS NULL
                  ORDER BY updated_at DESC, created_at DESC",
@@ -70,7 +72,8 @@ impl ChatRepository {
         let connection = self.connection()?;
         let conversation = connection
             .query_row(
-                "SELECT id, title, selected_model_id, created_at, updated_at, archived_at
+                "SELECT id, title, model_preference_mode, selected_model_id,
+                        created_at, updated_at, archived_at
                  FROM conversations
                  WHERE id = ?1",
                 [conversation_id],
@@ -110,6 +113,7 @@ impl ChatRepository {
     ) -> Result<AcceptedMessage, AppError> {
         let CommitUserMessage {
             conversation_id,
+            model_preference,
             selected_model_id,
             content,
             title,
@@ -117,13 +121,15 @@ impl ChatRepository {
             new_conversation_id,
             message_id,
         } = input;
+        let (model_preference_mode, _) = model_preference.storage_parts();
         let mut connection = self.connection()?;
         let transaction = connection.transaction().map_err(AppError::database)?;
 
         let conversation = if let Some(conversation_id) = conversation_id {
             let mut conversation = transaction
                 .query_row(
-                    "SELECT id, title, selected_model_id, created_at, updated_at, archived_at
+                    "SELECT id, title, model_preference_mode, selected_model_id,
+                            created_at, updated_at, archived_at
                      FROM conversations
                      WHERE id = ?1 AND archived_at IS NULL",
                     [conversation_id],
@@ -134,26 +140,36 @@ impl ChatRepository {
                 .ok_or_else(|| AppError::validation("That conversation no longer exists."))?;
             transaction
                 .execute(
-                    "UPDATE conversations SET selected_model_id = ?2 WHERE id = ?1",
-                    params![conversation_id, selected_model_id],
+                    "UPDATE conversations
+                     SET selected_model_id = ?2,
+                         model_preference_mode = ?3
+                     WHERE id = ?1",
+                    params![conversation_id, selected_model_id, model_preference_mode],
                 )
                 .map_err(AppError::database)?;
-            conversation.selected_model_id = selected_model_id.map(str::to_owned);
+            conversation.model_preference = model_preference.clone();
             conversation
         } else {
             transaction
                 .execute(
                     "INSERT INTO conversations (
-                        id, title, selected_model_id, created_at, updated_at, archived_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?4, NULL)",
-                    params![new_conversation_id, title, selected_model_id, timestamp],
+                        id, title, selected_model_id, created_at, updated_at, archived_at,
+                        model_preference_mode
+                     ) VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?5)",
+                    params![
+                        new_conversation_id,
+                        title,
+                        selected_model_id,
+                        timestamp,
+                        model_preference_mode
+                    ],
                 )
                 .map_err(AppError::database)?;
 
             Conversation {
                 id: new_conversation_id.to_owned(),
                 title: title.to_owned(),
-                selected_model_id: selected_model_id.map(str::to_owned),
+                model_preference: model_preference.clone(),
                 created_at: timestamp,
                 updated_at: timestamp,
                 archived_at: None,
@@ -208,6 +224,37 @@ impl ChatRepository {
                 completed_at: Some(timestamp),
             },
         })
+    }
+
+    pub(crate) fn update_model_preference(
+        &self,
+        conversation_id: &str,
+        model_preference: &ModelPreference,
+    ) -> Result<Conversation, AppError> {
+        let (mode, selected_model_id) = model_preference.storage_parts();
+        let connection = self.connection()?;
+        let changed = connection
+            .execute(
+                "UPDATE conversations
+                 SET model_preference_mode = ?2,
+                     selected_model_id = ?3
+                 WHERE id = ?1 AND archived_at IS NULL",
+                params![conversation_id, mode, selected_model_id],
+            )
+            .map_err(AppError::database)?;
+        if changed == 0 {
+            return Err(AppError::validation("That conversation no longer exists."));
+        }
+        connection
+            .query_row(
+                "SELECT id, title, model_preference_mode, selected_model_id,
+                        created_at, updated_at, archived_at
+                 FROM conversations
+                 WHERE id = ?1",
+                [conversation_id],
+                conversation_from_row,
+            )
+            .map_err(AppError::database)
     }
 
     pub(crate) fn begin_assistant_message(
@@ -343,13 +390,15 @@ impl ChatRepository {
 }
 
 fn conversation_from_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
+    let mode: String = row.get(2)?;
+    let model_id: Option<String> = row.get(3)?;
     Ok(Conversation {
         id: row.get(0)?,
         title: row.get(1)?,
-        selected_model_id: row.get(2)?,
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
-        archived_at: row.get(5)?,
+        model_preference: ModelPreference::from_storage(&mode, model_id),
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        archived_at: row.get(6)?,
     })
 }
 

@@ -29,6 +29,15 @@ impl SecretVault {
             .map_err(AppError::keyring)
     }
 
+    /// Absence is an answer, not an error — for secrets that may not be set yet.
+    pub(crate) fn try_get(secret_ref: &str) -> Result<Option<Zeroizing<String>>, AppError> {
+        match Self::entry(secret_ref)?.get_password() {
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(error) => Err(AppError::keyring(error)),
+        }
+    }
+
     fn entry(secret_ref: &str) -> Result<Entry, AppError> {
         Entry::new(KEYRING_SERVICE, secret_ref).map_err(AppError::keyring)
     }

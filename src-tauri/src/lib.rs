@@ -3,7 +3,9 @@ mod chat;
 mod credentials;
 mod database;
 mod inference;
+mod memory;
 mod models;
+mod preferences;
 mod secret_vault;
 mod streaming;
 
@@ -11,7 +13,9 @@ use std::fs;
 
 use chat::ChatState;
 use credentials::CredentialState;
+use memory::MemoryState;
 use models::ModelState;
+use preferences::PreferenceState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -24,10 +28,14 @@ pub fn run() {
             database::initialise(&database_path)?;
             let credential_state = CredentialState::open(&database_path)?;
             let model_state = ModelState::open(&database_path)?;
+            let preference_state = PreferenceState::open(&database_path)?;
             let chat_state = ChatState::open(&database_path)?;
+            let memory_state = MemoryState::open(&database_path)?;
             app.manage(credential_state);
             app.manage(model_state);
+            app.manage(preference_state);
             app.manage(chat_state);
+            app.manage(memory_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -40,9 +48,18 @@ pub fn run() {
             models::create_configured_model,
             models::update_configured_model,
             models::delete_configured_model,
+            preferences::get_user_preferences,
+            preferences::update_user_preferences,
             chat::list_conversations,
             chat::get_conversation_thread,
+            chat::update_conversation_model_preference,
             chat::submit_message,
+            memory::set_memory_account_token,
+            memory::get_memory_account_token,
+            memory::clear_memory_account_token,
+            memory::ensure_memory_agent,
+            memory::recall_memories,
+            memory::sleep_conversation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Semantix Companion");

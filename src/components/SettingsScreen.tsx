@@ -1,5 +1,7 @@
+import { MemorySettingsSection } from "../features/memory/MemorySettingsSection";
 import { ProviderApiKeyStore } from "../features/models/credentials/ProviderApiKeyStore";
 import { ConfiguredModelStore } from "../features/models/configuredModels/ConfiguredModelStore";
+import { UserPreferenceStore } from "../features/preferences/UserPreferenceStore";
 
 const SETTINGS_TABS = [{ id: "models", label: "Models" }] as const;
 
@@ -34,8 +36,10 @@ export function SettingsScreen() {
           role="tabpanel"
           aria-labelledby="settings-tab-models"
         >
+          <UserPreferenceStore />
           <ProviderApiKeyStore />
           <ConfiguredModelStore />
+          <MemorySettingsSection />
         </section>
       </div>
     </main>

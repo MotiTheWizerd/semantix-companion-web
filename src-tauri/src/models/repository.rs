@@ -162,10 +162,28 @@ impl ModelRepository {
     }
 
     pub(crate) fn delete(&self, id: &str) -> Result<(), AppError> {
-        let connection = self.connection()?;
-        connection
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction().map_err(AppError::database)?;
+        transaction
+            .execute(
+                "UPDATE conversations
+                 SET model_preference_mode = 'test', selected_model_id = NULL
+                 WHERE selected_model_id = ?1",
+                [id],
+            )
+            .map_err(AppError::database)?;
+        transaction
+            .execute(
+                "UPDATE user_preferences
+                 SET default_model_mode = 'test', default_model_id = NULL
+                 WHERE default_model_id = ?1",
+                [id],
+            )
+            .map_err(AppError::database)?;
+        transaction
             .execute("DELETE FROM configured_models WHERE id = ?1", [id])
             .map_err(AppError::database)?;
+        transaction.commit().map_err(AppError::database)?;
         Ok(())
     }
 

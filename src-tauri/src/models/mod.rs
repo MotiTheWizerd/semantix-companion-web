@@ -90,7 +90,6 @@ pub(crate) struct ModelState {
 }
 
 pub(crate) struct ResolvedConfiguredModel {
-    pub(crate) configured_model_id: String,
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
     pub(crate) api_key: Zeroizing<String>,
@@ -132,7 +131,6 @@ impl ModelResolver {
         };
 
         Ok(ResolvedConfiguredModel {
-            configured_model_id: record.model.id,
             provider_id: record.model.provider_id,
             model_id: record.model.model_id,
             api_key: SecretVault::get(&secret_ref)?,
