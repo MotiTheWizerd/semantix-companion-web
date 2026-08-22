@@ -4,6 +4,7 @@ import { useShallow } from "zustand/react/shallow";
 import { AppHeader } from "./components/AppHeader";
 import { AppSidebar } from "./components/AppSidebar";
 import { ChatSurface } from "./components/ChatSurface";
+import { NotificationStack } from "./components/NotificationStack";
 import { ConversationTabs } from "./components/ConversationTabs";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { useCompanionStore } from "./features/workspace/companionStore";
@@ -63,6 +64,8 @@ export function App() {
 
   return (
     <div className="app-shell">
+      {/* The notification pulse line — every view, above everything. */}
+      <NotificationStack />
       <AppSidebar
         activeView={activeView}
         conversations={conversations}

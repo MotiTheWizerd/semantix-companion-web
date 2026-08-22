@@ -140,7 +140,8 @@ impl ChatRepository {
         let mut statement = connection
             .prepare(
                 "SELECT id, conversation_id, sequence, role, status, content,
-                        provider_id, model_id, error_message, created_at, updated_at, completed_at
+                        provider_id, model_id, error_message, created_at, updated_at, completed_at,
+                        slept_at
                  FROM messages
                  WHERE conversation_id = ?1
                  ORDER BY sequence ASC",
@@ -273,6 +274,7 @@ impl ChatRepository {
                 created_at: timestamp,
                 updated_at: timestamp,
                 completed_at: Some(timestamp),
+                slept_at: None,
             },
         })
     }
@@ -379,6 +381,7 @@ impl ChatRepository {
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: None,
+            slept_at: None,
         })
     }
 
@@ -433,6 +436,29 @@ impl ChatRepository {
             .ok_or_else(|| AppError::internal("the failed assistant message could not be reloaded"))
     }
 
+    /// Stamp the sleep ledger: these messages were distilled into memory, so
+    /// the next /sleep pass skips them. Called only after the organ confirms
+    /// the pass landed — a failed pass leaves the rows free for retry.
+    pub(crate) fn mark_messages_slept(
+        &self,
+        message_ids: &[String],
+        timestamp: i64,
+    ) -> Result<(), AppError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction().map_err(AppError::database)?;
+        {
+            let mut statement = transaction
+                .prepare("UPDATE messages SET slept_at = ?2 WHERE id = ?1")
+                .map_err(AppError::database)?;
+            for id in message_ids {
+                statement
+                    .execute(params![id, timestamp])
+                    .map_err(AppError::database)?;
+            }
+        }
+        transaction.commit().map_err(AppError::database)
+    }
+
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, AppError> {
         self.connection
             .lock()
@@ -467,6 +493,7 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
         completed_at: row.get(11)?,
+        slept_at: row.get(12)?,
     })
 }
 
@@ -474,7 +501,8 @@ fn message_by_id(connection: &Connection, message_id: &str) -> Result<Option<Mes
     connection
         .query_row(
             "SELECT id, conversation_id, sequence, role, status, content,
-                    provider_id, model_id, error_message, created_at, updated_at, completed_at
+                    provider_id, model_id, error_message, created_at, updated_at, completed_at,
+                    slept_at
              FROM messages
              WHERE id = ?1",
             [message_id],

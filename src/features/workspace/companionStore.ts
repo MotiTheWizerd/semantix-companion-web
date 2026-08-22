@@ -22,6 +22,7 @@ import {
 import type { ConfiguredModel } from "../models/configuredModels/types";
 import { runMemoryPreSend, type MemoryRecallChipData } from "../memory/preSend";
 import { sleepConversation } from "../memory/sleepService";
+import { useNotificationsStore } from "../notifications/notificationsStore";
 import {
   getUserPreferences,
   onUserPreferencesChanged,
@@ -707,22 +708,79 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
       },
     }));
 
+    // The live pulse: one notification that morphs through the stages while
+    // the pass runs. The composer notice stays the in-place record.
+    const { notify, updateNotification } = useNotificationsStore.getState();
+    const notificationId = notify({
+      title: "💤 Sleep",
+      text: "Preparing the conversation…",
+      status: "active",
+    });
+
     try {
-      const outcome = await sleepConversation(conversationId);
+      const outcome = await sleepConversation(conversationId, (event) => {
+        if (event.type === "stage" && event.stage === "distilling") {
+          updateNotification(notificationId, {
+            text: `Distilling ${event.turns} new turns — the model is reading the conversation…`,
+          });
+        } else if (event.type === "stage" && event.stage === "carving") {
+          updateNotification(notificationId, {
+            text:
+              event.total === 0
+                ? "Nothing durable to carve from this conversation."
+                : `Carving ${event.total} memories…`,
+            progress: event.total > 0 ? { done: 0, total: event.total } : null,
+          });
+        } else if (event.type === "carved") {
+          updateNotification(notificationId, {
+            text: `Carving ${event.done}/${event.total} — ${event.name}`,
+            progress: { done: event.done, total: event.total },
+          });
+        }
+      });
+
+      if (outcome.nothingNew) {
+        const message =
+          "Nothing new to sleep on — every turn here is already remembered.";
+        updateNotification(notificationId, {
+          status: "info",
+          text: message,
+          progress: null,
+        });
+        set((state) => ({
+          tabsById: {
+            ...state.tabsById,
+            [tabId]: { ...state.tabsById[tabId], notice: message },
+          },
+        }));
+        return;
+      }
+
       const carved =
         outcome.memories.length > 0 ? ` — ${outcome.memories.join(", ")}` : "";
+      const summary =
+        `Slept: ${outcome.created} carved, ${outcome.updated} updated` +
+        `${outcome.dropped ? `, ${outcome.dropped} dropped` : ""}`;
+      updateNotification(notificationId, {
+        status: "success",
+        text: summary,
+        progress: null,
+      });
       set((state) => ({
         tabsById: {
           ...state.tabsById,
           [tabId]: {
             ...state.tabsById[tabId],
-            notice:
-              `Slept: ${outcome.created} carved, ${outcome.updated} updated` +
-              `${outcome.dropped ? `, ${outcome.dropped} dropped` : ""}${carved}`,
+            notice: `${summary}${carved}`,
           },
         },
       }));
     } catch (error) {
+      updateNotification(notificationId, {
+        status: "error",
+        text: errorMessage(error),
+        progress: null,
+      });
       set((state) => ({
         tabsById: {
           ...state.tabsById,

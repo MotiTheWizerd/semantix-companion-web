@@ -53,6 +53,9 @@ pub(crate) struct Message {
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) completed_at: Option<i64>,
+    /// The sleep ledger stamp — set once this message has been distilled into
+    /// long-term memory; the next /sleep skips it.
+    pub(crate) slept_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

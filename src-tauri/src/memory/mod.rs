@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
-use tauri::State;
+use tauri::{ipc::Channel, State};
 
 use crate::{
     app_error::AppError,
@@ -62,6 +62,8 @@ struct MemoryService {
 struct SleepTurn {
     role: &'static str,
     text: String,
+    /// Already-slept tail sent for the distiller's footing — never carved from.
+    context: bool,
 }
 
 #[derive(Serialize)]
@@ -71,11 +73,20 @@ struct SleepCustomModel {
     model_id: String,
 }
 
+/// One line of the agent's index, sent so a re-extracted fact reuses its exact
+/// name (a clean update) instead of minting a near-duplicate slug.
+#[derive(Serialize, Deserialize)]
+struct SleepExistingMemory {
+    name: String,
+    description: String,
+}
+
 #[derive(Serialize)]
 struct SleepRequest {
     turns: Vec<SleepTurn>,
     custom_model: SleepCustomModel,
     project_tag: Option<String>,
+    existing: Vec<SleepExistingMemory>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +102,9 @@ pub(crate) struct SleepOutcome {
     dropped: u32,
     #[serde(deserialize_with = "memory_names", rename = "memories")]
     memories: Vec<String>,
+    /// True when the ledger left nothing to distill — no organ call was made.
+    #[serde(default)]
+    nothing_new: bool,
 }
 
 fn memory_names<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -107,10 +121,22 @@ struct PreparedSleep {
     body: SleepRequest,
     bearer: String,
     agent_id: String,
+    /// The un-slept message ids this pass consumes — stamped into the ledger
+    /// (`messages.slept_at`) only after the organ confirms the pass landed.
+    fresh_message_ids: Vec<String>,
 }
 
+/// How many already-slept messages ride along as context-only tail.
+const CONTEXT_TAIL_MESSAGES: usize = 4;
+
 impl MemoryService {
-    fn prepare_sleep(&self, conversation_id: &str, agent_id: &str) -> Result<PreparedSleep, AppError> {
+    /// `Ok(None)` = the conversation has turns, but the ledger already claims
+    /// them all — nothing new to distill, no organ call needed.
+    fn prepare_sleep(
+        &self,
+        conversation_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<PreparedSleep>, AppError> {
         let bearer = load_account_token()?
             .ok_or_else(|| AppError::validation("Connect your Semantix account before sleeping."))?;
 
@@ -119,19 +145,40 @@ impl MemoryService {
             .get_thread(conversation_id)?
             .ok_or_else(|| AppError::validation("That conversation no longer exists."))?;
 
-        let turns: Vec<SleepTurn> = thread
+        let conversational: Vec<_> = thread
             .messages
             .iter()
-            .filter(|m| m.status == "completed" && !m.content.trim().is_empty())
-            .filter_map(|m| match m.role.as_str() {
-                "user" => Some(SleepTurn { role: "user", text: m.content.clone() }),
-                "assistant" => Some(SleepTurn { role: "assistant", text: m.content.clone() }),
-                _ => None,
+            .filter(|m| {
+                m.status == "completed"
+                    && !m.content.trim().is_empty()
+                    && matches!(m.role.as_str(), "user" | "assistant")
             })
             .collect();
-        if turns.is_empty() {
+        if conversational.is_empty() {
             return Err(AppError::validation("There is nothing to sleep yet — say something first."));
         }
+
+        let (slept, fresh): (Vec<_>, Vec<_>) = conversational
+            .into_iter()
+            .partition(|m| m.slept_at.is_some());
+        if fresh.is_empty() {
+            return Ok(None);
+        }
+
+        // A short already-slept tail keeps the distiller's footing on a
+        // follow-up pass; the organ renders it under a do-NOT-carve header.
+        let tail_start = slept.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
+        let as_turn = |m: &crate::chat::Message, context: bool| SleepTurn {
+            role: if m.role == "user" { "user" } else { "assistant" },
+            text: m.content.clone(),
+            context,
+        };
+        let turns: Vec<SleepTurn> = slept[tail_start..]
+            .iter()
+            .map(|&m| as_turn(m, true))
+            .chain(fresh.iter().map(|&m| as_turn(m, false)))
+            .collect();
+        let fresh_message_ids = fresh.iter().map(|m| m.id.clone()).collect();
 
         let configured_model_id = self
             .preferences
@@ -144,7 +191,7 @@ impl MemoryService {
         let model = self.models.resolve(&configured_model_id)?;
         let base_url = provider_base_url(&model.provider_id)?;
 
-        Ok(PreparedSleep {
+        Ok(Some(PreparedSleep {
             body: SleepRequest {
                 turns,
                 custom_model: SleepCustomModel {
@@ -153,10 +200,12 @@ impl MemoryService {
                     model_id: model.model_id,
                 },
                 project_tag: Some("companion".to_owned()),
+                existing: Vec::new(),
             },
             bearer,
             agent_id: agent_id.to_owned(),
-        })
+            fresh_message_ids,
+        }))
     }
 }
 
@@ -351,20 +400,114 @@ pub(crate) async fn fetch_memory(
         .map_err(|error| format!("The memory could not be read: {error}"))
 }
 
-#[tauri::command]
-pub(crate) async fn sleep_conversation(
-    state: State<'_, MemoryState>,
-    conversation_id: String,
-    agent_id: String,
-) -> Result<SleepOutcome, String> {
-    let service = Arc::clone(&state.service);
-    let prepared = tauri::async_runtime::spawn_blocking(move || {
-        service.prepare_sleep(&conversation_id, &agent_id)
-    })
-    .await
-    .map_err(|error| format!("Sleep task failed: {error}"))?
-    .map_err(String::from)?;
+/// The agent's index (names + descriptions, recent-first, non-archived,
+/// capped) for the distiller's name-reuse leash. Fail-open: a dead fetch
+/// mutes the leash, never blocks the sleep.
+async fn fetch_existing_index(bearer: &str, agent_id: &str) -> Vec<SleepExistingMemory> {
+    const CAP: usize = 200;
+    #[derive(Deserialize)]
+    struct IndexItem {
+        name: String,
+        description: String,
+        archived_at: Option<String>,
+    }
+    let response = reqwest::Client::new()
+        .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories"))
+        .bearer_auth(bearer)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await;
+    let Ok(response) = response else { return Vec::new() };
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    match response.json::<Vec<IndexItem>>().await {
+        Ok(items) => items
+            .into_iter()
+            .filter(|item| item.archived_at.is_none())
+            .take(CAP)
+            .map(|item| SleepExistingMemory { name: item.name, description: item.description })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
 
+/// Consume the organ's /sleep/stream SSE body, relaying each stage frame to
+/// the progress channel; returns the terminal outcome. `Ok(None)` = the
+/// stream route doesn't exist (older organ) — caller falls back to the
+/// plain POST.
+async fn sleep_via_stream(
+    prepared: &PreparedSleep,
+    on_progress: &Channel<serde_json::Value>,
+) -> Result<Option<SleepOutcome>, String> {
+    use futures_util::StreamExt;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{MEMORY_ORGAN_BASE}/agents/{}/sleep/stream",
+            prepared.agent_id
+        ))
+        .bearer_auth(&prepared.bearer)
+        .json(&prepared.body)
+        .timeout(std::time::Duration::from_secs(300))
+        .send()
+        .await
+        .map_err(|error| format!("The memory organ could not be reached: {error}"))?;
+
+    let status = response.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(format!("Sleep failed: HTTP {status}"));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut outcome: Option<SleepOutcome> = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("The sleep stream broke: {error}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        // SSE frames split on a blank line; comment/keepalive frames carry no data.
+        while let Some(boundary) = buffer.find("\n\n") {
+            let frame = buffer[..boundary].to_owned();
+            buffer.drain(..boundary + 2);
+            let data = frame
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim_start)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if data.is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            match event.get("type").and_then(|t| t.as_str()) {
+                Some("complete") => {
+                    outcome = serde_json::from_value::<SleepOutcome>(event.clone()).ok();
+                }
+                Some("error") => {
+                    let detail = event
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("the sleep pass failed");
+                    return Err(format!("Sleep failed: {detail}"));
+                }
+                _ => {}
+            }
+            let _ = on_progress.send(event);
+        }
+    }
+    outcome
+        .map(Some)
+        .ok_or_else(|| "The sleep stream ended without a result.".to_owned())
+}
+
+/// The plain POST — the pre-stream door, kept as the fallback for an organ
+/// without /sleep/stream.
+async fn sleep_via_post(prepared: &PreparedSleep) -> Result<SleepOutcome, String> {
     let response = reqwest::Client::new()
         .post(format!("{MEMORY_ORGAN_BASE}/agents/{}/sleep", prepared.agent_id))
         .bearer_auth(&prepared.bearer)
@@ -388,4 +531,59 @@ pub(crate) async fn sleep_conversation(
         .json::<SleepOutcome>()
         .await
         .map_err(|error| format!("The sleep result could not be read: {error}"))
+}
+
+#[tauri::command]
+pub(crate) async fn sleep_conversation(
+    state: State<'_, MemoryState>,
+    conversation_id: String,
+    agent_id: String,
+    on_progress: Channel<serde_json::Value>,
+) -> Result<SleepOutcome, String> {
+    let service = Arc::clone(&state.service);
+    let prepare_conversation_id = conversation_id.clone();
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        service.prepare_sleep(&prepare_conversation_id, &agent_id)
+    })
+    .await
+    .map_err(|error| format!("Sleep task failed: {error}"))?
+    .map_err(String::from)?;
+
+    // The ledger already claims every turn — honest no-op, no organ call.
+    let Some(mut prepared) = prepared else {
+        return Ok(SleepOutcome {
+            created: 0,
+            updated: 0,
+            dropped: 0,
+            memories: Vec::new(),
+            nothing_new: true,
+        });
+    };
+
+    prepared.body.existing = fetch_existing_index(&prepared.bearer, &prepared.agent_id).await;
+
+    let outcome = match sleep_via_stream(&prepared, &on_progress).await? {
+        Some(outcome) => outcome,
+        None => sleep_via_post(&prepared).await?,
+    };
+
+    // Stamp the ledger only now that the organ confirmed the pass landed.
+    let service = Arc::clone(&state.service);
+    let stamped_ids = prepared.fresh_message_ids;
+    let stamp_result = tauri::async_runtime::spawn_blocking(move || {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        service.chats.mark_messages_slept(&stamped_ids, timestamp)
+    })
+    .await
+    .map_err(|error| format!("Sleep ledger task failed: {error}"))?;
+    if let Err(error) = stamp_result {
+        // The memories landed; a failed stamp only means a benign re-distill
+        // next pass (writes upsert by name). Surface it without failing.
+        eprintln!("[memory] sleep ledger stamp failed: {error}");
+    }
+
+    Ok(outcome)
 }

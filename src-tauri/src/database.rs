@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 5;
+const LATEST_SCHEMA_VERSION: i64 = 6;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -191,6 +191,11 @@ fn migration_sql(version: i64) -> &'static str {
                      INSERT INTO messages_fts(rowid, content)
                          VALUES (new.rowid, new.content);
                  END;"
+        }
+        6 => {
+            // The sleep ledger: a message the /sleep pass has already distilled
+            // carries the stamp, so a second pass distills only unstamped rows.
+            "ALTER TABLE messages ADD COLUMN slept_at INTEGER;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
