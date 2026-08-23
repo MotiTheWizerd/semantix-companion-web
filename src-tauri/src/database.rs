@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 7;
+const LATEST_SCHEMA_VERSION: i64 = 8;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -35,7 +35,42 @@ fn migrate(connection: &mut Connection) -> Result<(), AppError> {
             "the local database uses schema version {current_version}, but this build supports up to {LATEST_SCHEMA_VERSION}"
         )));
     }
+    if current_version == LATEST_SCHEMA_VERSION {
+        return Ok(());
+    }
 
+    // Enforcement OFF for the duration, then verified before it goes back on.
+    //
+    // A migration that reshapes a table other tables point at has to drop and
+    // recreate it, and with enforcement ON SQLite's DROP TABLE performs an
+    // implicit DELETE — which would CASCADE the entire message archive into
+    // nothing. This is SQLite's own documented procedure for a table rebuild.
+    // The `foreign_key_check` below is the half that must never be skipped:
+    // it is what proves the rebuild left every reference intact.
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(AppError::database)?;
+    let migrated = apply_migrations(connection, current_version);
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(AppError::database)?;
+    migrated?;
+
+    let dangling: i64 = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(AppError::database)?;
+    if dangling > 0 {
+        return Err(AppError::internal(format!(
+            "the schema upgrade left {dangling} broken references behind"
+        )));
+    }
+
+    Ok(())
+}
+
+fn apply_migrations(connection: &mut Connection, current_version: i64) -> Result<(), AppError> {
     for version in (current_version + 1)..=LATEST_SCHEMA_VERSION {
         let transaction = connection.transaction().map_err(AppError::database)?;
         transaction
@@ -225,6 +260,56 @@ fn migration_sql(version: i64) -> &'static str {
                  id, name, memory_agent_name, is_built_in, created_at, updated_at
              ) VALUES ('companion-built-in', NULL, 'companion', 1, 0, 0);"
         }
+        8 => {
+            // The companion becomes the identity you talk to, and an identity
+            // brings its own voice: the model moves OFF the conversation and
+            // ONTO the companion. A thread no longer picks a model — it picks
+            // a companion, and the companion's model answers.
+            //
+            // Existing threads bind to the built-in companion. Their
+            // per-conversation model overrides are deliberately dropped rather
+            // than left as columns no UI can reach: the built-in companion
+            // starts on 'inherit', so every migrated thread lands on the user's
+            // default model — where the overwhelming majority already sat.
+            // `conversations` is REBUILT rather than altered: its old
+            // `selected_model_id` sits inside a foreign-key definition, and
+            // SQLite will not drop such a column. Ids are carried over
+            // unchanged, so every message keeps the parent it always had.
+            "ALTER TABLE companions
+                 ADD COLUMN model_preference_mode TEXT NOT NULL DEFAULT 'inherit'
+                 CHECK (model_preference_mode IN ('inherit', 'test', 'configured'));
+
+             ALTER TABLE companions
+                 ADD COLUMN model_id TEXT
+                 REFERENCES configured_models(id) ON DELETE SET NULL;
+
+             CREATE TABLE conversations_migrated (
+                 id TEXT PRIMARY KEY,
+                 title TEXT NOT NULL,
+                 companion_id TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 archived_at INTEGER,
+                 FOREIGN KEY (companion_id)
+                     REFERENCES companions(id)
+                     ON DELETE SET NULL
+             );
+
+             INSERT INTO conversations_migrated (
+                 id, title, companion_id, created_at, updated_at, archived_at
+             )
+             SELECT id, title, 'companion-built-in', created_at, updated_at, archived_at
+             FROM conversations;
+
+             DROP TABLE conversations;
+             ALTER TABLE conversations_migrated RENAME TO conversations;
+
+             CREATE INDEX IF NOT EXISTS idx_conversations_updated
+                 ON conversations(updated_at DESC);
+
+             CREATE INDEX IF NOT EXISTS idx_conversations_companion
+                 ON conversations(companion_id);"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -233,7 +318,7 @@ fn migration_sql(version: i64) -> &'static str {
 mod tests {
     use rusqlite::Connection;
 
-    use super::{migrate, LATEST_SCHEMA_VERSION};
+    use super::{migrate, migration_sql, LATEST_SCHEMA_VERSION};
 
     #[test]
     fn migrations_create_the_current_schema() {
@@ -325,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_four_preserves_existing_model_selection_semantics() {
+    fn a_legacy_database_lands_with_every_thread_bound_to_the_built_in_companion() {
         let mut connection = Connection::open_in_memory().expect("in-memory database should open");
         connection
             .execute_batch(
@@ -379,25 +464,31 @@ mod tests {
 
         migrate(&mut connection).expect("version three should upgrade");
 
-        let configured_mode: String = connection
-            .query_row(
-                "SELECT model_preference_mode FROM conversations
-                 WHERE id = 'conversation-configured'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("configured conversation should survive");
-        let test_mode: String = connection
-            .query_row(
-                "SELECT model_preference_mode FROM conversations
-                 WHERE id = 'conversation-test'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("test conversation should survive");
-        assert_eq!(configured_mode, "configured");
-        assert_eq!(test_mode, "test");
+        // Both threads survive, and both now answer to the built-in companion
+        // instead of carrying a model of their own.
+        for conversation in ["conversation-configured", "conversation-test"] {
+            let companion_id: Option<String> = connection
+                .query_row(
+                    "SELECT companion_id FROM conversations WHERE id = ?1",
+                    [conversation],
+                    |row| row.get(0),
+                )
+                .expect("the conversation should survive every migration");
+            assert_eq!(companion_id.as_deref(), Some("companion-built-in"));
+        }
 
+        // The per-conversation override is gone, not merely unused.
+        let dropped: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('conversations')
+                 WHERE name IN ('model_preference_mode', 'selected_model_id')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the conversation columns should be inspectable");
+        assert_eq!(dropped, 0);
+
+        // The user default survives — it is what a companion on 'inherit' reads.
         let default_mode: String = connection
             .query_row(
                 "SELECT default_model_mode FROM user_preferences WHERE id = 1",
@@ -406,6 +497,80 @@ mod tests {
             )
             .expect("default preference should be created");
         assert_eq!(default_mode, "test");
+
+        let (companion_mode, companion_model): (String, Option<String>) = connection
+            .query_row(
+                "SELECT model_preference_mode, model_id FROM companions
+                 WHERE id = 'companion-built-in'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the built-in companion should carry a model preference");
+        assert_eq!(companion_mode, "inherit");
+        assert_eq!(companion_model, None);
+    }
+
+    /// Migration 8 drops and recreates `conversations`, which `messages`
+    /// points at. With foreign keys enforced, that DROP would cascade the whole
+    /// archive away. This is the test that would scream if the enforcement
+    /// guard around the migration ever came off.
+    #[test]
+    fn the_conversation_rebuild_does_not_take_the_message_archive_with_it() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+
+        // Stop at 7, seed a real thread, then let 8 rebuild the table under it.
+        for version in 1..=7 {
+            connection
+                .execute_batch(migration_sql(version))
+                .expect("migration should apply");
+        }
+        connection
+            .pragma_update(None, "user_version", 7)
+            .expect("version should stamp");
+        connection
+            .execute_batch(
+                "INSERT INTO conversations (
+                     id, title, selected_model_id, created_at, updated_at, archived_at,
+                     model_preference_mode
+                 ) VALUES ('conversation-1', 'A real thread', NULL, 10, 20, NULL, 'test');
+                 INSERT INTO messages (
+                     id, conversation_id, sequence, role, status, content,
+                     provider_id, model_id, error_message, created_at, updated_at, completed_at
+                 ) VALUES ('message-1', 'conversation-1', 0, 'user', 'completed',
+                           'the long serpent', NULL, NULL, NULL, 10, 10, 10);",
+            )
+            .expect("a thread should seed");
+
+        migrate(&mut connection).expect("migration eight should rebuild the table");
+
+        let (surviving, content): (i64, String) = connection
+            .query_row(
+                "SELECT COUNT(*), MAX(content) FROM messages WHERE conversation_id = 'conversation-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("messages should still be queryable");
+        assert_eq!(surviving, 1, "the rebuild must not cascade the archive away");
+        assert_eq!(content, "the long serpent");
+
+        let (title, companion_id): (String, Option<String>) = connection
+            .query_row(
+                "SELECT title, companion_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the conversation should survive its own rebuild");
+        assert_eq!(title, "A real thread");
+        assert_eq!(companion_id.as_deref(), Some("companion-built-in"));
+
+        // And enforcement is back on afterwards, not silently left off.
+        let enforcing: i64 = connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("the pragma should be readable");
+        assert_eq!(enforcing, 1);
     }
 
     #[test]

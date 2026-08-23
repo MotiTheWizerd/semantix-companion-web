@@ -14,8 +14,7 @@ export function App() {
     activeView,
     isInitialising,
     conversations,
-    configuredModels,
-    userPreferences,
+    companions,
     tabsById,
     activeTabId,
     runtimeByConversationId,
@@ -25,15 +24,14 @@ export function App() {
     openConversation,
     openNewConversation,
     setDraft,
-    setTabModelPreference,
+    setTabCompanion,
     sendMessage,
   } = useCompanionStore(
     useShallow((state) => ({
       activeView: state.activeView,
       isInitialising: state.isInitialising,
       conversations: state.conversations,
-      configuredModels: state.configuredModels,
-      userPreferences: state.userPreferences,
+      companions: state.companions,
       tabsById: state.tabsById,
       activeTabId: state.activeTabId,
       runtimeByConversationId: state.runtimeByConversationId,
@@ -43,7 +41,7 @@ export function App() {
       openConversation: state.openConversation,
       openNewConversation: state.openNewConversation,
       setDraft: state.setDraft,
-      setTabModelPreference: state.setTabModelPreference,
+      setTabCompanion: state.setTabCompanion,
       sendMessage: state.sendMessage,
     })),
   );
@@ -94,14 +92,13 @@ export function App() {
             recallByMessageId={runtime?.recallByMessageId ?? {}}
             toolCallsByMessageId={runtime?.toolCallsByMessageId ?? {}}
             content={activeTab?.draft ?? ""}
-            configuredModels={configuredModels}
-            modelPreference={activeTab?.modelPreference ?? { mode: "inherit" }}
-            userPreferences={userPreferences}
+            companions={companions}
+            companionId={activeTab?.companionId ?? null}
             onContentChange={(content) => {
               if (activeTabId) setDraft(activeTabId, content);
             }}
-            onModelPreferenceChange={(preference) => {
-              if (activeTabId) void setTabModelPreference(activeTabId, preference);
+            onCompanionChange={(companionId) => {
+              if (activeTabId) void setTabCompanion(activeTabId, companionId);
             }}
             onSend={async (content) => {
               if (activeTabId) await sendMessage(activeTabId, content);

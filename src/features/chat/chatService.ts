@@ -6,7 +6,7 @@ import type {
   Conversation,
   ConversationThread,
   SubmitMessageInput,
-  UpdateConversationModelPreferenceInput,
+  UpdateConversationCompanionInput,
 } from "./types";
 
 export function listConversations(): Promise<Conversation[]> {
@@ -17,10 +17,10 @@ export function getConversationThread(conversationId: string): Promise<Conversat
   return invoke<ConversationThread>("get_conversation_thread", { conversationId });
 }
 
-export function updateConversationModelPreference(
-  input: UpdateConversationModelPreferenceInput,
+export function updateConversationCompanion(
+  input: UpdateConversationCompanionInput,
 ): Promise<Conversation> {
-  return invoke<Conversation>("update_conversation_model_preference", { input });
+  return invoke<Conversation>("update_conversation_companion", { input });
 }
 
 export function submitMessage(

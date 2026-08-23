@@ -12,13 +12,14 @@ use uuid::Uuid;
 
 use crate::{
     app_error::AppError,
+    companions::{Companion, CompanionResolver},
     credentials::unix_timestamp_ms,
     inference::{
         InferenceDelta, InferenceExecution, InferenceGateway, InferenceMessage, InferenceRequest,
         ModelTarget, ProviderCredential, Role, ToolCall,
     },
     models::ModelResolver,
-    preferences::{ModelPreference, PreferenceRepository},
+    preferences::PreferenceRepository,
     streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
     tools::{self, ToolContext},
 };
@@ -32,7 +33,9 @@ const MAX_TOOL_ROUNDS: usize = 4;
 pub(crate) struct Conversation {
     pub(crate) id: String,
     pub(crate) title: String,
-    pub(crate) model_preference: ModelPreference,
+    /// Who this thread talks to. The companion carries the model and the
+    /// memory, so the conversation itself holds neither.
+    pub(crate) companion_id: Option<String>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) archived_at: Option<i64>,
@@ -76,7 +79,10 @@ pub(crate) struct AcceptedMessage {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SubmitMessageInput {
     conversation_id: Option<String>,
-    model_preference: ModelPreference,
+    /// The companion picked in the composer. None falls back to the thread's
+    /// stored companion, then to the built-in one.
+    #[serde(default)]
+    companion_id: Option<String>,
     content: String,
     /// Recalled memory + time blocks composed by the frontend's pre-send
     /// reflexes. Rides the inference request as a leading system message —
@@ -91,9 +97,9 @@ pub(crate) struct SubmitMessageInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UpdateConversationModelPreferenceInput {
+pub(crate) struct UpdateConversationCompanionInput {
     conversation_id: String,
-    model_preference: ModelPreference,
+    companion_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -153,6 +159,7 @@ impl ChatState {
             service: Arc::new(ChatService::new(
                 repository,
                 ModelResolver::open(database_path)?,
+                CompanionResolver::open(database_path)?,
                 PreferenceRepository::open(database_path)?,
                 StreamingService::new(Arc::new(InferenceGateway::default())),
                 database_path.to_owned(),
@@ -164,6 +171,7 @@ impl ChatState {
 struct ChatService {
     repository: ChatRepository,
     model_resolver: ModelResolver,
+    companions: CompanionResolver,
     preferences: PreferenceRepository,
     streaming: StreamingService<InferenceExecution, InferenceDelta>,
     /// Handed to ToolContext so the search_conversations tool can open its
@@ -175,6 +183,7 @@ impl ChatService {
     fn new(
         repository: ChatRepository,
         model_resolver: ModelResolver,
+        companions: CompanionResolver,
         preferences: PreferenceRepository,
         streaming: StreamingService<InferenceExecution, InferenceDelta>,
         database_path: PathBuf,
@@ -182,6 +191,7 @@ impl ChatService {
         Self {
             repository,
             model_resolver,
+            companions,
             preferences,
             streaming,
             database_path,
@@ -198,18 +208,19 @@ impl ChatService {
             .ok_or_else(|| AppError::validation("That conversation no longer exists."))
     }
 
-    fn update_model_preference(
+    fn update_companion(
         &self,
-        input: UpdateConversationModelPreferenceInput,
+        input: UpdateConversationCompanionInput,
     ) -> Result<Conversation, AppError> {
         let conversation_id = input.conversation_id.trim();
         if conversation_id.is_empty() {
             return Err(AppError::validation("Choose an existing conversation."));
         }
-        self.preferences
-            .validate_model_preference(&input.model_preference)?;
+        // Resolving first turns a stale id into the built-in companion rather
+        // than writing a dangling reference the thread would trip over later.
+        let companion = self.companions.resolve(Some(&input.companion_id))?;
         self.repository
-            .update_model_preference(conversation_id, &input.model_preference)
+            .update_companion(conversation_id, &companion.id)
     }
 
     fn submit(&self, input: SubmitMessageInput) -> Result<PreparedSubmission, AppError> {
@@ -228,9 +239,20 @@ impl ChatService {
             .as_deref()
             .map(str::trim)
             .filter(|id| !id.is_empty());
-        self.preferences
-            .validate_model_preference(&input.model_preference)?;
-        let configured_model_id = self.preferences.resolve_model_id(&input.model_preference)?;
+        // Who answers decides what answers: the composer picks a companion, and
+        // the companion's own model preference resolves to the actual target.
+        let stored_companion_id = conversation_id
+            .and_then(|id| self.repository.get_thread(id).ok().flatten())
+            .and_then(|thread| thread.conversation.companion_id);
+        let companion = self.companions.resolve(
+            input
+                .companion_id
+                .as_deref()
+                .or(stored_companion_id.as_deref()),
+        )?;
+        let configured_model_id = self
+            .preferences
+            .resolve_model_id(&companion.model_preference)?;
         let (target, credential) = if let Some(configured_model_id) = configured_model_id.as_deref()
         {
             let model = self.model_resolver.resolve(configured_model_id)?;
@@ -250,15 +272,13 @@ impl ChatService {
                 ProviderCredential::None,
             )
         };
-        let (_, selected_model_id) = input.model_preference.storage_parts();
         let timestamp = unix_timestamp_ms()?;
         let new_conversation_id = Uuid::new_v4().to_string();
         let message_id = Uuid::new_v4().to_string();
         let title = conversation_title(content);
         let accepted = self.repository.commit_user_message(CommitUserMessage {
             conversation_id,
-            model_preference: &input.model_preference,
-            selected_model_id,
+            companion_id: &companion.id,
             content,
             title: &title,
             timestamp,
@@ -277,6 +297,12 @@ impl ChatService {
             .filter(|context| !context.is_empty())
         {
             messages.insert(0, InferenceMessage::text(Role::System, memory_context.to_owned()));
+        }
+        // The name goes FIRST, ahead of recalled memory: a companion should
+        // know who it is before it is handed what it remembers. Like the memory
+        // block, this rides the request only and is never persisted.
+        if let Some(identity) = companion_identity(&companion) {
+            messages.insert(0, InferenceMessage::text(Role::System, identity));
         }
 
         let tool_context = ToolContext {
@@ -469,12 +495,12 @@ pub(crate) async fn get_conversation_thread(
 }
 
 #[tauri::command]
-pub(crate) async fn update_conversation_model_preference(
+pub(crate) async fn update_conversation_companion(
     state: State<'_, ChatState>,
-    input: UpdateConversationModelPreferenceInput,
+    input: UpdateConversationCompanionInput,
 ) -> Result<Conversation, String> {
     let service = Arc::clone(&state.service);
-    tauri::async_runtime::spawn_blocking(move || service.update_model_preference(input))
+    tauri::async_runtime::spawn_blocking(move || service.update_companion(input))
         .await
         .map_err(|error| format!("Conversation task failed: {error}"))?
         .map_err(String::from)
@@ -689,6 +715,19 @@ async fn fail_stream(
     message
 }
 
+/// What a named companion is told about its own name.
+///
+/// An unnamed companion gets NOTHING — no placeholder, no "you have no name".
+/// Silence is the honest state there, and inventing a line about namelessness
+/// would tell the model something the user never said.
+fn companion_identity(companion: &Companion) -> Option<String> {
+    let name = companion.name.as_deref()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!("The user prefers to call you {name}."))
+}
+
 fn canonical_messages(messages: &[Message]) -> Vec<InferenceMessage> {
     messages
         .iter()
@@ -727,15 +766,41 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        conversation_title, repository::ChatRepository, ChatEvent, ChatService, SubmitMessageInput,
+        companion_identity, conversation_title, repository::ChatRepository, ChatEvent, ChatService,
+        SubmitMessageInput,
     };
     use crate::{
+        companions::{Companion, CompanionResolver},
         database,
         inference::InferenceGateway,
         models::ModelResolver,
         preferences::{ModelPreference, PreferenceRepository},
         streaming::StreamingService,
     };
+
+    #[test]
+    fn a_named_companion_is_told_its_name_and_an_unnamed_one_is_told_nothing() {
+        let companion = |name: Option<&str>| Companion {
+            id: "companion-1".to_owned(),
+            name: name.map(str::to_owned),
+            memory_agent_name: "companion-1-memory".to_owned(),
+            model_preference: ModelPreference::Inherit,
+            is_built_in: false,
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        assert_eq!(
+            companion_identity(&companion(Some("Ragnar"))).as_deref(),
+            Some("The user prefers to call you Ragnar.")
+        );
+        assert_eq!(companion_identity(&companion(None)), None);
+        assert_eq!(
+            companion_identity(&companion(Some("   "))),
+            None,
+            "a blank name says nothing rather than saying something empty"
+        );
+    }
 
     #[test]
     fn conversation_titles_are_compact_and_single_line() {
@@ -776,6 +841,7 @@ mod tests {
             let service = ChatService::new(
                 ChatRepository::open(&database_path).expect("chat repository should open"),
                 ModelResolver::open(&database_path).expect("model resolver should open"),
+                CompanionResolver::open(&database_path).expect("companion resolver should open"),
                 PreferenceRepository::open(&database_path)
                     .expect("preference repository should open"),
                 StreamingService::new(Arc::new(InferenceGateway::default())),
@@ -784,7 +850,7 @@ mod tests {
             let accepted = service
                 .submit(SubmitMessageInput {
                     conversation_id: None,
-                    model_preference: ModelPreference::Inherit,
+                    companion_id: None,
                     content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
                     memory_context: None,
                     memory_agent_id: None,
@@ -796,6 +862,11 @@ mod tests {
                 .expect("conversations should reload");
             assert_eq!(conversations.len(), 1);
             assert_eq!(conversations[0].id, accepted.accepted.conversation.id);
+            assert_eq!(
+                conversations[0].companion_id.as_deref(),
+                Some("companion-built-in"),
+                "a thread sent with no pick belongs to the built-in companion"
+            );
 
             let assistant = service
                 .begin_assistant(&accepted.accepted.conversation.id, "test", "test-stream")

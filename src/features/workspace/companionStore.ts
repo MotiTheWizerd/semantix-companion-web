@@ -5,7 +5,7 @@ import {
   getConversationThread,
   listConversations,
   submitMessage,
-  updateConversationModelPreference,
+  updateConversationCompanion,
 } from "../chat/chatService";
 import { requestConversationScrollToEnd } from "../chat/chatScrollEvents";
 import type {
@@ -15,6 +15,12 @@ import type {
   Conversation,
   ToolCallChipItem,
 } from "../chat/types";
+import {
+  listCompanions,
+  onCompanionsChanged,
+  reconcileCompanionEvent,
+} from "../companions/companionService";
+import type { Companion } from "../companions/types";
 import {
   listConfiguredModels,
   onModelsChanged,
@@ -37,7 +43,9 @@ export interface ConversationTab {
   conversationId: string | null;
   title: string;
   draft: string;
-  modelPreference: ModelPreference;
+  /** Who this tab talks to. null = nothing picked yet, so the built-in
+   *  companion answers — Rust resolves the same way. */
+  companionId: string | null;
   unreadCount: number;
   error: string | null;
   /** Non-error status line (e.g. a /sleep outcome) for the composer note. */
@@ -61,6 +69,7 @@ interface CompanionStore {
   isInitialising: boolean;
   isInitialised: boolean;
   conversations: Conversation[];
+  companions: Companion[];
   configuredModels: ConfiguredModel[];
   userPreferences: UserPreferences;
   preferenceError: string | null;
@@ -77,7 +86,7 @@ interface CompanionStore {
   setActiveTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   setDraft: (tabId: string, draft: string) => void;
-  setTabModelPreference: (tabId: string, preference: ModelPreference) => Promise<void>;
+  setTabCompanion: (tabId: string, companionId: string) => Promise<void>;
   setUserDefaultModel: (
     preference: Exclude<ModelPreference, { mode: "inherit" }>,
   ) => Promise<void>;
@@ -103,7 +112,7 @@ function newConversationTab(): ConversationTab {
     conversationId: null,
     title: "New conversation",
     draft: "",
-    modelPreference: { mode: "inherit" },
+    companionId: null,
     unreadCount: 0,
     error: null,
     notice: null,
@@ -116,7 +125,7 @@ function tabForConversation(conversation: Conversation): ConversationTab {
     conversationId: conversation.id,
     title: conversation.title,
     draft: "",
-    modelPreference: conversation.modelPreference,
+    companionId: conversation.companionId,
     unreadCount: 0,
     error: null,
     notice: null,
@@ -180,19 +189,12 @@ function requestScrollForChatEvent(event: ChatEvent): void {
   }
 }
 
-function modelPreferencesEqual(left: ModelPreference, right: ModelPreference): boolean {
-  return (
-    left.mode === right.mode &&
-    (left.mode !== "configured" ||
-      (right.mode === "configured" && left.modelId === right.modelId))
-  );
-}
-
 export const useCompanionStore = create<CompanionStore>()((set, get) => ({
   activeView: "chat",
   isInitialising: false,
   isInitialised: false,
   conversations: [],
+  companions: [],
   configuredModels: [],
   userPreferences: EMPTY_USER_PREFERENCES,
   preferenceError: null,
@@ -206,12 +208,14 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     if (get().isInitialising || get().isInitialised) return;
     set({ isInitialising: true });
     try {
-      const [conversations, configuredModels, userPreferences] = await Promise.all([
-        listConversations(),
-        listConfiguredModels(),
-        getUserPreferences(),
-      ]);
-      set({ conversations, configuredModels, userPreferences });
+      const [conversations, companions, configuredModels, userPreferences] =
+        await Promise.all([
+          listConversations(),
+          listCompanions(),
+          listConfiguredModels(),
+          getUserPreferences(),
+        ]);
+      set({ conversations, companions, configuredModels, userPreferences });
 
       if (conversations[0]) {
         await get().openConversation(conversations[0].id);
@@ -219,7 +223,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
         get().openNewConversation();
       }
 
-      const [stopModels, stopPreferences] = await Promise.all([
+      const [stopModels, stopPreferences, stopCompanions] = await Promise.all([
         onModelsChanged(() => {
           void Promise.all([
             listConfiguredModels(),
@@ -244,7 +248,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                       ? {
                           ...tab,
                           title: conversation.title,
-                          modelPreference: conversation.modelPreference,
+                          companionId: conversation.companionId,
                         }
                       : tab,
                   ];
@@ -256,8 +260,27 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
         onUserPreferencesChanged((event) => {
           if (event.kind === "updated") set({ userPreferences: event.preferences });
         }),
+        onCompanionsChanged((event) => {
+          set((state) => {
+            const companions = reconcileCompanionEvent(state.companions, event);
+            if (event.kind !== "deleted") return { companions };
+            // A deleted companion leaves its tabs pointing at nothing, which
+            // is exactly what Rust reads as "the built-in one answers".
+            return {
+              companions,
+              tabsById: Object.fromEntries(
+                Object.entries(state.tabsById).map(([tabId, tab]) => [
+                  tabId,
+                  tab.companionId === event.companionId
+                    ? { ...tab, companionId: null }
+                    : tab,
+                ]),
+              ),
+            };
+          });
+        }),
       ]);
-      unlisteners = [stopModels, stopPreferences];
+      unlisteners = [stopModels, stopPreferences, stopCompanions];
       set({ isInitialised: true, isInitialising: false });
     } catch (error) {
       const tab = newConversationTab();
@@ -320,7 +343,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
             [tab.id]: {
               ...state.tabsById[tab.id],
               title: thread.conversation.title,
-              modelPreference: thread.conversation.modelPreference,
+              companionId: thread.conversation.companionId,
             },
           },
           runtimeByConversationId: {
@@ -407,22 +430,24 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     }));
   },
 
-  setTabModelPreference: async (tabId, preference) => {
+  setTabCompanion: async (tabId, companionId) => {
     const tab = get().tabsById[tabId];
-    if (!tab || modelPreferencesEqual(tab.modelPreference, preference)) return;
-    const previous = tab.modelPreference;
+    if (!tab || tab.companionId === companionId) return;
+    const previous = tab.companionId;
     set((state) => ({
       tabsById: {
         ...state.tabsById,
-        [tabId]: { ...state.tabsById[tabId], modelPreference: preference, error: null },
+        [tabId]: { ...state.tabsById[tabId], companionId, error: null },
       },
     }));
+    // A tab with no conversation yet has nothing to persist against; the pick
+    // rides along on the first send instead.
     if (!tab.conversationId) return;
 
     try {
-      const conversation = await updateConversationModelPreference({
+      const conversation = await updateConversationCompanion({
         conversationId: tab.conversationId,
-        modelPreference: preference,
+        companionId,
       });
       set((state) => ({
         conversations: reconcileConversation(state.conversations, conversation),
@@ -430,7 +455,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           Object.entries(state.tabsById).map(([id, candidate]) => [
             id,
             candidate.conversationId === conversation.id
-              ? { ...candidate, modelPreference: conversation.modelPreference }
+              ? { ...candidate, companionId: conversation.companionId }
               : candidate,
           ]),
         ),
@@ -441,7 +466,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           ...state.tabsById,
           [tabId]: {
             ...state.tabsById[tabId],
-            modelPreference: previous,
+            companionId: previous,
             error: errorMessage(error),
           },
         },
@@ -484,6 +509,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     // Memory rides ahead of the message — fail-open, never blocks the send.
     const memory = await runMemoryPreSend({
       conversationId: tab.conversationId,
+      companionId: tab.companionId,
       text: message,
       messages: runtime?.messages ?? [],
     });
@@ -506,7 +532,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                     ...currentTab,
                     conversationId,
                     title: event.conversation.title,
-                    modelPreference: event.conversation.modelPreference,
+                    companionId: event.conversation.companionId,
                   },
                 }
               : state.tabsById,
@@ -645,7 +671,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
       const accepted = await submitMessage(
         {
           conversationId: tab.conversationId,
-          modelPreference: tab.modelPreference,
+          companionId: tab.companionId,
           content: message,
           memoryContext: memory?.injection || null,
           memoryAgentId: memory?.agentId ?? null,
@@ -718,7 +744,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     });
 
     try {
-      const outcome = await sleepConversation(conversationId, (event) => {
+      const outcome = await sleepConversation(conversationId, tab.companionId, (event) => {
         if (event.type === "stage" && event.stage === "distilling") {
           updateNotification(notificationId, {
             text: `Distilling ${event.turns} new turns — the model is reading the conversation…`,
@@ -801,9 +827,4 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
   },
 }));
 
-export function effectiveModelPreference(
-  preference: ModelPreference,
-  userPreferences: UserPreferences,
-): Exclude<ModelPreference, { mode: "inherit" }> {
-  return preference.mode === "inherit" ? userPreferences.defaultModel : preference;
-}
+

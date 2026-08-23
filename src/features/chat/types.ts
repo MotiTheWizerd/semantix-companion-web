@@ -1,12 +1,12 @@
-import type { ModelPreference } from "../preferences/types";
-
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type MessageStatus = "pending" | "streaming" | "completed" | "failed" | "cancelled";
 
 export interface Conversation {
   id: string;
   title: string;
-  modelPreference: ModelPreference;
+  /** Who this thread talks to. The companion carries the model and the memory,
+   *  so the conversation itself holds neither. */
+  companionId: string | null;
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
@@ -39,7 +39,9 @@ export interface AcceptedMessage {
 
 export interface SubmitMessageInput {
   conversationId: string | null;
-  modelPreference: ModelPreference;
+  /** The companion picked in the composer; null falls back to the thread's
+   *  stored companion, then to the built-in one. */
+  companionId: string | null;
   content: string;
   /** Recalled memory + time blocks — rides the inference request as a leading
    *  system message, never persisted into the conversation. */
@@ -70,9 +72,9 @@ export interface ToolCallEvent {
   detail: string | null;
 }
 
-export interface UpdateConversationModelPreferenceInput {
+export interface UpdateConversationCompanionInput {
   conversationId: string;
-  modelPreference: ModelPreference;
+  companionId: string;
 }
 
 export type ChatEvent =

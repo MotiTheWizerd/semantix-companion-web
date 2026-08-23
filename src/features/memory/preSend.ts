@@ -13,6 +13,8 @@ import { memoryReflexes, runPreSendReflexes } from "./reflexes/registry";
 
 export interface MemoryPreSendArgs {
   conversationId: string | null;
+  /** Whose memory to recall from. null = the built-in companion. */
+  companionId: string | null;
   /** The user's typed message. */
   text: string;
   /** The PRIOR conversation messages (loaded runtime), oldest first. */
@@ -52,7 +54,7 @@ export async function runMemoryPreSend(
   if (!isMemoryEnabled(prefs)) return null;
 
   try {
-    const { agent_id: agentId } = await companionMemoryAgent();
+    const { agent_id: agentId } = await companionMemoryAgent(args.companionId);
 
     let lastAssistantText: string | null = null;
     let lastUserAtMs: number | null = null;

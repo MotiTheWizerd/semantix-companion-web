@@ -3,6 +3,11 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { ConfirmDeleteButton } from "../../components/ConfirmDeleteButton";
 import { EditButton } from "../../components/EditButton";
+import { listConfiguredModels } from "../models/configuredModels/modelService";
+import type { ConfiguredModel } from "../models/configuredModels/types";
+import { ModelPreferenceSelect } from "../preferences/ModelPreferenceSelect";
+import { getUserPreferences } from "../preferences/preferenceService";
+import type { ModelPreference, UserPreferences } from "../preferences/types";
 import {
   createCompanion,
   deleteCompanion,
@@ -15,6 +20,14 @@ import { companionLabel, type Companion } from "./types";
 
 const NAME_MAX_LENGTH = 80;
 
+/** A new companion follows the user's default model until told otherwise. */
+const DEFAULT_MODEL_PREFERENCE: ModelPreference = { mode: "inherit" };
+
+const EMPTY_USER_PREFERENCES: UserPreferences = {
+  defaultModel: { mode: "test" },
+  updatedAt: 0,
+};
+
 function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
@@ -26,8 +39,29 @@ function companionInitial(companion: Companion): string {
   return companion.name?.trim().charAt(0).toUpperCase() || "◦";
 }
 
+/** The voice named for the row, resolved the way a send would resolve it. */
+function voiceLabel(
+  companion: Companion,
+  configuredModels: ConfiguredModel[],
+  userPreferences: UserPreferences,
+): string {
+  const preference =
+    companion.modelPreference.mode === "inherit"
+      ? userPreferences.defaultModel
+      : companion.modelPreference;
+  if (preference.mode !== "configured") return "Test stream";
+  return (
+    configuredModels.find((model) => model.id === preference.modelId)?.displayName ??
+    "Unavailable model"
+  );
+}
+
 export function CompanionRoster() {
   const [companions, setCompanions] = useState<Companion[]>([]);
+  const [configuredModels, setConfiguredModels] = useState<ConfiguredModel[]>([]);
+  const [userPreferences, setUserPreferences] = useState<UserPreferences>(
+    EMPTY_USER_PREFERENCES,
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -35,6 +69,9 @@ export function CompanionRoster() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const [modelPreference, setModelPreference] = useState<ModelPreference>(
+    DEFAULT_MODEL_PREFERENCE,
+  );
   const [error, setError] = useState<string | null>(null);
 
   const isEditing = editingId !== null;
@@ -51,8 +88,15 @@ export function CompanionRoster() {
           }
         });
 
-        const roster = await listCompanions();
-        if (!cancelled) setCompanions(roster);
+        const [roster, models, preferences] = await Promise.all([
+          listCompanions(),
+          listConfiguredModels(),
+          getUserPreferences(),
+        ]);
+        if (cancelled) return;
+        setCompanions(roster);
+        setConfiguredModels(models);
+        setUserPreferences(preferences);
       } catch (initialisationError) {
         if (!cancelled) setError(errorMessage(initialisationError));
       } finally {
@@ -69,6 +113,7 @@ export function CompanionRoster() {
 
   const closeForm = () => {
     setName("");
+    setModelPreference(DEFAULT_MODEL_PREFERENCE);
     setError(null);
     setEditingId(null);
     setIsFormOpen(false);
@@ -76,6 +121,7 @@ export function CompanionRoster() {
 
   const openCreateForm = () => {
     setName("");
+    setModelPreference(DEFAULT_MODEL_PREFERENCE);
     setError(null);
     setEditingId(null);
     setPendingDeleteId(null);
@@ -84,6 +130,7 @@ export function CompanionRoster() {
 
   const openEditForm = (companion: Companion) => {
     setName(companion.name ?? "");
+    setModelPreference(companion.modelPreference);
     setError(null);
     setEditingId(companion.id);
     setPendingDeleteId(null);
@@ -99,8 +146,12 @@ export function CompanionRoster() {
     setIsSaving(true);
     try {
       const companion = isEditing
-        ? await updateCompanion({ companionId: editingId, name: submitted })
-        : await createCompanion({ name: submitted });
+        ? await updateCompanion({
+            companionId: editingId,
+            name: submitted,
+            modelPreference,
+          })
+        : await createCompanion({ name: submitted, modelPreference });
       setCompanions((current) =>
         reconcileCompanionEvent(current, {
           kind: isEditing ? "updated" : "created",
@@ -137,7 +188,10 @@ export function CompanionRoster() {
       <div className="credential-store__header">
         <div>
           <h2 id="companions-title">Companions</h2>
-          <p>Each companion keeps its own private memory. Naming one is optional.</p>
+          <p>
+            Each companion keeps its own private memory and answers with its own
+            model. Naming one is optional.
+          </p>
         </div>
         <button
           className="credential-store__add-button"
@@ -188,6 +242,17 @@ export function CompanionRoster() {
                 onChange={(event) => setName(event.target.value)}
               />
             </label>
+
+            <label className="credential-field credential-field--wide">
+              <span>Model</span>
+              <ModelPreferenceSelect
+                value={modelPreference}
+                configuredModels={configuredModels}
+                userPreferences={userPreferences}
+                allowInherit
+                onChange={setModelPreference}
+              />
+            </label>
           </div>
 
           {error ? (
@@ -233,7 +298,10 @@ export function CompanionRoster() {
                 </div>
                 <div className="credential-list__identity">
                   <strong>{companionLabel(companion)}</strong>
-                  <span>{companion.isBuiltIn ? "Built-in companion" : "Companion"}</span>
+                  <span>
+                    {voiceLabel(companion, configuredModels, userPreferences)}
+                    {companion.isBuiltIn ? " · Built-in" : ""}
+                  </span>
                 </div>
                 <code>Private memory</code>
                 <div className="credential-list__actions">

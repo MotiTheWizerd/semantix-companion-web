@@ -29,9 +29,12 @@ export type SleepProgressEvent =
 
 export async function sleepConversation(
   conversationId: string,
+  companionId: string | null,
   onProgress?: (event: SleepProgressEvent) => void,
 ): Promise<SleepOutcome> {
-  const agent = await companionMemoryAgent();
+  // Sleep carves into the SAME companion recall reads from — the pairing that
+  // [[decision-base-memory-one-brain-both-ways]] exists to protect.
+  const agent = await companionMemoryAgent(companionId);
   const channel = new Channel<SleepProgressEvent>();
   channel.onmessage = (event) => onProgress?.(event);
   return invoke<SleepOutcome>("sleep_conversation", {

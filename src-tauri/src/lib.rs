@@ -62,7 +62,7 @@ pub fn run() {
             preferences::update_user_preferences,
             chat::list_conversations,
             chat::get_conversation_thread,
-            chat::update_conversation_model_preference,
+            chat::update_conversation_companion,
             chat::submit_message,
             memory::set_memory_account_token,
             memory::get_memory_account_token,

@@ -2,15 +2,9 @@ import { useEffect, useRef, type FormEvent, type KeyboardEvent } from "react";
 
 import { onConversationScrollToEnd } from "../features/chat/chatScrollEvents";
 import type { ChatMessage, ToolCallChipItem } from "../features/chat/types";
-import type { ConfiguredModel } from "../features/models/configuredModels/types";
-import {
-  modelPreferenceFromValue,
-  modelPreferenceValue,
-  type ModelPreference,
-  type UserPreferences,
-} from "../features/preferences/types";
+import { CompanionSelect } from "../features/companions/CompanionSelect";
+import type { Companion } from "../features/companions/types";
 import type { MemoryRecallChipData } from "../features/memory";
-import { effectiveModelPreference } from "../features/workspace/companionStore";
 import { EmptyState } from "./EmptyState";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { MemoryRecallChip } from "./MemoryRecallChip";
@@ -44,11 +38,11 @@ interface ChatSurfaceProps {
   /** 📖 tool chips per assistant message — live-session only. */
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
   content: string;
-  configuredModels: ConfiguredModel[];
-  modelPreference: ModelPreference;
-  userPreferences: UserPreferences;
+  /** The roster the composer picks from — who you are talking to. */
+  companions: Companion[];
+  companionId: string | null;
   onContentChange: (content: string) => void;
-  onModelPreferenceChange: (preference: ModelPreference) => void;
+  onCompanionChange: (companionId: string) => void;
   onSend: (content: string) => Promise<void>;
 }
 
@@ -62,23 +56,16 @@ export function ChatSurface({
   recallByMessageId,
   toolCallsByMessageId,
   content,
-  configuredModels,
-  modelPreference,
-  userPreferences,
+  companions,
+  companionId,
   onContentChange,
-  onModelPreferenceChange,
+  onCompanionChange,
   onSend,
 }: ChatSurfaceProps) {
   const threadRef = useRef<HTMLElement>(null);
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
   const hasMessages = messages.length > 0;
-  const inheritedModel = effectiveModelPreference({ mode: "inherit" }, userPreferences);
-  const inheritedModelLabel =
-    inheritedModel.mode === "configured"
-      ? (configuredModels.find((model) => model.id === inheritedModel.modelId)?.displayName ??
-        "Unavailable model")
-      : "Test stream";
 
   useEffect(() => {
     let frameId: number | null = null;
@@ -168,26 +155,17 @@ export function ChatSurface({
           <button className="composer-button" type="button" aria-label="Attach context">
             <AttachIcon />
           </button>
-          <label className="sr-only" htmlFor="companion-model">
-            Response model
+          <label className="sr-only" htmlFor="companion-picker">
+            Companion
           </label>
-          <select
+          <CompanionSelect
             className="chat-composer__model"
-            id="companion-model"
-            value={modelPreferenceValue(modelPreference)}
+            id="companion-picker"
+            companions={companions}
+            value={companionId}
             disabled={isLoading || isSending}
-            onChange={(event) =>
-              onModelPreferenceChange(modelPreferenceFromValue(event.target.value))
-            }
-          >
-            <option value="inherit">Default · {inheritedModelLabel}</option>
-            <option value="test">Test stream</option>
-            {configuredModels.map((model) => (
-              <option key={model.id} value={`configured:${model.id}`}>
-                {model.displayName}
-              </option>
-            ))}
-          </select>
+            onChange={onCompanionChange}
+          />
           <button
             className="composer-send"
             type="submit"

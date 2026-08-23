@@ -14,6 +14,7 @@ use tauri::{ipc::Channel, State};
 use crate::{
     app_error::AppError,
     chat::repository::ChatRepository,
+    companions::CompanionResolver,
     models::ModelResolver,
     preferences::PreferenceRepository,
     secret_vault::SecretVault,
@@ -47,6 +48,7 @@ impl MemoryState {
                 chats: ChatRepository::open(database_path)?,
                 preferences: PreferenceRepository::open(database_path)?,
                 models: ModelResolver::open(database_path)?,
+                companions: CompanionResolver::open(database_path)?,
             }),
         })
     }
@@ -56,6 +58,7 @@ struct MemoryService {
     chats: ChatRepository,
     preferences: PreferenceRepository,
     models: ModelResolver,
+    companions: CompanionResolver,
 }
 
 #[derive(Serialize)]
@@ -180,12 +183,17 @@ impl MemoryService {
             .collect();
         let fresh_message_ids = fresh.iter().map(|m| m.id.clone()).collect();
 
+        // The distiller speaks with the companion's voice, the same one that
+        // answered in the thread — so /sleep and chat can never diverge.
+        let companion = self
+            .companions
+            .resolve(thread.conversation.companion_id.as_deref())?;
         let configured_model_id = self
             .preferences
-            .resolve_model_id(&thread.conversation.model_preference)?
+            .resolve_model_id(&companion.model_preference)?
             .ok_or_else(|| {
                 AppError::validation(
-                    "Pick a real model for this conversation before sleeping — the test stream cannot distill memories.",
+                    "Give this companion a real model before sleeping — the test stream cannot distill memories.",
                 )
             })?;
         let model = self.models.resolve(&configured_model_id)?;

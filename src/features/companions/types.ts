@@ -1,9 +1,12 @@
 // The companion contract, spoken by both halves of the app.
 //
-// A companion is a name (optional) plus ONE private memory. `memoryAgentName`
-// is that memory's identity on the organ roster — assigned by Rust when the
-// record is made and never reassigned, so a rename cannot orphan what a
-// companion remembers.
+// A companion is a name (optional), ONE private memory, and the model it
+// speaks with. The companion is the IDENTITY a conversation talks to; the
+// chat picks a companion and never a model. `memoryAgentName` is the memory's
+// identity on the organ roster — assigned by Rust when the record is made and
+// never reassigned, so a rename cannot orphan what a companion remembers.
+
+import type { ModelPreference } from "../preferences/types";
 
 export interface Companion {
   id: string;
@@ -11,6 +14,8 @@ export interface Companion {
   name: string | null;
   /** This companion's private memory on the organ roster. Read-only here. */
   memoryAgentName: string;
+  /** The voice it answers with. `inherit` follows the user's default model. */
+  modelPreference: ModelPreference;
   /** The seeded companion: owns the memory carved before companions existed,
    *  and cannot be deleted. */
   isBuiltIn: boolean;
@@ -20,11 +25,13 @@ export interface Companion {
 
 export interface CreateCompanionInput {
   name: string | null;
+  modelPreference: ModelPreference;
 }
 
 export interface UpdateCompanionInput {
   companionId: string;
   name: string | null;
+  modelPreference: ModelPreference;
 }
 
 export type CompanionChangedEvent =
