@@ -19,6 +19,14 @@ pub(crate) enum ModelPreference {
         #[serde(rename = "modelId")]
         model_id: String,
     },
+    /// A Claude Code model (SDK alias like "opus"/"sonnet") — not a row in
+    /// configured_models. Selectable today; the chat path refuses it until the
+    /// Claude Code integration lands.
+    #[serde(rename = "claude_code")]
+    ClaudeCode {
+        #[serde(rename = "modelId")]
+        model_id: String,
+    },
 }
 
 impl ModelPreference {
@@ -26,6 +34,7 @@ impl ModelPreference {
         match (mode, model_id) {
             ("inherit", _) => Self::Inherit,
             ("configured", Some(model_id)) => Self::Configured { model_id },
+            ("claude_code", Some(model_id)) => Self::ClaudeCode { model_id },
             _ => Self::Test,
         }
     }
@@ -35,6 +44,7 @@ impl ModelPreference {
             Self::Inherit => ("inherit", None),
             Self::Test => ("test", None),
             Self::Configured { model_id } => ("configured", Some(model_id.trim())),
+            Self::ClaudeCode { model_id } => ("claude_code", Some(model_id.trim())),
         }
     }
 }
@@ -120,5 +130,23 @@ mod tests {
         let inherit = serde_json::to_value(ModelPreference::Inherit)
             .expect("inherit preference should serialize");
         assert_eq!(inherit["mode"], "inherit");
+
+        let claude = serde_json::to_value(ModelPreference::ClaudeCode {
+            model_id: "opus".to_owned(),
+        })
+        .expect("claude code preference should serialize");
+        assert_eq!(claude["mode"], "claude_code");
+        assert_eq!(claude["modelId"], "opus");
+    }
+
+    #[test]
+    fn claude_code_preferences_survive_the_storage_roundtrip() {
+        let preference = ModelPreference::ClaudeCode {
+            model_id: "sonnet".to_owned(),
+        };
+        let (mode, model_id) = preference.storage_parts();
+        assert_eq!(mode, "claude_code");
+        let restored = ModelPreference::from_storage(mode, model_id.map(str::to_owned));
+        assert_eq!(restored, preference);
     }
 }

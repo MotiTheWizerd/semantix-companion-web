@@ -1,0 +1,104 @@
+/* Migrated from the studio's ModelSelector styles, translated onto the
+   companion's tokens and its 38px form-field language. */
+
+.dropdown {
+  width: 100%;
+}
+
+/* The trigger reads as one of the form's own fields. */
+.formTrigger {
+  width: 100%;
+  height: 38px;
+  justify-content: space-between;
+}
+
+/* Wider than the shared 220px default so model blurbs get room. */
+.menu {
+  min-width: calc(220px + 3rem);
+}
+
+.selectedName {
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #d5d5d5;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* Brand row pinned above the search input in the open model menu — the two
+   provider tabs (Semantix / Claude Code), side by side. Clicking one filters
+   the list below to that family. */
+.brandRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Each brand icon is a filter button — bare, the icon carries the look. */
+.brandBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 5px;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  /* Inactive tabs recede; the active one comes forward (below). */
+  opacity: 0.45;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.brandBtn:hover {
+  opacity: 0.8;
+  background: var(--surface-hover);
+}
+
+.brandBtnActive {
+  opacity: 1;
+  background: var(--surface-hover);
+}
+
+.brandIcon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+/* The Claude mark reads lighter than the Semantix one at equal size — nudge
+   it up a touch so the two feel visually balanced side by side. */
+.brandIconClaude {
+  width: 22px;
+  height: 22px;
+}
+
+/* The Semantix logo carries more visual weight — scale it down so it sits
+   comfortably beside the provider mark. */
+.brandIconSemantix {
+  width: 14px;
+  height: 14px;
+}
+
+.modelItem {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.modelName {
+  font-weight: 400;
+  color: var(--text);
+}
+
+.modelProvider {
+  color: var(--text-muted);
+  font-size: 11px;
+}

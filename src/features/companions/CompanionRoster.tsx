@@ -4,9 +4,10 @@ import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 
 import { ConfirmDeleteButton } from "../../components/ConfirmDeleteButton";
 import { EditButton } from "../../components/EditButton";
+import { claudeModelLabel } from "../models/claudeCatalog";
 import { listConfiguredModels } from "../models/configuredModels/modelService";
 import type { ConfiguredModel } from "../models/configuredModels/types";
-import { ModelPreferenceSelect } from "../preferences/ModelPreferenceSelect";
+import { ModelSelector } from "../models/ModelSelector";
 import { getUserPreferences } from "../preferences/preferenceService";
 import type { ModelPreference, UserPreferences } from "../preferences/types";
 import {
@@ -56,6 +57,9 @@ function voiceLabel(
     companion.modelPreference.mode === "inherit"
       ? userPreferences.defaultModel
       : companion.modelPreference;
+  if (preference.mode === "claude_code") {
+    return `Claude · ${claudeModelLabel(preference.modelId)}`;
+  }
   if (preference.mode !== "configured") return "Test stream";
   return (
     configuredModels.find((model) => model.id === preference.modelId)?.displayName ??
@@ -268,16 +272,16 @@ export function CompanionRoster() {
               />
             </label>
 
-            <label className="credential-field credential-field--wide">
+            <div className="credential-field credential-field--wide">
               <span>Model</span>
-              <ModelPreferenceSelect
+              <ModelSelector
                 value={modelPreference}
                 configuredModels={configuredModels}
                 userPreferences={userPreferences}
                 allowInherit
                 onChange={setModelPreference}
               />
-            </label>
+            </div>
 
             <div className="credential-field credential-field--wide">
               <span>

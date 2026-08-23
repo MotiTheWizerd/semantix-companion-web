@@ -73,6 +73,14 @@ impl PreferenceRepository {
         &self,
         preference: &ModelPreference,
     ) -> Result<(), AppError> {
+        // A Claude Code pick names an SDK model, not a configured_models row —
+        // it only needs to name one at all.
+        if let ModelPreference::ClaudeCode { model_id } = preference {
+            if model_id.trim().is_empty() {
+                return Err(AppError::validation("Choose a Claude Code model."));
+            }
+            return Ok(());
+        }
         let ModelPreference::Configured { model_id } = preference else {
             return Ok(());
         };
@@ -110,6 +118,13 @@ impl PreferenceRepository {
         self.validate_model_preference(&effective)?;
         Ok(match effective {
             ModelPreference::Configured { model_id } => Some(model_id),
+            // The pick persists today; the chat wiring is the next round. An
+            // honest refusal beats silently answering with the test stream.
+            ModelPreference::ClaudeCode { .. } => {
+                return Err(AppError::validation(
+                    "Claude Code isn't wired into chat yet — pick a configured model for now.",
+                ))
+            }
             ModelPreference::Inherit | ModelPreference::Test => None,
         })
     }

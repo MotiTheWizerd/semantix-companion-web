@@ -286,7 +286,11 @@ export function ChatSurface({
           </button>
         </div>
       </form>
-      <p className="composer-note" id="composer-note">
+      <p
+        className={`composer-note${error ? " composer-note--error" : ""}`}
+        id="composer-note"
+        role={error ? "alert" : undefined}
+      >
         {error ?? notice ?? "Your conversations stay in your private workspace."}
       </p>
     </main>

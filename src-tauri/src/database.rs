@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 10;
+const LATEST_SCHEMA_VERSION: i64 = 11;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -339,6 +339,55 @@ fn migration_sql(version: i64) -> &'static str {
              CREATE INDEX IF NOT EXISTS idx_message_attachments_message
                  ON message_attachments(message_id);"
         }
+        11 => {
+            // The companion's voice may now be a Claude Code model. Schema 8
+            // pinned `model_preference_mode` to three modes with a CHECK and
+            // bound `model_id` to configured_models with a foreign key — a
+            // Claude alias ("opus") satisfies neither, and SQLite cannot
+            // loosen either in place, so `companions` is REBUILT (the same
+            // guarded procedure the conversations rebuild used; migrate()'s
+            // foreign_keys=OFF + foreign_key_check wraps this).
+            //
+            // The foreign key on model_id is deliberately GONE, not widened:
+            // the column now holds either a configured model's id or a Claude
+            // alias. Deleting a configured model therefore no longer nulls the
+            // companion's pick — the stored id stays, the UI names it
+            // "Unavailable model", and a send refuses with a clear error,
+            // which is more honest than the old silent downgrade to the test
+            // stream. Existence of a configured pick is enforced at write and
+            // resolve time in the repository.
+            "CREATE TABLE companions_migrated (
+                 id TEXT PRIMARY KEY,
+                 name TEXT,
+                 memory_agent_name TEXT NOT NULL UNIQUE,
+                 is_built_in INTEGER NOT NULL DEFAULT 0
+                     CHECK (is_built_in IN (0, 1)),
+                 model_preference_mode TEXT NOT NULL DEFAULT 'inherit'
+                     CHECK (model_preference_mode IN ('inherit', 'test', 'configured', 'claude_code')),
+                 model_id TEXT,
+                 workspace_dir TEXT
+                     CHECK (workspace_dir IS NULL OR length(trim(workspace_dir)) > 0),
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 CHECK (name IS NULL OR length(trim(name)) > 0)
+             );
+
+             INSERT INTO companions_migrated (
+                 id, name, memory_agent_name, is_built_in,
+                 model_preference_mode, model_id, workspace_dir,
+                 created_at, updated_at
+             )
+             SELECT id, name, memory_agent_name, is_built_in,
+                    model_preference_mode, model_id, workspace_dir,
+                    created_at, updated_at
+             FROM companions;
+
+             DROP TABLE companions;
+             ALTER TABLE companions_migrated RENAME TO companions;
+
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_companions_built_in
+                 ON companions(is_built_in) WHERE is_built_in = 1;"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -600,6 +649,87 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .expect("the pragma should be readable");
         assert_eq!(enforcing, 1);
+    }
+
+    /// Migration 11 rebuilds `companions` so a Claude Code voice is storable —
+    /// the schema-8 CHECK refused the mode and the model_id foreign key
+    /// refused the alias. Everything a companion already carried must ride the
+    /// rebuild, and the threads pointing at it must come out intact.
+    #[test]
+    fn the_companion_rebuild_admits_claude_code_and_keeps_the_roster() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+
+        // Stop at 10, seed a real companion + a thread bound to it, then let
+        // 11 rebuild the table under them.
+        for version in 1..=10 {
+            connection
+                .execute_batch(migration_sql(version))
+                .expect("migration should apply");
+        }
+        connection
+            .pragma_update(None, "user_version", 10)
+            .expect("version should stamp");
+        connection
+            .execute_batch(
+                "INSERT INTO companions (
+                     id, name, memory_agent_name, is_built_in,
+                     model_preference_mode, model_id, workspace_dir,
+                     created_at, updated_at
+                 ) VALUES ('companion-2', 'Rook', 'agent-rook', 0,
+                           'test', NULL, '/tmp/nest', 5, 6);
+                 INSERT INTO conversations (
+                     id, title, companion_id, created_at, updated_at, archived_at
+                 ) VALUES ('conversation-1', 'With Rook', 'companion-2', 7, 8, NULL);",
+            )
+            .expect("a companion and its thread should seed");
+
+        migrate(&mut connection).expect("migration eleven should rebuild the table");
+
+        let (name, agent, mode, workspace): (Option<String>, String, String, Option<String>) =
+            connection
+                .query_row(
+                    "SELECT name, memory_agent_name, model_preference_mode, workspace_dir
+                     FROM companions WHERE id = 'companion-2'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the companion should survive its own rebuild");
+        assert_eq!(name.as_deref(), Some("Rook"));
+        assert_eq!(agent, "agent-rook");
+        assert_eq!(mode, "test");
+        assert_eq!(workspace.as_deref(), Some("/tmp/nest"));
+
+        let companion_id: Option<String> = connection
+            .query_row(
+                "SELECT companion_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the thread should still name its companion");
+        assert_eq!(companion_id.as_deref(), Some("companion-2"));
+
+        // The point of the rebuild: a Claude Code voice is now storable.
+        connection
+            .execute(
+                "UPDATE companions
+                 SET model_preference_mode = 'claude_code', model_id = 'opus'
+                 WHERE id = 'companion-2'",
+                [],
+            )
+            .expect("a claude_code preference should now satisfy the schema");
+        let (mode, model): (String, Option<String>) = connection
+            .query_row(
+                "SELECT model_preference_mode, model_id FROM companions
+                 WHERE id = 'companion-2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the claude pick should read back");
+        assert_eq!(mode, "claude_code");
+        assert_eq!(model.as_deref(), Some("opus"));
     }
 
     #[test]

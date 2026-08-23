@@ -874,6 +874,13 @@ a {
   text-align: center;
 }
 
+/* A failed send must not whisper: the error wears the app's error red and a
+   readable size, and survives the short-viewport hide below. */
+.composer-note--error {
+  color: #c98787;
+  font-size: 11.5px;
+}
+
 .settings-screen {
   min-height: 0;
   overflow: auto;
@@ -1876,6 +1883,10 @@ a {
 
   .composer-note {
     display: none;
+  }
+
+  .composer-note--error {
+    display: block;
   }
 }
 
