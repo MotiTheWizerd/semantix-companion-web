@@ -47,21 +47,36 @@ struct SidecarQuery<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_prompt: Option<String>,
-    transcript: Vec<SidecarTurn>,
+    transcript: Vec<SidecarTurn<'a>>,
     user_text: String,
     /// The same declarations every other provider gets, handed to the SDK as
     /// in-process MCP tools; Rust still executes them.
     tools: Vec<SidecarTool<'a>>,
-    /// Images on the LIVE turn. Earlier turns travel as text: the transcript
-    /// is a written recap, and re-sending every past image would re-pay for
-    /// the whole album on every message.
+    /// Images on the LIVE turn.
     images: Vec<SidecarImage<'a>>,
 }
 
+/// One archived turn. It carries its own images now, and the sidecar spends
+/// them only when it has no session to resume (s495).
+///
+/// THE OLD RULE WAS RIGHT FOR THE WRONG REASON. "Earlier turns travel as text,
+/// re-sending every past image would re-pay for the whole album on every
+/// message" — true, and the sidecar already solved it: a live conversation
+/// RESUMES its Claude session, which still holds every image sent on the turn
+/// it arrived. The transcript is not the running context. It is the COLD
+/// RE-SEED, read on the first turn after the app restarts and never again.
+///
+/// So the album is not re-paid per message; it is paid once, on the one turn
+/// where the alternative is a model told in words that it was shown something.
+/// And the second half is not a cost question at all: an image-only turn
+/// flattened to text produced an EMPTY string, which the filter below then
+/// dropped — so the turn did not lose its picture, it disappeared, leaving a
+/// hole in the record that nothing announced.
 #[derive(Serialize)]
-struct SidecarTurn {
+struct SidecarTurn<'a> {
     role: &'static str,
     text: String,
+    images: Vec<SidecarImage<'a>>,
 }
 
 #[derive(Serialize)]
@@ -289,6 +304,17 @@ fn message_text(parts: &[ContentPart]) -> String {
         .join("\n")
 }
 
+/// The image parts of a message, in the order they were attached.
+fn message_images(parts: &[ContentPart]) -> Vec<SidecarImage<'_>> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Image { media_type, data } => Some(SidecarImage { media_type, data }),
+            ContentPart::Text { .. } => None,
+        })
+        .collect()
+}
+
 /// Split the canonical messages into the sidecar's shape: system text joined
 /// into one prompt, the LAST user message as the live turn, and everything
 /// between as the prior transcript.
@@ -311,20 +337,24 @@ fn build_query<'a>(request: &'a InferenceRequest) -> Result<SidecarQuery<'a>, St
         .rposition(|message| message.role == Role::User)
         .ok_or_else(|| StreamError::new("A Claude Code turn needs a user message to answer."))?;
 
-    let transcript = request.messages[..last_user_index]
+    let transcript: Vec<SidecarTurn> = request.messages[..last_user_index]
         .iter()
-        .filter_map(|message| match message.role {
-            Role::User => Some(SidecarTurn {
-                role: "user",
+        .filter_map(|message| {
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::System | Role::Tool => return None,
+            };
+            Some(SidecarTurn {
+                role,
                 text: message_text(&message.content),
-            }),
-            Role::Assistant => Some(SidecarTurn {
-                role: "assistant",
-                text: message_text(&message.content),
-            }),
-            Role::System | Role::Tool => None,
+                images: message_images(&message.content),
+            })
         })
-        .filter(|turn| !turn.text.is_empty())
+        // A turn earns its place with WORDS OR PICTURES. It used to need words,
+        // so a bare screenshot was indistinguishable from a turn that never
+        // happened.
+        .filter(|turn| !turn.text.is_empty() || !turn.images.is_empty())
         .collect();
 
     Ok(SidecarQuery {
@@ -335,17 +365,7 @@ fn build_query<'a>(request: &'a InferenceRequest) -> Result<SidecarQuery<'a>, St
         system_prompt,
         transcript,
         user_text: message_text(&request.messages[last_user_index].content),
-        images: request.messages[last_user_index]
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Image { media_type, data } => Some(SidecarImage {
-                    media_type,
-                    data,
-                }),
-                ContentPart::Text { .. } => None,
-            })
-            .collect(),
+        images: message_images(&request.messages[last_user_index].content),
         tools: request
             .tools
             .iter()

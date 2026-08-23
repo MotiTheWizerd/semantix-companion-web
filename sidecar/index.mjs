@@ -55,20 +55,93 @@ function log(...parts) {
   process.stderr.write(`[sidecar] ${parts.join(" ")}\n`);
 }
 
+/** How many archived images a cold re-seed will actually re-send, newest
+ *  first. This is paid ONCE per app restart, not per message — a resumed
+ *  session already holds every image it was shown. The cap is a fuse for the
+ *  conversation that is fifty screenshots deep, not a policy: older pictures
+ *  are named in the text rather than dropped in silence. */
+const RESEED_IMAGE_LIMIT = 6;
+
 /** No live session to resume — fold the archived turns into the prompt so the
- *  conversation keeps its footing across app restarts. */
-function compileFreshPrompt(transcript, userText) {
-  if (!transcript.length) return userText;
-  const history = transcript
-    .map((turn) => `${turn.role === "user" ? "User" : "You"}: ${turn.text}`)
-    .join("\n\n");
-  return (
-    "<conversation-so-far>\n" +
-    "This conversation continues from earlier turns (your replies are marked \"You\"):\n\n" +
-    `${history}\n` +
-    "</conversation-so-far>\n\n" +
-    userText
-  );
+ *  conversation keeps its footing across app restarts.
+ *
+ *  Returns CONTENT BLOCKS, not a string (s495). It used to return text, which
+ *  meant a re-seeded conversation was told in words that it had been shown a
+ *  picture — and a turn that was ONLY a picture rendered as an empty line and
+ *  vanished. The archive holds the image; the only reason it did not travel was
+ *  that this function had no way to carry one. */
+function compileFreshPrompt(transcript, userText, liveImages) {
+  const blocks = [];
+  const push = (text) => text && blocks.push({ type: "text", text });
+
+  // Newest images win the budget: recent pictures are the ones still being
+  // talked about, and an older one is usually already described in the words.
+  const budget = new Set();
+  let room = RESEED_IMAGE_LIMIT;
+  for (let i = transcript.length - 1; i >= 0 && room > 0; i -= 1) {
+    const n = (transcript[i].images ?? []).length;
+    if (n > 0 && n <= room) {
+      budget.add(i);
+      room -= n;
+    }
+  }
+
+  if (transcript.length) {
+    push(
+      "<conversation-so-far>\n" +
+        'This conversation continues from earlier turns (your replies are marked "You").\n' +
+        "Images from those turns are attached below, in the order they were sent:\n",
+    );
+    let pending = "";
+    transcript.forEach((turn, i) => {
+      const who = turn.role === "user" ? "User" : "You";
+      const images = turn.images ?? [];
+      const shown = budget.has(i);
+      // Say what the picture was even when it does not travel, so a gap is a
+      // stated gap. Silence here is what produced the hole in the first place.
+      const note = images.length
+        ? shown
+          ? ` [${images.length} image(s), attached]`
+          : ` [${images.length} image(s), too far back to re-attach]`
+        : "";
+      pending += `${pending ? "\n\n" : ""}${who}:${note}${turn.text ? ` ${turn.text}` : ""}`;
+      if (!shown) return;
+      // Flush the words BEFORE the pictures so each image lands after the turn
+      // that introduces it — order is the only thing telling the model which
+      // turn a picture belongs to.
+      push(pending);
+      pending = "";
+      for (const image of images) {
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: image.mediaType, data: image.data },
+        });
+      }
+    });
+    push(pending);
+    push("</conversation-so-far>");
+  }
+
+  for (const image of liveImages) {
+    blocks.push({
+      type: "image",
+      source: { type: "base64", media_type: image.mediaType, data: image.data },
+    });
+  }
+  push(userText);
+  return blocks;
+}
+
+/** Wrap content blocks as the SDK's streaming-input form. */
+function blockPrompt(content) {
+  return (async function* () {
+    yield {
+      type: "user",
+      session_id: "",
+      parent_tool_use_id: null,
+      message: { role: "user", content },
+    };
+  })();
 }
 
 /** Hand one tool call down to Rust and wait for its result. The promise is
@@ -137,10 +210,17 @@ function imagePrompt(text, images) {
 async function handleQuery(request) {
   const resume = sessions.get(request.conversationId);
   const images = request.images ?? [];
-  const text = resume
-    ? request.userText
-    : compileFreshPrompt(request.transcript ?? [], request.userText);
-  const prompt = images.length > 0 ? imagePrompt(text, images) : text;
+  let prompt;
+  if (resume) {
+    // The session still holds every earlier turn and every image in it. Send
+    // the live turn only; re-seeding here would duplicate what it already has.
+    prompt = images.length > 0 ? imagePrompt(request.userText, images) : request.userText;
+  } else {
+    // Cold: rebuild the conversation from the archive, pictures included.
+    prompt = blockPrompt(
+      compileFreshPrompt(request.transcript ?? [], request.userText, images),
+    );
+  }
 
   const declarations = request.tools ?? [];
   const options = {
