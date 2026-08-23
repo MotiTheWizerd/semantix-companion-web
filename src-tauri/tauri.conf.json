@@ -26,7 +26,14 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.png"]
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "icon": ["icons/icon.png"],
+    "resources": {
+      "../sidecar/index.mjs": "sidecar/index.mjs",
+      "../sidecar/schema.mjs": "sidecar/schema.mjs",
+      "../sidecar/package.json": "sidecar/package.json",
+      "../sidecar/node_modules": "sidecar/node_modules"
+    }
   }
 }

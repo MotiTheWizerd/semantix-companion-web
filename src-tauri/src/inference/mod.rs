@@ -10,3 +10,4 @@ pub(crate) use protocol::{
     Role, TokenUsage, ToolCall, ToolDeclaration,
 };
 pub(crate) use provider::{ProviderCredential, ToolRunner};
+pub(crate) use providers::set_bundled_sidecar_dir;

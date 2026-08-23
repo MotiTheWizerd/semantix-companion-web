@@ -5,16 +5,19 @@
 //!
 //! Protocol: one JSON object per line, requests down the child's stdin,
 //! events back up its stdout (`delta` / `toolCall` / `usage` / `done` /
-//! `error`), matched to callers by request id. The sidecar lives in the
-//! repo's `sidecar/` directory (dev builds find it via the baked manifest
-//! path; the `COMPANION_SIDECAR_DIR` env var overrides — packaging will point
-//! it at a bundled resource dir).
+//! `error`), matched to callers by request id.
+//!
+//! Finding the sidecar, in order: the `COMPANION_SIDECAR_DIR` env var, then
+//! the bundled resource dir registered at startup by `lib.rs`, then — dev
+//! builds only — the `sidecar/` directory beside `src-tauri`, baked in at
+//! compile time. A packaged app never reaches that last one.
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{Arc, Mutex as StdMutex, OnceLock},
 };
 
 use async_trait::async_trait;
@@ -142,23 +145,50 @@ impl Default for ClaudeProvider {
     }
 }
 
-/// Where the sidecar lives. Env override first; dev builds fall back to the
-/// repo's `sidecar/` beside `src-tauri` (the manifest path is baked at
-/// compile time, which is exactly right for a build running on this machine).
+/// The sidecar shipped inside the app bundle. Registered once at startup,
+/// because the resource dir is only knowable from the Tauri `AppHandle` and
+/// the gateway that builds this provider has no handle to thread down.
+static BUNDLED_SIDECAR_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Tell the Claude lane where the packaged sidecar lives. Called once from
+/// `lib.rs` setup; a second call is ignored rather than panicking, since a
+/// re-registration is never the interesting failure.
+pub(crate) fn set_bundled_sidecar_dir(dir: PathBuf) {
+    let _ = BUNDLED_SIDECAR_DIR.set(dir);
+}
+
+/// Where the sidecar lives, in preference order. Only the dev fallback is
+/// compile-time — a packaged build resolves against the bundle, and the env
+/// var wins everywhere for the times a machine disagrees with both.
 fn sidecar_dir() -> Result<PathBuf, StreamError> {
-    let candidate = match std::env::var("COMPANION_SIDECAR_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar"),
-    };
-    let dir = candidate
-        .canonicalize()
-        .map_err(|_| StreamError::new("The Claude Code sidecar directory could not be found."))?;
-    if !dir.join("index.mjs").is_file() {
-        return Err(StreamError::new(
-            "The Claude Code sidecar is missing its index.mjs.",
-        ));
-    }
-    Ok(dir)
+    let env_override = std::env::var("COMPANION_SIDECAR_DIR")
+        .ok()
+        .filter(|dir| !dir.trim().is_empty())
+        .map(PathBuf::from);
+    let candidates = [
+        env_override,
+        BUNDLED_SIDECAR_DIR.get().cloned(),
+        // Dev only: the repo's `sidecar/` beside `src-tauri`. On any other
+        // machine this path does not exist, which is the point.
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sidecar")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| usable_sidecar(&candidate))
+        .ok_or_else(|| {
+            StreamError::new(
+                "The Claude Code sidecar could not be found. Reinstalling Semantix Companion \
+                 should restore it, or set COMPANION_SIDECAR_DIR to point at it.",
+            )
+        })
+}
+
+/// A candidate counts only if it resolves AND carries an `index.mjs` — an
+/// empty directory left behind by a half-finished install is not a sidecar.
+fn usable_sidecar(candidate: &Path) -> Option<PathBuf> {
+    let dir = candidate.canonicalize().ok()?;
+    dir.join("index.mjs").is_file().then_some(dir)
 }
 
 impl ClaudeProvider {
@@ -193,10 +223,18 @@ impl ClaudeProvider {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| {
-                StreamError::new(format!(
-                    "Claude Code needs Node.js, and starting it failed: {error}"
-                ))
+            .map_err(|error| match error.kind() {
+                // The one failure a user can actually act on. Node is not an
+                // install requirement for Companion — only this lane needs it,
+                // so say that plainly instead of leaking an OS error.
+                ErrorKind::NotFound => StreamError::new(
+                    "The Claude Code lane needs Node.js, and it was not found on this machine. \
+                     Install it from nodejs.org, then send the message again — the rest of \
+                     Companion works without it.",
+                ),
+                _ => StreamError::new(format!(
+                    "The Claude Code sidecar could not be started: {error}"
+                )),
             })?;
         let stdin = child
             .stdin

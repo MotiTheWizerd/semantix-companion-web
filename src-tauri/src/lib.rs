@@ -27,6 +27,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // The Claude lane's sidecar ships as a bundle resource. Resolve it
+            // here — this is the only place with an AppHandle — and hand it to
+            // the provider, which has no way to ask for one itself. A dev run
+            // has no resource dir; the lane falls back to the repo copy.
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                inference::set_bundled_sidecar_dir(resource_dir.join("sidecar"));
+            }
             let app_data_dir = app.path().app_local_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
             let database_path = app_data_dir.join("companion.db");
