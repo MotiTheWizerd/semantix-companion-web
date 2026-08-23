@@ -208,17 +208,32 @@ impl MemoryService {
         {
             ResolvedVoice::Configured(model_id) => (model_id, None),
             ResolvedVoice::ClaudeCode(_) => {
+                // The user's default first; failing that, their most recently
+                // touched configured model. Refusing while a usable model sits
+                // right there would be pedantry, not caution — the note names
+                // whichever one wrote, so a wrong guess is visible and the fix
+                // is to set a default.
                 let borrowed = match self.preferences.resolve_voice(&ModelPreference::Inherit)? {
                     ResolvedVoice::Configured(model_id) => model_id,
-                    _ => return Err(AppError::validation(
-                        "Claude Code can't run the distiller, and there is no default model to borrow — set one in Settings, then sleep.",
-                    )),
+                    _ => self
+                        .models
+                        .list()?
+                        .into_iter()
+                        .next()
+                        .map(|model| model.id)
+                        .ok_or_else(|| {
+                            AppError::validation(
+                                "Claude Code can't run the distiller, and there is no Semantix model to borrow — add one in Settings, then sleep.",
+                            )
+                        })?,
                 };
                 let name = self
                     .models
-                    .resolve(&borrowed)
-                    .map(|model| model.model_id)
-                    .unwrap_or_else(|_| borrowed.clone());
+                    .list()?
+                    .into_iter()
+                    .find(|model| model.id == borrowed)
+                    .map(|model| model.display_name)
+                    .unwrap_or_else(|| borrowed.clone());
                 (
                     borrowed,
                     Some(format!(

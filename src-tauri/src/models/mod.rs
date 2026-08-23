@@ -108,6 +108,13 @@ impl ModelResolver {
         })
     }
 
+    /// The user's configured models, most recently touched first — the order
+    /// the Models tab shows them in, so "the first one" means the same thing
+    /// to the code and to the person reading the screen.
+    pub(crate) fn list(&self) -> Result<Vec<ConfiguredModel>, AppError> {
+        self.repository.list()
+    }
+
     pub(crate) fn resolve(&self, id: &str) -> Result<ResolvedConfiguredModel, AppError> {
         let record = self
             .repository
