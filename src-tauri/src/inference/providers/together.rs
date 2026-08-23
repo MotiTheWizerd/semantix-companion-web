@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     inference::{
         capabilities::ProviderCapabilities,
-        provider::{InferenceProvider, ProviderCredential},
+        provider::{InferenceProvider, ProviderCredential, ToolRunner},
         ContentPart, FinishReason, InferenceDelta, InferenceRequest, Role, TokenUsage, ToolCall,
     },
     streaming::{DeltaSink, StreamError},
@@ -43,6 +43,7 @@ impl InferenceProvider for TogetherProvider {
         &self,
         request: &InferenceRequest,
         credential: &ProviderCredential,
+        _tools: Option<&dyn ToolRunner>,
         sink: &dyn DeltaSink<InferenceDelta>,
     ) -> Result<(), StreamError> {
         let api_key = credential.api_key().ok_or_else(|| {
@@ -529,6 +530,7 @@ mod tests {
             },
             messages: vec![InferenceMessage::text(Role::System, "Be concise.")],
             tools: Vec::new(),
+            session_id: None,
         };
         let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
         let value = serde_json::to_value(mapped).expect("request should serialize");
@@ -556,6 +558,7 @@ mod tests {
                 ),
             ],
             tools: Vec::new(),
+            session_id: None,
         };
         let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
         let value = serde_json::to_value(mapped).expect("request should serialize");
@@ -596,6 +599,7 @@ mod tests {
                 description: "Fetch one memory.".to_owned(),
                 parameters: serde_json::json!({"type": "object"}),
             }],
+            session_id: None,
         };
         let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
         let value = serde_json::to_value(mapped).expect("request should serialize");

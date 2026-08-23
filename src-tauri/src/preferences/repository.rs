@@ -8,6 +8,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::{ModelPreference, UserPreferences};
 use crate::{app_error::AppError, database};
 
+/// The voice a preference resolves to once 'inherit' has been followed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ResolvedVoice {
+    TestStream,
+    /// A configured (OpenAI-compatible) model, by configured_models id.
+    Configured(String),
+    /// A Claude Code model, by SDK alias ("opus", "sonnet", …).
+    ClaudeCode(String),
+}
+
 pub(crate) struct PreferenceRepository {
     connection: Mutex<Connection>,
 }
@@ -106,10 +116,12 @@ impl PreferenceRepository {
         Ok(())
     }
 
-    pub(crate) fn resolve_model_id(
+    /// A preference resolved to the voice that will actually answer, with
+    /// inherit already followed to the user default.
+    pub(crate) fn resolve_voice(
         &self,
         preference: &ModelPreference,
-    ) -> Result<Option<String>, AppError> {
+    ) -> Result<ResolvedVoice, AppError> {
         let effective = if matches!(preference, ModelPreference::Inherit) {
             self.get_user_preferences()?.default_model
         } else {
@@ -117,15 +129,9 @@ impl PreferenceRepository {
         };
         self.validate_model_preference(&effective)?;
         Ok(match effective {
-            ModelPreference::Configured { model_id } => Some(model_id),
-            // The pick persists today; the chat wiring is the next round. An
-            // honest refusal beats silently answering with the test stream.
-            ModelPreference::ClaudeCode { .. } => {
-                return Err(AppError::validation(
-                    "Claude Code isn't wired into chat yet — pick a configured model for now.",
-                ))
-            }
-            ModelPreference::Inherit | ModelPreference::Test => None,
+            ModelPreference::Configured { model_id } => ResolvedVoice::Configured(model_id),
+            ModelPreference::ClaudeCode { model_id } => ResolvedVoice::ClaudeCode(model_id),
+            ModelPreference::Inherit | ModelPreference::Test => ResolvedVoice::TestStream,
         })
     }
 

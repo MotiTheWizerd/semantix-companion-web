@@ -2,7 +2,7 @@ mod repository;
 
 use std::{path::Path, sync::Arc};
 
-pub(crate) use repository::PreferenceRepository;
+pub(crate) use repository::{PreferenceRepository, ResolvedVoice};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 

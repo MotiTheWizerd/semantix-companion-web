@@ -16,10 +16,10 @@ use crate::{
     credentials::unix_timestamp_ms,
     inference::{
         InferenceDelta, InferenceExecution, InferenceGateway, InferenceMessage, InferenceRequest,
-        ModelTarget, ProviderCredential, Role, ToolCall,
+        ModelTarget, ProviderCredential, Role, ToolCall, ToolRunner,
     },
     models::ModelResolver,
-    preferences::PreferenceRepository,
+    preferences::{PreferenceRepository, ResolvedVoice},
     streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
     tools::{self, ToolContext},
 };
@@ -275,27 +275,36 @@ impl ChatService {
                 .as_deref()
                 .or(stored_companion_id.as_deref()),
         )?;
-        let configured_model_id = self
+        let voice = self
             .preferences
-            .resolve_model_id(&companion.model_preference)?;
-        let (target, credential) = if let Some(configured_model_id) = configured_model_id.as_deref()
-        {
-            let model = self.model_resolver.resolve(configured_model_id)?;
-            (
+            .resolve_voice(&companion.model_preference)?;
+        let (target, credential) = match voice {
+            ResolvedVoice::Configured(configured_model_id) => {
+                let model = self.model_resolver.resolve(&configured_model_id)?;
+                (
+                    ModelTarget {
+                        provider_id: model.provider_id,
+                        model_id: model.model_id,
+                    },
+                    ProviderCredential::ApiKey(model.api_key),
+                )
+            }
+            // Claude Code carries its own login — the sidecar authenticates
+            // with the user's local Claude session, no stored key involved.
+            ResolvedVoice::ClaudeCode(model_id) => (
                 ModelTarget {
-                    provider_id: model.provider_id,
-                    model_id: model.model_id,
+                    provider_id: "claude_code".to_owned(),
+                    model_id,
                 },
-                ProviderCredential::ApiKey(model.api_key),
-            )
-        } else {
-            (
+                ProviderCredential::None,
+            ),
+            ResolvedVoice::TestStream => (
                 ModelTarget {
                     provider_id: "test".to_owned(),
                     model_id: "test-stream".to_owned(),
                 },
                 ProviderCredential::None,
-            )
+            ),
         };
         let timestamp = unix_timestamp_ms()?;
         let new_conversation_id = Uuid::new_v4().to_string();
@@ -354,6 +363,7 @@ impl ChatService {
                 .filter(|path| path.is_dir()),
         };
 
+        let conversation_session_id = accepted.conversation.id.clone();
         Ok(PreparedSubmission {
             provider_id: target.provider_id.clone(),
             model_id: target.model_id.clone(),
@@ -364,8 +374,12 @@ impl ChatService {
                     target,
                     messages,
                     tools: tools::declarations(&tool_context),
+                    session_id: Some(conversation_session_id),
                 },
                 credential,
+                // Attached once the assistant message exists, so tool cards
+                // can name the message they belong to.
+                tool_runner: None,
             },
             tool_context,
         })
@@ -403,6 +417,41 @@ struct PreparedSubmission {
     provider_id: String,
     model_id: String,
     tool_context: ToolContext,
+}
+
+/// Executes one tool and narrates it to the UI. The single place a tool call
+/// becomes a tool result, whichever lane asked for it.
+struct ChatToolRunner {
+    context: ToolContext,
+    on_event: Channel<ChatEvent>,
+    conversation_id: String,
+    message_id: String,
+}
+
+#[async_trait::async_trait]
+impl ToolRunner for ChatToolRunner {
+    async fn run(&self, call: &ToolCall) -> Result<String, String> {
+        let _ = self.on_event.send(ChatEvent::ToolCall {
+            conversation_id: self.conversation_id.clone(),
+            message_id: self.message_id.clone(),
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            status: "running",
+            detail: None,
+        });
+        let result = tools::execute(call, &self.context).await;
+        let _ = self.on_event.send(ChatEvent::ToolCall {
+            conversation_id: self.conversation_id.clone(),
+            message_id: self.message_id.clone(),
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            status: if result.is_ok() { "ok" } else { "error" },
+            detail: result.as_ref().err().cloned(),
+        });
+        result
+    }
 }
 
 struct ChatStreamAdapter {
@@ -588,6 +637,18 @@ pub(crate) async fn submit_message(
 
     let adapter = ChatStreamAdapter::new(assistant.clone(), on_event.clone());
 
+    // One executor, both lanes: the chat loop calls it between rounds, and a
+    // provider that owns its own agentic loop (Claude Code) calls it
+    // mid-stream through the execution. Either way a tool runs in exactly one
+    // place and lights the same UI card.
+    let tool_runner = Arc::new(ChatToolRunner {
+        context: tool_context.clone(),
+        on_event: on_event.clone(),
+        conversation_id: assistant.conversation_id.clone(),
+        message_id: assistant.id.clone(),
+    });
+    execution.tool_runner = Some(Arc::clone(&tool_runner) as Arc<dyn ToolRunner>);
+
     // The execute-and-continue loop: stream a round; if the model requested
     // tools, run them backend-side, fold the results into the request, and
     // stream again. Text keeps landing on the SAME assistant message, so the
@@ -649,25 +710,7 @@ pub(crate) async fn submit_message(
             .push(InferenceMessage::assistant_tool_calls(round_text, calls.clone()));
 
         for call in calls {
-            let _ = on_event.send(ChatEvent::ToolCall {
-                conversation_id: assistant.conversation_id.clone(),
-                message_id: assistant.id.clone(),
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-                status: "running",
-                detail: None,
-            });
-            let result = tools::execute(&call, &tool_context).await;
-            let _ = on_event.send(ChatEvent::ToolCall {
-                conversation_id: assistant.conversation_id.clone(),
-                message_id: assistant.id.clone(),
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-                status: if result.is_ok() { "ok" } else { "error" },
-                detail: result.as_ref().err().cloned(),
-            });
+            let result = tool_runner.run(&call).await;
             // A failed tool becomes a result the model reads and recovers
             // from — it never kills the stream.
             let text = result.unwrap_or_else(|error| format!("Tool error: {error}"));

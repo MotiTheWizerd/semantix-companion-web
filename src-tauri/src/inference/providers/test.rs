@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     inference::{
         capabilities::ProviderCapabilities,
-        provider::{InferenceProvider, ProviderCredential},
+        provider::{InferenceProvider, ProviderCredential, ToolRunner},
         FinishReason, InferenceDelta, InferenceRequest,
     },
     streaming::{DeltaSink, StreamError},
@@ -50,6 +50,7 @@ impl InferenceProvider for TestProvider {
         &self,
         _request: &InferenceRequest,
         _credential: &ProviderCredential,
+        _tools: Option<&dyn ToolRunner>,
         sink: &dyn DeltaSink<InferenceDelta>,
     ) -> Result<(), StreamError> {
         if self.responses.is_empty() {
@@ -118,8 +119,10 @@ mod tests {
                     },
                     messages: Vec::new(),
                     tools: Vec::new(),
+                    session_id: None,
                 },
                 &ProviderCredential::None,
+                None,
                 &collector,
             )
             .await

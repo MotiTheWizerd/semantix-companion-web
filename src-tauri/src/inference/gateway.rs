@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use super::{
     capabilities::ProviderCapabilities,
-    provider::{InferenceProvider, ProviderCredential},
-    providers::{TestProvider, TogetherProvider},
+    provider::{InferenceProvider, ProviderCredential, ToolRunner},
+    providers::{ClaudeProvider, TestProvider, TogetherProvider},
     InferenceDelta, InferenceRequest,
 };
 use crate::streaming::{DeltaSink, StreamError, StreamSource};
@@ -13,6 +13,9 @@ use crate::streaming::{DeltaSink, StreamError, StreamSource};
 pub(crate) struct InferenceExecution {
     pub(crate) request: InferenceRequest,
     pub(crate) credential: ProviderCredential,
+    /// Set for providers that run tools inside their own turn. Belongs to the
+    /// execution, not the request: it is machinery for THIS run, not data.
+    pub(crate) tool_runner: Option<Arc<dyn ToolRunner>>,
 }
 
 pub(crate) struct InferenceGateway {
@@ -22,8 +25,9 @@ pub(crate) struct InferenceGateway {
 impl Default for InferenceGateway {
     fn default() -> Self {
         Self::new([
-            Arc::new(TestProvider::default()),
+            Arc::new(TestProvider::default()) as Arc<dyn InferenceProvider>,
             Arc::new(TogetherProvider::new()),
+            Arc::new(ClaudeProvider::default()),
         ])
     }
 }
@@ -63,7 +67,12 @@ impl StreamSource for InferenceGateway {
         }
 
         provider
-            .stream(&execution.request, &execution.credential, sink)
+            .stream(
+                &execution.request,
+                &execution.credential,
+                execution.tool_runner.as_deref(),
+                sink,
+            )
             .await
     }
 }
@@ -73,9 +82,10 @@ mod tests {
     use super::InferenceGateway;
 
     #[test]
-    fn gateway_registers_the_test_and_together_providers() {
+    fn gateway_registers_the_test_together_and_claude_providers() {
         let gateway = InferenceGateway::default();
         assert!(gateway.providers.contains_key("test"));
         assert!(gateway.providers.contains_key("together"));
+        assert!(gateway.providers.contains_key("claude_code"));
     }
 }

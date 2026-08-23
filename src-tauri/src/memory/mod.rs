@@ -188,14 +188,24 @@ impl MemoryService {
         let companion = self
             .companions
             .resolve(thread.conversation.companion_id.as_deref())?;
-        let configured_model_id = self
+        let configured_model_id = match self
             .preferences
-            .resolve_model_id(&companion.model_preference)?
-            .ok_or_else(|| {
-                AppError::validation(
+            .resolve_voice(&companion.model_preference)?
+        {
+            crate::preferences::ResolvedVoice::Configured(model_id) => model_id,
+            // The distiller runs on the memory server with a base_url + API
+            // key — Claude Code's local login can't travel there (yet).
+            crate::preferences::ResolvedVoice::ClaudeCode(_) => {
+                return Err(AppError::validation(
+                    "A Claude Code companion can't distill memories yet — sleeping needs a configured Semantix model.",
+                ))
+            }
+            crate::preferences::ResolvedVoice::TestStream => {
+                return Err(AppError::validation(
                     "Give this companion a real model before sleeping — the test stream cannot distill memories.",
-                )
-            })?;
+                ))
+            }
+        };
         let model = self.models.resolve(&configured_model_id)?;
         let base_url = provider_base_url(&model.provider_id)?;
 

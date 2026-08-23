@@ -13,6 +13,10 @@ pub(crate) struct InferenceRequest {
     /// provider mapping omits the field entirely so tool-less requests stay
     /// byte-identical to the pre-tooling wire shape.
     pub(crate) tools: Vec<ToolDeclaration>,
+    /// Stable identity of the conversation this request continues. Stateless
+    /// providers ignore it; a session-keeping provider (Claude Code) uses it
+    /// to resume the same underlying session across turns.
+    pub(crate) session_id: Option<String>,
 }
 
 /// One callable tool, provider-agnostic. `parameters` is a JSON Schema for

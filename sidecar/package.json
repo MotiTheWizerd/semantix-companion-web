@@ -1,0 +1,12 @@
+{
+  "name": "semantix-companion-sidecar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Claude Code lane for Semantix Companion — a stdio JSON-lines bridge over the Claude Agent SDK.",
+  "main": "index.mjs",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "zod": "^3.25.0"
+  }
+}

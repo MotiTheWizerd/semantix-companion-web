@@ -9,4 +9,4 @@ pub(crate) use protocol::{
     ContentPart, FinishReason, InferenceDelta, InferenceMessage, InferenceRequest, ModelTarget,
     Role, TokenUsage, ToolCall, ToolDeclaration,
 };
-pub(crate) use provider::ProviderCredential;
+pub(crate) use provider::{ProviderCredential, ToolRunner};
