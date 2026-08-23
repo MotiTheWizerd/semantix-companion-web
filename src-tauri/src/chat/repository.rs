@@ -1,11 +1,12 @@
 use std::{
+    collections::HashMap,
     path::Path,
     sync::{Mutex, MutexGuard},
 };
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use super::{AcceptedMessage, Conversation, ConversationThread, Message};
+use super::{AcceptedMessage, Conversation, ConversationThread, Message, MessageAttachment};
 use crate::{app_error::AppError, database};
 
 const CONVERSATION_COLUMNS: &str =
@@ -25,6 +26,9 @@ pub(crate) struct CommitUserMessage<'a> {
     pub(crate) timestamp: i64,
     pub(crate) new_conversation_id: &'a str,
     pub(crate) message_id: &'a str,
+    /// Images riding with the message — validated and identity-minted by the
+    /// service; the repository just makes them durable.
+    pub(crate) attachments: &'a [MessageAttachment],
 }
 
 /// One hit from the raw-memory drill (search_conversations tool): where the
@@ -149,11 +153,18 @@ impl ChatRepository {
                  ORDER BY sequence ASC",
             )
             .map_err(AppError::database)?;
-        let messages = statement
+        let mut messages = statement
             .query_map([conversation_id], message_from_row)
             .map_err(AppError::database)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::database)?;
+
+        let mut attachments = attachments_for_conversation(&connection, conversation_id)?;
+        for message in &mut messages {
+            if let Some(list) = attachments.remove(&message.id) {
+                message.attachments = list;
+            }
+        }
 
         Ok(Some(ConversationThread {
             conversation,
@@ -173,6 +184,7 @@ impl ChatRepository {
             timestamp,
             new_conversation_id,
             message_id,
+            attachments,
         } = input;
         let mut connection = self.connection()?;
         let transaction = connection.transaction().map_err(AppError::database)?;
@@ -237,6 +249,22 @@ impl ChatRepository {
                 params![message_id, conversation.id, sequence, content, timestamp],
             )
             .map_err(AppError::database)?;
+        for attachment in attachments {
+            transaction
+                .execute(
+                    "INSERT INTO message_attachments (
+                        id, message_id, media_type, data, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        attachment.id,
+                        message_id,
+                        attachment.media_type,
+                        attachment.data,
+                        timestamp
+                    ],
+                )
+                .map_err(AppError::database)?;
+        }
         transaction
             .execute(
                 "UPDATE conversations SET updated_at = ?2 WHERE id = ?1",
@@ -265,6 +293,7 @@ impl ChatRepository {
                 updated_at: timestamp,
                 completed_at: Some(timestamp),
                 slept_at: None,
+                attachments: attachments.to_vec(),
             },
         })
     }
@@ -367,6 +396,7 @@ impl ChatRepository {
             updated_at: timestamp,
             completed_at: None,
             slept_at: None,
+            attachments: Vec::new(),
         })
     }
 
@@ -477,7 +507,45 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         updated_at: row.get(10)?,
         completed_at: row.get(11)?,
         slept_at: row.get(12)?,
+        attachments: Vec::new(),
     })
+}
+
+/// Every attachment in the thread, grouped by message — one query for the
+/// whole stitch instead of one per message.
+fn attachments_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<HashMap<String, Vec<MessageAttachment>>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT a.message_id, a.id, a.media_type, a.data
+             FROM message_attachments a
+             JOIN messages m ON m.id = a.message_id
+             WHERE m.conversation_id = ?1
+             ORDER BY a.created_at ASC, a.id ASC",
+        )
+        .map_err(AppError::database)?;
+    let rows = statement
+        .query_map([conversation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                MessageAttachment {
+                    id: row.get(1)?,
+                    media_type: row.get(2)?,
+                    data: row.get(3)?,
+                },
+            ))
+        })
+        .map_err(AppError::database)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::database)?;
+
+    let mut grouped: HashMap<String, Vec<MessageAttachment>> = HashMap::new();
+    for (message_id, attachment) in rows {
+        grouped.entry(message_id).or_default().push(attachment);
+    }
+    Ok(grouped)
 }
 
 fn message_by_id(connection: &Connection, message_id: &str) -> Result<Option<Message>, AppError> {
@@ -527,6 +595,7 @@ mod tests {
                 timestamp: 1_755_800_000_000,
                 new_conversation_id: &conversation_id,
                 message_id: &format!("message-{tag}-user"),
+                attachments: &[],
             })
             .expect("user message should commit");
         repository
@@ -586,6 +655,56 @@ mod tests {
             .search_messages("\"serpent\"", None, 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 3, "both conversations, completed messages only");
+
+        drop(repository);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn attachments_survive_the_round_trip_and_ride_only_their_own_message() {
+        let (repository, path) = open_repository("attachments");
+        let attachments = vec![crate::chat::MessageAttachment {
+            id: "attachment-1".to_owned(),
+            media_type: "image/png".to_owned(),
+            data: "aGk=".to_owned(),
+        }];
+        let accepted = repository
+            .commit_user_message(CommitUserMessage {
+                conversation_id: None,
+                companion_id: "companion-built-in",
+                content: "Look at this.",
+                title: "Look at this.",
+                timestamp: 1_755_800_000_000,
+                new_conversation_id: "conversation-images",
+                message_id: "message-with-image",
+                attachments: &attachments,
+            })
+            .expect("user message should commit");
+        assert_eq!(accepted.message.attachments.len(), 1, "the echo carries the image");
+
+        // A second, imageless message in the same thread.
+        repository
+            .commit_user_message(CommitUserMessage {
+                conversation_id: Some("conversation-images"),
+                companion_id: "companion-built-in",
+                content: "And a plain one.",
+                title: "Look at this.",
+                timestamp: 1_755_800_001_000,
+                new_conversation_id: "unused",
+                message_id: "message-plain",
+                attachments: &[],
+            })
+            .expect("plain message should commit");
+
+        let thread = repository
+            .get_thread("conversation-images")
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert_eq!(thread.messages.len(), 2);
+        assert_eq!(thread.messages[0].attachments.len(), 1);
+        assert_eq!(thread.messages[0].attachments[0].media_type, "image/png");
+        assert_eq!(thread.messages[0].attachments[0].data, "aGk=");
+        assert!(thread.messages[1].attachments.is_empty());
 
         drop(repository);
         let _ = fs::remove_file(path);

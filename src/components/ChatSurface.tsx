@@ -1,7 +1,21 @@
-import { useEffect, useRef, type FormEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  type ClipboardEvent,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 
 import { onConversationScrollToEnd } from "../features/chat/chatScrollEvents";
-import type { ChatMessage, ToolCallChipItem } from "../features/chat/types";
+import {
+  isAttachableImage,
+  readClipboardImages,
+} from "../features/chat/imageAttachments";
+import type {
+  ChatMessage,
+  PendingAttachment,
+  ToolCallChipItem,
+} from "../features/chat/types";
 import { CompanionSelect } from "../features/companions/CompanionSelect";
 import type { Companion } from "../features/companions/types";
 import type { MemoryRecallChipData } from "../features/memory";
@@ -38,12 +52,16 @@ interface ChatSurfaceProps {
   /** 📖 tool chips per assistant message — live-session only. */
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
   content: string;
+  /** Composer images awaiting send. */
+  pendingAttachments: PendingAttachment[];
   /** The roster the composer picks from — who you are talking to. */
   companions: Companion[];
   companionId: string | null;
   onContentChange: (content: string) => void;
   onCompanionChange: (companionId: string) => void;
   onSend: (content: string) => Promise<void>;
+  onAttachFiles: (files: File[]) => void;
+  onRemoveAttachment: (attachmentId: string) => void;
 }
 
 export function ChatSurface({
@@ -56,13 +74,17 @@ export function ChatSurface({
   recallByMessageId,
   toolCallsByMessageId,
   content,
+  pendingAttachments,
   companions,
   companionId,
   onContentChange,
   onCompanionChange,
   onSend,
+  onAttachFiles,
+  onRemoveAttachment,
 }: ChatSurfaceProps) {
   const threadRef = useRef<HTMLElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
   const hasMessages = messages.length > 0;
@@ -90,7 +112,7 @@ export function ChatSurface({
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const message = content.trim();
-    if (!message || isSending) return;
+    if ((!message && pendingAttachments.length === 0) || isSending) return;
     await onSend(message);
   };
 
@@ -99,6 +121,39 @@ export function ChatSurface({
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
+  };
+
+  // A pasted screenshot is an attachment, not a wall of nothing. WebKitGTK
+  // hands pasted images through `items` rather than `files` — and for a
+  // copied screenshot it often hands an EMPTY DataTransfer, so when both
+  // lists come up dry we go ask the async clipboard API directly.
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const fromItems = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    const images = [...event.clipboardData.files, ...fromItems]
+      .filter(isAttachableImage)
+      // The same screenshot can appear in both lists — keep each image once.
+      .filter(
+        (file, index, all) =>
+          all.findIndex(
+            (other) =>
+              other.name === file.name &&
+              other.size === file.size &&
+              other.type === file.type,
+          ) === index,
+      );
+    if (images.length > 0) {
+      event.preventDefault();
+      onAttachFiles(images);
+      return;
+    }
+    // No preventDefault here: if the clipboard holds text, the normal paste
+    // proceeds; if it holds only an image, this fallback catches it.
+    void readClipboardImages().then((files) => {
+      if (files.length > 0) onAttachFiles(files);
+    });
   };
 
   return (
@@ -118,6 +173,17 @@ export function ChatSurface({
                 className={`chat-message chat-message--${message.role}`}
                 key={message.id}
               >
+                {message.attachments.length > 0 ? (
+                  <div className="chat-message__images">
+                    {message.attachments.map((attachment) => (
+                      <img
+                        key={attachment.id}
+                        src={`data:${attachment.mediaType};base64,${attachment.data}`}
+                        alt="Attached image"
+                      />
+                    ))}
+                  </div>
+                ) : null}
                 {message.role === "assistant" && message.content ? (
                   <MarkdownRenderer content={message.content} />
                 ) : (
@@ -140,6 +206,25 @@ export function ChatSurface({
         <label className="sr-only" htmlFor="companion-message">
           Message Companion
         </label>
+        {pendingAttachments.length > 0 ? (
+          <div className="chat-composer__attachments">
+            {pendingAttachments.map((attachment) => (
+              <span className="composer-attachment" key={attachment.id}>
+                <img
+                  src={`data:${attachment.mediaType};base64,${attachment.data}`}
+                  alt="Image ready to send"
+                />
+                <button
+                  type="button"
+                  aria-label="Remove image"
+                  onClick={() => onRemoveAttachment(attachment.id)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
         <textarea
           id="companion-message"
           name="message"
@@ -150,9 +235,30 @@ export function ChatSurface({
           disabled={isLoading}
           onChange={(event) => onContentChange(event.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
         />
         <div className="chat-composer__toolbar">
-          <button className="composer-button" type="button" aria-label="Attach context">
+          <input
+            ref={fileInputRef}
+            className="sr-only"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              event.target.value = "";
+              if (files.length > 0) onAttachFiles(files);
+            }}
+          />
+          <button
+            className="composer-button"
+            type="button"
+            aria-label="Attach images"
+            disabled={isLoading || isSending}
+            onClick={() => fileInputRef.current?.click()}
+          >
             <AttachIcon />
           </button>
           <label className="sr-only" htmlFor="companion-picker">
@@ -170,7 +276,11 @@ export function ChatSurface({
             className="composer-send"
             type="submit"
             aria-label="Send message"
-            disabled={isLoading || isSending || content.trim().length === 0}
+            disabled={
+              isLoading ||
+              isSending ||
+              (content.trim().length === 0 && pendingAttachments.length === 0)
+            }
           >
             <SendIcon />
           </button>

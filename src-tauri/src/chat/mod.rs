@@ -59,6 +59,19 @@ pub(crate) struct Message {
     /// The sleep ledger stamp — set once this message has been distilled into
     /// long-term memory; the next /sleep skips it.
     pub(crate) slept_at: Option<i64>,
+    /// Images sent with this message. Stored beside the text (their own
+    /// table), re-injected into the canonical history, rendered in the thread.
+    pub(crate) attachments: Vec<MessageAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MessageAttachment {
+    pub(crate) id: String,
+    pub(crate) media_type: String,
+    /// Base64, no data-URL prefix — the renderer and the provider mapping
+    /// each add their own.
+    pub(crate) data: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -93,6 +106,17 @@ pub(crate) struct SubmitMessageInput {
     /// memory off for this send, so the tool is never declared.
     #[serde(default)]
     memory_agent_id: Option<String>,
+    /// Images riding with this message — already downscaled by the composer.
+    #[serde(default)]
+    attachments: Vec<AttachmentInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AttachmentInput {
+    media_type: String,
+    /// Base64, no data-URL prefix.
+    data: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,9 +247,10 @@ impl ChatService {
             .update_companion(conversation_id, &companion.id)
     }
 
-    fn submit(&self, input: SubmitMessageInput) -> Result<PreparedSubmission, AppError> {
+    fn submit(&self, mut input: SubmitMessageInput) -> Result<PreparedSubmission, AppError> {
+        let attachments = accept_attachments(std::mem::take(&mut input.attachments))?;
         let content = input.content.trim();
-        if content.is_empty() {
+        if content.is_empty() && attachments.is_empty() {
             return Err(AppError::validation("Write a message before sending."));
         }
         if content.chars().count() > 100_000 {
@@ -284,6 +309,7 @@ impl ChatService {
             timestamp,
             new_conversation_id: &new_conversation_id,
             message_id: &message_id,
+            attachments: &attachments,
         })?;
         let thread = self
             .repository
@@ -747,7 +773,63 @@ fn canonical_messages(messages: &[Message]) -> Vec<InferenceMessage> {
                 "assistant" => Role::Assistant,
                 _ => return None,
             };
+            // Images re-inject on every turn, so the model keeps seeing them
+            // for the life of the thread, not just the turn they arrived on.
+            if role == Role::User && !message.attachments.is_empty() {
+                return Some(InferenceMessage::user_with_images(
+                    message.content.clone(),
+                    message
+                        .attachments
+                        .iter()
+                        .map(|attachment| {
+                            (attachment.media_type.clone(), attachment.data.clone())
+                        }),
+                ));
+            }
             Some(InferenceMessage::text(role, message.content.clone()))
+        })
+        .collect()
+}
+
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 4;
+/// Base64 ceiling per image (~6MB decoded) — the composer downscales far
+/// below this; the cap is the backstop, not the budget.
+const MAX_ATTACHMENT_BASE64_BYTES: usize = 8 * 1024 * 1024;
+const ACCEPTED_IMAGE_TYPES: [&str; 4] =
+    ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// Validate the composer's images and mint their identities.
+fn accept_attachments(
+    attachments: Vec<AttachmentInput>,
+) -> Result<Vec<MessageAttachment>, AppError> {
+    if attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(AppError::validation(format!(
+            "A message can carry up to {MAX_ATTACHMENTS_PER_MESSAGE} images."
+        )));
+    }
+    attachments
+        .into_iter()
+        .map(|attachment| {
+            let media_type = attachment.media_type.trim().to_ascii_lowercase();
+            if !ACCEPTED_IMAGE_TYPES.contains(&media_type.as_str()) {
+                return Err(AppError::validation(
+                    "Only PNG, JPEG, WebP and GIF images can be attached.",
+                ));
+            }
+            let data = attachment.data.trim().to_owned();
+            if data.is_empty() {
+                return Err(AppError::validation("An attached image arrived empty."));
+            }
+            if data.len() > MAX_ATTACHMENT_BASE64_BYTES {
+                return Err(AppError::validation(
+                    "An attached image is too large — images must be under ~6MB.",
+                ));
+            }
+            Ok(MessageAttachment {
+                id: Uuid::new_v4().to_string(),
+                media_type,
+                data,
+            })
         })
         .collect()
 }
@@ -863,6 +945,7 @@ mod tests {
                     content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
                     memory_context: None,
                     memory_agent_id: None,
+                    attachments: Vec::new(),
                 })
                 .expect("message should persist");
 

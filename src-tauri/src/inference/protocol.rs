@@ -53,6 +53,28 @@ impl InferenceMessage {
         }
     }
 
+    /// A user turn carrying images — the images lead, the words follow, the
+    /// order vision models read a "look at this: …" message in.
+    pub(crate) fn user_with_images(
+        text: impl Into<String>,
+        images: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let mut content: Vec<ContentPart> = images
+            .into_iter()
+            .map(|(media_type, data)| ContentPart::Image { media_type, data })
+            .collect();
+        let text = text.into();
+        if !text.is_empty() {
+            content.push(ContentPart::Text { text });
+        }
+        Self {
+            role: Role::User,
+            content,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
     /// The assistant turn that asked for tools — text the model produced in
     /// the same round (may be empty) plus the calls themselves.
     pub(crate) fn assistant_tool_calls(text: String, tool_calls: Vec<ToolCall>) -> Self {
@@ -90,6 +112,9 @@ pub(crate) enum Role {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ContentPart {
     Text { text: String },
+    /// One image the model should see. `data` is base64 (no data-URL prefix);
+    /// each provider mapping wraps it in its own wire shape.
+    Image { media_type: String, data: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

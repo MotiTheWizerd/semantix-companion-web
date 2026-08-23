@@ -117,13 +117,44 @@ impl<'a> TogetherRequest<'a> {
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",
                 };
-                let content = message
+                // Text-only messages keep the plain-string wire shape they
+                // have always had; an image anywhere switches the message to
+                // the OpenAI vision parts array.
+                let has_images = message
                     .content
                     .iter()
-                    .map(|part| match part {
-                        ContentPart::Text { text } => text.as_str(),
-                    })
-                    .collect::<String>();
+                    .any(|part| matches!(part, ContentPart::Image { .. }));
+                let content = if has_images {
+                    TogetherContent::Parts(
+                        message
+                            .content
+                            .iter()
+                            .map(|part| match part {
+                                ContentPart::Text { text } => TogetherContentPart::Text {
+                                    text: text.clone(),
+                                },
+                                ContentPart::Image { media_type, data } => {
+                                    TogetherContentPart::ImageUrl {
+                                        image_url: TogetherImageUrl {
+                                            url: format!("data:{media_type};base64,{data}"),
+                                        },
+                                    }
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    TogetherContent::Text(
+                        message
+                            .content
+                            .iter()
+                            .map(|part| match part {
+                                ContentPart::Text { text } => text.as_str(),
+                                ContentPart::Image { .. } => unreachable!(),
+                            })
+                            .collect::<String>(),
+                    )
+                };
                 TogetherMessage {
                     role,
                     content,
@@ -174,11 +205,32 @@ impl<'a> TogetherRequest<'a> {
 #[derive(Serialize)]
 struct TogetherMessage<'a> {
     role: &'static str,
-    content: String,
+    content: TogetherContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<TogetherToolCallOut<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
+}
+
+/// OpenAI-compatible message content: a bare string for text, an array of
+/// typed parts the moment images ride along.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum TogetherContent {
+    Text(String),
+    Parts(Vec<TogetherContentPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TogetherContentPart {
+    Text { text: String },
+    ImageUrl { image_url: TogetherImageUrl },
+}
+
+#[derive(Serialize)]
+struct TogetherImageUrl {
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -486,6 +538,37 @@ mod tests {
         assert_eq!(value["stream"], true);
         assert!(value.get("tools").is_none());
         assert!(value.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn image_messages_map_to_the_vision_parts_array_and_text_stays_a_string() {
+        let request = InferenceRequest {
+            id: "request-3".to_owned(),
+            target: ModelTarget {
+                provider_id: "together".to_owned(),
+                model_id: "meta-llama/test".to_owned(),
+            },
+            messages: vec![
+                InferenceMessage::text(Role::System, "Be concise."),
+                InferenceMessage::user_with_images(
+                    "What is in this picture?",
+                    vec![("image/png".to_owned(), "aGk=".to_owned())],
+                ),
+            ],
+            tools: Vec::new(),
+        };
+        let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
+        let value = serde_json::to_value(mapped).expect("request should serialize");
+        // Text-only stays the plain string it has always been…
+        assert_eq!(value["messages"][0]["content"], "Be concise.");
+        // …and the image turn becomes the typed parts array, image first.
+        assert_eq!(value["messages"][1]["content"][0]["type"], "image_url");
+        assert_eq!(
+            value["messages"][1]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,aGk="
+        );
+        assert_eq!(value["messages"][1]["content"][1]["type"], "text");
+        assert_eq!(value["messages"][1]["content"][1]["text"], "What is in this picture?");
     }
 
     #[test]

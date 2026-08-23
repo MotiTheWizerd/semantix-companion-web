@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 9;
+const LATEST_SCHEMA_VERSION: i64 = 10;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -318,6 +318,26 @@ fn migration_sql(version: i64) -> &'static str {
             // every tool call re-proves containment before it acts.
             "ALTER TABLE companions ADD COLUMN workspace_dir TEXT
                  CHECK (workspace_dir IS NULL OR length(trim(workspace_dir)) > 0);"
+        }
+        10 => {
+            // Images ride WITH a message, not inside it: `content` stays pure
+            // text (the FTS index and the sleep distiller read it untouched),
+            // and each attachment is its own row — base64 in `data`, typed by
+            // `media_type`. CASCADE keeps the archive's one deletion path
+            // honest: a message goes, its images go.
+            "CREATE TABLE IF NOT EXISTS message_attachments (
+                 id TEXT PRIMARY KEY,
+                 message_id TEXT NOT NULL,
+                 media_type TEXT NOT NULL,
+                 data TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 FOREIGN KEY (message_id)
+                     REFERENCES messages(id)
+                     ON DELETE CASCADE
+             );
+
+             CREATE INDEX IF NOT EXISTS idx_message_attachments_message
+                 ON message_attachments(message_id);"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

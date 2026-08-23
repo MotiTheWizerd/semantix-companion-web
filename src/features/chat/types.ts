@@ -12,6 +12,20 @@ export interface Conversation {
   archivedAt: number | null;
 }
 
+/** One image stored with a message. `data` is base64, no data-URL prefix. */
+export interface MessageAttachment {
+  id: string;
+  mediaType: string;
+  data: string;
+}
+
+/** A composer image awaiting send — same payload, identity minted by Rust. */
+export interface PendingAttachment {
+  id: string;
+  mediaType: string;
+  data: string;
+}
+
 export interface ChatMessage {
   id: string;
   conversationId: string;
@@ -25,6 +39,7 @@ export interface ChatMessage {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  attachments: MessageAttachment[];
 }
 
 export interface ConversationThread {
@@ -48,6 +63,8 @@ export interface SubmitMessageInput {
   memoryContext?: string | null;
   /** The memory agent backing the recall_memory tool; null = tool undeclared. */
   memoryAgentId?: string | null;
+  /** Images riding with the message — already downscaled by the composer. */
+  attachments?: { mediaType: string; data: string }[];
 }
 
 /** What the 📖 chip renders for one tool call — latest lifecycle state. */

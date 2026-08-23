@@ -13,8 +13,13 @@ import type {
   ChatEvent,
   ChatMessage,
   Conversation,
+  PendingAttachment,
   ToolCallChipItem,
 } from "../chat/types";
+import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  prepareImageAttachment,
+} from "../chat/imageAttachments";
 import {
   listCompanions,
   onCompanionsChanged,
@@ -43,6 +48,8 @@ export interface ConversationTab {
   conversationId: string | null;
   title: string;
   draft: string;
+  /** Composer images awaiting send — cleared on send, restored on failure. */
+  attachments: PendingAttachment[];
   /** Who this tab talks to. null = nothing picked yet, so the built-in
    *  companion answers — Rust resolves the same way. */
   companionId: string | null;
@@ -86,6 +93,11 @@ interface CompanionStore {
   setActiveTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   setDraft: (tabId: string, draft: string) => void;
+  /** Attach prepared images to a tab's composer (capped per message). */
+  addAttachments: (tabId: string, attachments: PendingAttachment[]) => void;
+  removeAttachment: (tabId: string, attachmentId: string) => void;
+  /** Prepare raw files (downscale + encode) and attach them to the composer. */
+  attachFiles: (tabId: string, files: (File | Blob)[]) => Promise<void>;
   setTabCompanion: (tabId: string, companionId: string) => Promise<void>;
   setUserDefaultModel: (
     preference: Exclude<ModelPreference, { mode: "inherit" }>,
@@ -112,6 +124,7 @@ function newConversationTab(): ConversationTab {
     conversationId: null,
     title: "New conversation",
     draft: "",
+    attachments: [],
     companionId: null,
     unreadCount: 0,
     error: null,
@@ -125,6 +138,7 @@ function tabForConversation(conversation: Conversation): ConversationTab {
     conversationId: conversation.id,
     title: conversation.title,
     draft: "",
+    attachments: [],
     companionId: conversation.companionId,
     unreadCount: 0,
     error: null,
@@ -420,6 +434,72 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     if (nextOrder.length === 0) get().openNewConversation();
   },
 
+  addAttachments: (tabId, attachments) => {
+    set((state) => {
+      const tab = state.tabsById[tabId];
+      if (!tab || attachments.length === 0) return state;
+      const merged = [...tab.attachments, ...attachments].slice(
+        0,
+        MAX_ATTACHMENTS_PER_MESSAGE,
+      );
+      const dropped = tab.attachments.length + attachments.length - merged.length;
+      return {
+        tabsById: {
+          ...state.tabsById,
+          [tabId]: {
+            ...tab,
+            attachments: merged,
+            error: null,
+            notice:
+              dropped > 0
+                ? `A message can carry up to ${MAX_ATTACHMENTS_PER_MESSAGE} images — ${dropped} left out.`
+                : tab.notice,
+          },
+        },
+      };
+    });
+  },
+
+  attachFiles: async (tabId, files) => {
+    if (files.length === 0) return;
+    try {
+      const prepared = await Promise.all(
+        files.map((file) => prepareImageAttachment(file)),
+      );
+      get().addAttachments(tabId, prepared);
+    } catch (error) {
+      set((state) => {
+        const tab = state.tabsById[tabId];
+        return tab
+          ? {
+              tabsById: {
+                ...state.tabsById,
+                [tabId]: { ...tab, error: errorMessage(error) },
+              },
+            }
+          : state;
+      });
+    }
+  },
+
+  removeAttachment: (tabId, attachmentId) => {
+    set((state) => {
+      const tab = state.tabsById[tabId];
+      if (!tab) return state;
+      return {
+        tabsById: {
+          ...state.tabsById,
+          [tabId]: {
+            ...tab,
+            attachments: tab.attachments.filter(
+              (attachment) => attachment.id !== attachmentId,
+            ),
+          },
+        },
+      };
+    });
+  },
+
   setDraft: (tabId, draft) => {
     if (!get().tabsById[tabId]) return;
     set((state) => ({
@@ -487,7 +567,9 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
   sendMessage: async (tabId, content) => {
     const tab = get().tabsById[tabId];
     const message = content.trim();
-    if (!tab || !message || get().submittingByTabId[tabId]) return;
+    const attachments = tab?.attachments ?? [];
+    if (!tab || (!message && attachments.length === 0) || get().submittingByTabId[tabId])
+      return;
     const runtime = tab.conversationId
       ? get().runtimeByConversationId[tab.conversationId]
       : undefined;
@@ -502,7 +584,13 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
       submittingByTabId: { ...state.submittingByTabId, [tabId]: true },
       tabsById: {
         ...state.tabsById,
-        [tabId]: { ...state.tabsById[tabId], draft: "", error: null, notice: null },
+        [tabId]: {
+          ...state.tabsById[tabId],
+          draft: "",
+          attachments: [],
+          error: null,
+          notice: null,
+        },
       },
     }));
 
@@ -675,6 +763,10 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           content: message,
           memoryContext: memory?.injection || null,
           memoryAgentId: memory?.agentId ?? null,
+          attachments: attachments.map((attachment) => ({
+            mediaType: attachment.mediaType,
+            data: attachment.data,
+          })),
         },
         handleChatEvent,
       );
@@ -689,6 +781,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                 [tabId]: {
                   ...currentTab,
                   draft: wasAccepted ? currentTab.draft : message,
+                  attachments: wasAccepted ? currentTab.attachments : attachments,
                   error: errorMessage(error),
                 },
               },

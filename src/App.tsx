@@ -26,6 +26,8 @@ export function App() {
     setDraft,
     setTabCompanion,
     sendMessage,
+    attachFiles,
+    removeAttachment,
   } = useCompanionStore(
     useShallow((state) => ({
       activeView: state.activeView,
@@ -43,6 +45,8 @@ export function App() {
       setDraft: state.setDraft,
       setTabCompanion: state.setTabCompanion,
       sendMessage: state.sendMessage,
+      attachFiles: state.attachFiles,
+      removeAttachment: state.removeAttachment,
     })),
   );
 
@@ -92,6 +96,7 @@ export function App() {
             recallByMessageId={runtime?.recallByMessageId ?? {}}
             toolCallsByMessageId={runtime?.toolCallsByMessageId ?? {}}
             content={activeTab?.draft ?? ""}
+            pendingAttachments={activeTab?.attachments ?? []}
             companions={companions}
             companionId={activeTab?.companionId ?? null}
             onContentChange={(content) => {
@@ -102,6 +107,12 @@ export function App() {
             }}
             onSend={async (content) => {
               if (activeTabId) await sendMessage(activeTabId, content);
+            }}
+            onAttachFiles={(files) => {
+              if (activeTabId) void attachFiles(activeTabId, files);
+            }}
+            onRemoveAttachment={(attachmentId) => {
+              if (activeTabId) removeAttachment(activeTabId, attachmentId);
             }}
           />
         )}
