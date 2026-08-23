@@ -16,7 +16,7 @@ use crate::{
     chat::repository::ChatRepository,
     companions::CompanionResolver,
     models::ModelResolver,
-    preferences::PreferenceRepository,
+    preferences::{ModelPreference, PreferenceRepository, ResolvedVoice},
     secret_vault::SecretVault,
 };
 
@@ -108,6 +108,10 @@ pub(crate) struct SleepOutcome {
     /// True when the ledger left nothing to distill — no organ call was made.
     #[serde(default)]
     nothing_new: bool,
+    /// Whose hand wrote these memories, when it wasn't the companion's own
+    /// model. The organ never sends this — Companion fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scribe_note: Option<String>,
 }
 
 fn memory_names<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -127,6 +131,9 @@ struct PreparedSleep {
     /// The un-slept message ids this pass consumes — stamped into the ledger
     /// (`messages.slept_at`) only after the organ confirms the pass landed.
     fresh_message_ids: Vec<String>,
+    /// Set when a model other than the companion's own wrote the memories —
+    /// surfaced in the outcome so the substitution is never silent.
+    scribe_note: Option<String>,
 }
 
 /// How many already-slept messages ride along as context-only tail.
@@ -188,19 +195,38 @@ impl MemoryService {
         let companion = self
             .companions
             .resolve(thread.conversation.companion_id.as_deref())?;
-        let configured_model_id = match self
+        // WHICH BRAIN never changes — the memory lands in this companion's own
+        // agent either way. Only the SCRIBE can differ: the organ distills on
+        // an OpenAI-compatible base_url + key, and a Claude Code companion
+        // authenticates with a local login that cannot travel to the server.
+        // So a Claude companion borrows the user's default model to write, and
+        // the outcome says whose hand held the pen — a silent substitution
+        // would be the dishonest part, not the substitution itself.
+        let (configured_model_id, scribe_note) = match self
             .preferences
             .resolve_voice(&companion.model_preference)?
         {
-            crate::preferences::ResolvedVoice::Configured(model_id) => model_id,
-            // The distiller runs on the memory server with a base_url + API
-            // key — Claude Code's local login can't travel there (yet).
-            crate::preferences::ResolvedVoice::ClaudeCode(_) => {
-                return Err(AppError::validation(
-                    "A Claude Code companion can't distill memories yet — sleeping needs a configured Semantix model.",
-                ))
+            ResolvedVoice::Configured(model_id) => (model_id, None),
+            ResolvedVoice::ClaudeCode(_) => {
+                let borrowed = match self.preferences.resolve_voice(&ModelPreference::Inherit)? {
+                    ResolvedVoice::Configured(model_id) => model_id,
+                    _ => return Err(AppError::validation(
+                        "Claude Code can't run the distiller, and there is no default model to borrow — set one in Settings, then sleep.",
+                    )),
+                };
+                let name = self
+                    .models
+                    .resolve(&borrowed)
+                    .map(|model| model.model_id)
+                    .unwrap_or_else(|_| borrowed.clone());
+                (
+                    borrowed,
+                    Some(format!(
+                        "Claude Code can't run the distiller, so {name} wrote these memories into this companion's own brain."
+                    )),
+                )
             }
-            crate::preferences::ResolvedVoice::TestStream => {
+            ResolvedVoice::TestStream => {
                 return Err(AppError::validation(
                     "Give this companion a real model before sleeping — the test stream cannot distill memories.",
                 ))
@@ -223,6 +249,7 @@ impl MemoryService {
             bearer,
             agent_id: agent_id.to_owned(),
             fresh_message_ids,
+            scribe_note,
         }))
     }
 }
@@ -575,15 +602,18 @@ pub(crate) async fn sleep_conversation(
             dropped: 0,
             memories: Vec::new(),
             nothing_new: true,
+            scribe_note: None,
         });
     };
 
     prepared.body.existing = fetch_existing_index(&prepared.bearer, &prepared.agent_id).await;
 
-    let outcome = match sleep_via_stream(&prepared, &on_progress).await? {
+    let mut outcome = match sleep_via_stream(&prepared, &on_progress).await? {
         Some(outcome) => outcome,
         None => sleep_via_post(&prepared).await?,
     };
+    // Whose hand wrote them, when it wasn't the companion's own model.
+    outcome.scribe_note = prepared.scribe_note.take();
 
     // Stamp the ledger only now that the organ confirmed the pass landed.
     let service = Arc::clone(&state.service);

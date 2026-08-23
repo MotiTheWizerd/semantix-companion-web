@@ -877,6 +877,9 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
 
       const carved =
         outcome.memories.length > 0 ? ` — ${outcome.memories.join(", ")}` : "";
+      // A borrowed scribe is stated, never silent: the memories are this
+      // companion's, but another model's hand wrote them.
+      const scribe = outcome.scribeNote ? ` · ${outcome.scribeNote}` : "";
       const summary =
         `Slept: ${outcome.created} carved, ${outcome.updated} updated` +
         `${outcome.dropped ? `, ${outcome.dropped} dropped` : ""}`;
@@ -890,7 +893,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           ...state.tabsById,
           [tabId]: {
             ...state.tabsById[tabId],
-            notice: `${summary}${carved}`,
+            notice: `${summary}${carved}${scribe}`,
           },
         },
       }));

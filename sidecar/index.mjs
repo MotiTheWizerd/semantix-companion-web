@@ -18,7 +18,7 @@
 //
 // Wire shapes:
 //   → { id, type: "query", conversationId, model, systemPrompt?, transcript,
-//       userText, tools? }
+//       userText, tools?, images? }
 //   → { id, type: "toolResult", callId, content?, error? }
 //   ← { id, event: "delta", text }
 //   ← { id, event: "toolCall", callId, name, arguments }
@@ -114,11 +114,33 @@ function buildToolServer(requestId, declarations) {
   return createSdkMcpServer({ name: SERVER_NAME, version: "0.1.0", tools });
 }
 
+/** A turn carrying images can't ride the plain string prompt — it needs the
+ *  SDK's streaming-input form, one user message of content blocks. Images
+ *  lead and the words follow, the order a vision model reads "look at this:…"
+ *  in (same ordering the Semantix lane uses). */
+function imagePrompt(text, images) {
+  const content = images.map((image) => ({
+    type: "image",
+    source: { type: "base64", media_type: image.mediaType, data: image.data },
+  }));
+  if (text) content.push({ type: "text", text });
+  return (async function* () {
+    yield {
+      type: "user",
+      session_id: "",
+      parent_tool_use_id: null,
+      message: { role: "user", content },
+    };
+  })();
+}
+
 async function handleQuery(request) {
   const resume = sessions.get(request.conversationId);
-  const prompt = resume
+  const images = request.images ?? [];
+  const text = resume
     ? request.userText
     : compileFreshPrompt(request.transcript ?? [], request.userText);
+  const prompt = images.length > 0 ? imagePrompt(text, images) : text;
 
   const declarations = request.tools ?? [];
   const options = {

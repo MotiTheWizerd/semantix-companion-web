@@ -4,11 +4,11 @@
 //! the companion's own memory system stays the only one in the room.
 //!
 //! Protocol: one JSON object per line, requests down the child's stdin,
-//! events back up its stdout (`delta` / `usage` / `done` / `error`), matched
-//! to callers by request id. The sidecar lives in the repo's `sidecar/`
-//! directory (dev builds find it via the baked manifest path; the
-//! `COMPANION_SIDECAR_DIR` env var overrides — packaging will point it at a
-//! bundled resource dir).
+//! events back up its stdout (`delta` / `toolCall` / `usage` / `done` /
+//! `error`), matched to callers by request id. The sidecar lives in the
+//! repo's `sidecar/` directory (dev builds find it via the baked manifest
+//! path; the `COMPANION_SIDECAR_DIR` env var overrides — packaging will point
+//! it at a bundled resource dir).
 
 use std::{
     collections::HashMap,
@@ -49,6 +49,10 @@ struct SidecarQuery<'a> {
     /// The same declarations every other provider gets, handed to the SDK as
     /// in-process MCP tools; Rust still executes them.
     tools: Vec<SidecarTool<'a>>,
+    /// Images on the LIVE turn. Earlier turns travel as text: the transcript
+    /// is a written recap, and re-sending every past image would re-pay for
+    /// the whole album on every message.
+    images: Vec<SidecarImage<'a>>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +66,14 @@ struct SidecarTool<'a> {
     name: &'a str,
     description: &'a str,
     parameters: &'a serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SidecarImage<'a> {
+    media_type: &'a str,
+    /// Base64, no data-URL prefix — the sidecar wraps it in a content block.
+    data: &'a str,
 }
 
 /// A tool result travelling back down to the sidecar, which resolves the
@@ -226,8 +238,8 @@ impl ClaudeProvider {
     }
 }
 
-/// Flatten a message's text parts; images are not carried over the Claude
-/// lane yet — the words still travel.
+/// Flatten a message's text parts. Images are pulled out separately (they
+/// ride the live turn as content blocks), so this is the words only.
 fn message_text(parts: &[ContentPart]) -> String {
     parts
         .iter()
@@ -285,6 +297,17 @@ fn build_query<'a>(request: &'a InferenceRequest) -> Result<SidecarQuery<'a>, St
         system_prompt,
         transcript,
         user_text: message_text(&request.messages[last_user_index].content),
+        images: request.messages[last_user_index]
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Image { media_type, data } => Some(SidecarImage {
+                    media_type,
+                    data,
+                }),
+                ContentPart::Text { .. } => None,
+            })
+            .collect(),
         tools: request
             .tools
             .iter()
@@ -471,6 +494,28 @@ mod tests {
             encoded["tools"][0]["parameters"]["properties"]["name"]["type"],
             "string"
         );
+    }
+
+    /// Images on the live turn travel as their own field, and the words stay
+    /// clean text beside them — never stringified into the prompt.
+    #[test]
+    fn images_on_the_live_turn_ride_the_query() {
+        let full_request = request(vec![
+            InferenceMessage::text(Role::User, "An older turn"),
+            InferenceMessage::user_with_images(
+                "What is in this picture?",
+                vec![("image/png".to_owned(), "aGk=".to_owned())],
+            ),
+        ]);
+
+        let query = build_query(&full_request).expect("a valid request should build");
+        assert_eq!(query.user_text, "What is in this picture?");
+        assert_eq!(query.images.len(), 1);
+        assert_eq!(query.images[0].media_type, "image/png");
+        assert_eq!(query.images[0].data, "aGk=");
+        // The earlier turn stays in the transcript as words.
+        assert_eq!(query.transcript.len(), 1);
+        assert_eq!(query.transcript[0].text, "An older turn");
     }
 
     #[test]

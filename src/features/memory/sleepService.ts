@@ -15,6 +15,10 @@ export interface SleepOutcome {
   dropped: number;
   memories: string[];
   nothingNew: boolean;
+  /** Present only when a model other than the companion's own distilled these
+   *  memories — a Claude Code companion borrows the default model to write,
+   *  since the organ's distiller needs an API key its login cannot provide. */
+  scribeNote?: string;
 }
 
 /** Stage frames relayed verbatim from the organ's /sleep/stream. The terminal
