@@ -1,5 +1,6 @@
 mod app_error;
 mod chat;
+mod companions;
 mod credentials;
 mod database;
 mod inference;
@@ -14,6 +15,7 @@ mod streaming;
 use std::fs;
 
 use chat::ChatState;
+use companions::CompanionState;
 use credentials::CredentialState;
 use memory::MemoryState;
 use models::ModelState;
@@ -33,6 +35,8 @@ pub fn run() {
             let preference_state = PreferenceState::open(&database_path)?;
             let chat_state = ChatState::open(&database_path)?;
             let memory_state = MemoryState::open(&database_path)?;
+            let companion_state = CompanionState::open(&database_path)?;
+            app.manage(companion_state);
             app.manage(credential_state);
             app.manage(model_state);
             app.manage(preference_state);
@@ -50,6 +54,10 @@ pub fn run() {
             models::create_configured_model,
             models::update_configured_model,
             models::delete_configured_model,
+            companions::list_companions,
+            companions::create_companion,
+            companions::update_companion,
+            companions::delete_companion,
             preferences::get_user_preferences,
             preferences::update_user_preferences,
             chat::list_conversations,

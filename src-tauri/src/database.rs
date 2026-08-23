@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 6;
+const LATEST_SCHEMA_VERSION: i64 = 7;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -197,6 +197,34 @@ fn migration_sql(version: i64) -> &'static str {
             // carries the stamp, so a second pass distills only unstamped rows.
             "ALTER TABLE messages ADD COLUMN slept_at INTEGER;"
         }
+        7 => {
+            // Companions: who you talk to. A companion owns ONE private memory
+            // — `memory_agent_name` is its agent on the organ's roster, and no
+            // two companions may share one, so recall and /sleep can never
+            // cross piles. The name is assigned at creation and never changes,
+            // so renaming a companion cannot orphan what it remembers.
+            //
+            // The seeded built-in row adopts the agent name the Companion has
+            // used since it first grew memory ('companion'), so everything
+            // already carved belongs to it rather than being stranded.
+            "CREATE TABLE IF NOT EXISTS companions (
+                 id TEXT PRIMARY KEY,
+                 name TEXT,
+                 memory_agent_name TEXT NOT NULL UNIQUE,
+                 is_built_in INTEGER NOT NULL DEFAULT 0
+                     CHECK (is_built_in IN (0, 1)),
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 CHECK (name IS NULL OR length(trim(name)) > 0)
+             );
+
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_companions_built_in
+                 ON companions(is_built_in) WHERE is_built_in = 1;
+
+             INSERT INTO companions (
+                 id, name, memory_agent_name, is_built_in, created_at, updated_at
+             ) VALUES ('companion-built-in', NULL, 'companion', 1, 0, 0);"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -227,6 +255,7 @@ mod tests {
             "conversations",
             "messages",
             "user_preferences",
+            "companions",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -377,5 +406,53 @@ mod tests {
             )
             .expect("default preference should be created");
         assert_eq!(default_mode, "test");
+    }
+
+    #[test]
+    fn migration_seven_seeds_one_built_in_companion_on_the_existing_memory_agent() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+        migrate(&mut connection).expect("migrations should succeed");
+
+        let (id, name, agent, built_in): (String, Option<String>, String, i64) = connection
+            .query_row(
+                "SELECT id, name, memory_agent_name, is_built_in FROM companions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("exactly one companion should be seeded");
+
+        assert_eq!(id, "companion-built-in");
+        assert_eq!(name, None, "the built-in companion starts unnamed");
+        assert_eq!(agent, "companion", "it adopts the pre-existing memory agent");
+        assert_eq!(built_in, 1);
+    }
+
+    #[test]
+    fn only_one_companion_may_be_built_in() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+        migrate(&mut connection).expect("migrations should succeed");
+
+        let second_built_in = connection.execute(
+            "INSERT INTO companions (id, name, memory_agent_name, is_built_in, created_at, updated_at)
+             VALUES ('other', NULL, 'companion-other', 1, 1, 1)",
+            [],
+        );
+        assert!(second_built_in.is_err(), "a second built-in must be rejected");
+
+        let shared_agent = connection.execute(
+            "INSERT INTO companions (id, name, memory_agent_name, is_built_in, created_at, updated_at)
+             VALUES ('other', NULL, 'companion', 0, 1, 1)",
+            [],
+        );
+        assert!(
+            shared_agent.is_err(),
+            "two companions must never share one memory"
+        );
     }
 }
