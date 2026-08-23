@@ -1102,6 +1102,31 @@ a {
   box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.07);
 }
 
+.credential-field__workspace {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.credential-field__workspace > button {
+  flex-shrink: 0;
+}
+
+.credential-field__workspace code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* a long path keeps its tail — the folder name — visible */
+  color: #9db4c4;
+  font-size: 11px;
+}
+
+.credential-field__workspace small {
+  margin-left: 0;
+}
+
 .credential-form__actions {
   display: flex;
   justify-content: flex-end;

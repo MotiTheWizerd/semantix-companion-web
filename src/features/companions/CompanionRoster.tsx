@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 
 import { ConfirmDeleteButton } from "../../components/ConfirmDeleteButton";
 import { EditButton } from "../../components/EditButton";
@@ -39,6 +40,12 @@ function companionInitial(companion: Companion): string {
   return companion.name?.trim().charAt(0).toUpperCase() || "◦";
 }
 
+/** The folder's own name — the full path lives in the edit form. */
+function folderBasename(path: string): string {
+  const parts = path.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
 /** The voice named for the row, resolved the way a send would resolve it. */
 function voiceLabel(
   companion: Companion,
@@ -72,6 +79,7 @@ export function CompanionRoster() {
   const [modelPreference, setModelPreference] = useState<ModelPreference>(
     DEFAULT_MODEL_PREFERENCE,
   );
+  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const isEditing = editingId !== null;
@@ -114,6 +122,7 @@ export function CompanionRoster() {
   const closeForm = () => {
     setName("");
     setModelPreference(DEFAULT_MODEL_PREFERENCE);
+    setWorkspaceDir(null);
     setError(null);
     setEditingId(null);
     setIsFormOpen(false);
@@ -122,6 +131,7 @@ export function CompanionRoster() {
   const openCreateForm = () => {
     setName("");
     setModelPreference(DEFAULT_MODEL_PREFERENCE);
+    setWorkspaceDir(null);
     setError(null);
     setEditingId(null);
     setPendingDeleteId(null);
@@ -131,10 +141,24 @@ export function CompanionRoster() {
   const openEditForm = (companion: Companion) => {
     setName(companion.name ?? "");
     setModelPreference(companion.modelPreference);
+    setWorkspaceDir(companion.workspaceDir);
     setError(null);
     setEditingId(companion.id);
     setPendingDeleteId(null);
     setIsFormOpen(true);
+  };
+
+  const pickWorkspaceFolder = async () => {
+    try {
+      const picked = await openFolderDialog({
+        directory: true,
+        title: "Choose a workspace folder",
+        defaultPath: workspaceDir ?? undefined,
+      });
+      if (typeof picked === "string" && picked) setWorkspaceDir(picked);
+    } catch (pickError) {
+      setError(errorMessage(pickError));
+    }
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -150,8 +174,9 @@ export function CompanionRoster() {
             companionId: editingId,
             name: submitted,
             modelPreference,
+            workspaceDir,
           })
-        : await createCompanion({ name: submitted, modelPreference });
+        : await createCompanion({ name: submitted, modelPreference, workspaceDir });
       setCompanions((current) =>
         reconcileCompanionEvent(current, {
           kind: isEditing ? "updated" : "created",
@@ -253,6 +278,39 @@ export function CompanionRoster() {
                 onChange={setModelPreference}
               />
             </label>
+
+            <div className="credential-field credential-field--wide">
+              <span>
+                Workspace folder <small>Optional</small>
+              </span>
+              <div className="credential-field__workspace">
+                <button
+                  type="button"
+                  className="credential-button credential-button--quiet"
+                  onClick={() => void pickWorkspaceFolder()}
+                >
+                  {workspaceDir ? "Change folder…" : "Choose folder…"}
+                </button>
+                {workspaceDir ? (
+                  <>
+                    <code title={workspaceDir}>{workspaceDir}</code>
+                    <button
+                      type="button"
+                      className="credential-button credential-button--quiet"
+                      aria-label="Remove the workspace folder"
+                      onClick={() => setWorkspaceDir(null)}
+                    >
+                      Remove
+                    </button>
+                  </>
+                ) : (
+                  <small>
+                    With a workspace, this companion can list, read, write, edit
+                    and delete files — inside that one folder only.
+                  </small>
+                )}
+              </div>
+            </div>
           </div>
 
           {error ? (
@@ -303,7 +361,11 @@ export function CompanionRoster() {
                     {companion.isBuiltIn ? " · Built-in" : ""}
                   </span>
                 </div>
-                <code>Private memory</code>
+                <code>
+                  {companion.workspaceDir
+                    ? `Private memory · 📁 ${folderBasename(companion.workspaceDir)}`
+                    : "Private memory"}
+                </code>
                 <div className="credential-list__actions">
                   <EditButton
                     label={companionLabel(companion)}

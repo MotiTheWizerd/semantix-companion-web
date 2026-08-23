@@ -21,17 +21,22 @@ export interface Companion {
   isBuiltIn: boolean;
   createdAt: number;
   updatedAt: number;
+  /** The ONE folder its file tools may touch. `null` — the default — means
+   *  no workspace, and the file tools are never offered to the model. */
+  workspaceDir: string | null;
 }
 
 export interface CreateCompanionInput {
   name: string | null;
   modelPreference: ModelPreference;
+  workspaceDir: string | null;
 }
 
 export interface UpdateCompanionInput {
   companionId: string;
   name: string | null;
   modelPreference: ModelPreference;
+  workspaceDir: string | null;
 }
 
 export type CompanionChangedEvent =

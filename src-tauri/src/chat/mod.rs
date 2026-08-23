@@ -318,6 +318,14 @@ impl ChatService {
                 .ok()
                 .map(|key| key.trim().to_owned())
                 .filter(|key| !key.is_empty()),
+            // Re-canonicalised at every submission: if the folder vanished or
+            // moved since it was picked, the file tools silently stand down
+            // rather than run against a stale path.
+            workspace_dir: companion
+                .workspace_dir
+                .as_deref()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .filter(|path| path.is_dir()),
         };
 
         Ok(PreparedSubmission {
@@ -788,6 +796,7 @@ mod tests {
             is_built_in: false,
             created_at: 1,
             updated_at: 1,
+            workspace_dir: None,
         };
 
         assert_eq!(

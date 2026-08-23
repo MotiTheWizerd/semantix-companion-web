@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Base capability for the Semantix Companion window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

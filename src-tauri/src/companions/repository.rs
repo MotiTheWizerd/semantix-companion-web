@@ -9,7 +9,7 @@ use super::Companion;
 use crate::{app_error::AppError, database, preferences::ModelPreference};
 
 const COMPANION_COLUMNS: &str = "id, name, memory_agent_name, model_preference_mode, model_id,
-     is_built_in, created_at, updated_at";
+     is_built_in, created_at, updated_at, workspace_dir";
 
 pub(crate) struct CompanionRepository {
     connection: Mutex<Connection>,
@@ -76,8 +76,8 @@ impl CompanionRepository {
             .execute(
                 "INSERT INTO companions (
                     id, name, memory_agent_name, model_preference_mode, model_id,
-                    is_built_in, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    is_built_in, created_at, updated_at, workspace_dir
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     companion.id,
                     companion.name,
@@ -87,6 +87,7 @@ impl CompanionRepository {
                     i64::from(companion.is_built_in),
                     companion.created_at,
                     companion.updated_at,
+                    companion.workspace_dir,
                 ],
             )
             .map_err(AppError::database)?;
@@ -101,6 +102,7 @@ impl CompanionRepository {
         id: &str,
         name: Option<&str>,
         model_preference: &ModelPreference,
+        workspace_dir: Option<&str>,
         updated_at: i64,
     ) -> Result<(), AppError> {
         let (mode, model_id) = model_preference.storage_parts();
@@ -111,9 +113,10 @@ impl CompanionRepository {
                  SET name = ?2,
                      model_preference_mode = ?3,
                      model_id = ?4,
-                     updated_at = ?5
+                     workspace_dir = ?5,
+                     updated_at = ?6
                  WHERE id = ?1",
-                params![id, name, mode, model_id, updated_at],
+                params![id, name, mode, model_id, workspace_dir, updated_at],
             )
             .map_err(AppError::database)?;
         Ok(())
@@ -145,5 +148,6 @@ fn map_companion(row: &rusqlite::Row<'_>) -> rusqlite::Result<Companion> {
         is_built_in: row.get::<_, i64>(5)? != 0,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        workspace_dir: row.get(8)?,
     })
 }

@@ -48,6 +48,9 @@ pub(crate) struct Companion {
     pub(crate) is_built_in: bool,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
+    /// The ONE folder this companion's file tools may touch, stored canonical.
+    /// `None` — the default — means no workspace and no file tools at all.
+    pub(crate) workspace_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +58,8 @@ pub(crate) struct Companion {
 pub(crate) struct CreateCompanionInput {
     name: Option<String>,
     model_preference: ModelPreference,
+    #[serde(default)]
+    workspace_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +68,8 @@ pub(crate) struct UpdateCompanionInput {
     companion_id: String,
     name: Option<String>,
     model_preference: ModelPreference,
+    #[serde(default)]
+    workspace_dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -137,8 +144,10 @@ impl CompanionService {
         let CreateCompanionInput {
             name,
             model_preference,
+            workspace_dir,
         } = input;
         let name = normalise_name(name)?;
+        let workspace_dir = normalise_workspace(workspace_dir)?;
         self.preferences
             .validate_model_preference(&model_preference)?;
         let id = Uuid::new_v4().to_string();
@@ -151,6 +160,7 @@ impl CompanionService {
             is_built_in: false,
             created_at: timestamp,
             updated_at: timestamp,
+            workspace_dir,
         };
 
         self.repository.insert(&companion)?;
@@ -162,18 +172,26 @@ impl CompanionService {
             companion_id,
             name,
             model_preference,
+            workspace_dir,
         } = input;
         let current = self.require(companion_id.trim())?;
         let name = normalise_name(name)?;
+        let workspace_dir = normalise_workspace(workspace_dir)?;
         self.preferences
             .validate_model_preference(&model_preference)?;
         let timestamp = unix_timestamp_ms()?;
-        self.repository
-            .update_details(&current.id, name.as_deref(), &model_preference, timestamp)?;
+        self.repository.update_details(
+            &current.id,
+            name.as_deref(),
+            &model_preference,
+            workspace_dir.as_deref(),
+            timestamp,
+        )?;
 
         Ok(Companion {
             name,
             model_preference,
+            workspace_dir,
             updated_at: timestamp,
             ..current
         })
@@ -194,6 +212,30 @@ impl CompanionService {
             .get(id)?
             .ok_or_else(|| AppError::validation("That companion no longer exists."))
     }
+}
+
+/// Blank, whitespace, or absent all mean the same thing: no workspace. A real
+/// pick must be an existing directory, and it is stored CANONICAL — symlinks
+/// resolved here, once, so every containment check downstream compares against
+/// the folder's true location rather than a nickname for it.
+fn normalise_workspace(workspace_dir: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(workspace_dir) = workspace_dir else {
+        return Ok(None);
+    };
+    let workspace_dir = workspace_dir.trim();
+    if workspace_dir.is_empty() {
+        return Ok(None);
+    }
+    let canonical = std::fs::canonicalize(workspace_dir).map_err(|_| {
+        AppError::validation("The workspace folder could not be found on this machine.")
+    })?;
+    if !canonical.is_dir() {
+        return Err(AppError::validation("A workspace must be a folder, not a file."));
+    }
+    let canonical = canonical.into_os_string().into_string().map_err(|_| {
+        AppError::validation("The workspace folder's path is not valid UTF-8.")
+    })?;
+    Ok(Some(canonical))
 }
 
 /// Blank, whitespace, or absent all mean the same thing: unnamed.
@@ -357,12 +399,14 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Ragnar".to_owned()),
                 model_preference: ModelPreference::Test,
+                workspace_dir: None,
             })
             .expect("the first companion should be created");
         let second = service
             .create(CreateCompanionInput {
                 name: None,
                 model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
             })
             .expect("an unnamed companion should be created");
 
@@ -384,6 +428,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: None,
                 model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
             })
             .expect("the companion should be created");
 
@@ -392,6 +437,7 @@ mod tests {
                 companion_id: created.id.clone(),
                 name: Some("  Bjorn  ".to_owned()),
                 model_preference: ModelPreference::Test,
+                workspace_dir: None,
             })
             .expect("the companion should rename");
         assert_eq!(renamed.name.as_deref(), Some("Bjorn"));
@@ -402,6 +448,7 @@ mod tests {
                 companion_id: created.id,
                 name: Some(String::new()),
                 model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
             })
             .expect("the name should clear back to unnamed");
         assert_eq!(cleared.name, None);
@@ -416,6 +463,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: None,
                 model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
             })
             .expect("the companion should be created");
 
@@ -498,6 +546,7 @@ mod tests {
                 is_built_in: false,
                 created_at: 1,
                 updated_at: 1,
+                workspace_dir: None,
             },
         })
         .expect("created event should serialize");
@@ -544,6 +593,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Bjorn".to_owned()),
                 model_preference: ModelPreference::Test,
+                workspace_dir: None,
             })
             .expect("the companion should be created");
         let resolved = resolver
@@ -551,5 +601,66 @@ mod tests {
             .expect("an explicit pick should resolve");
         assert_eq!(resolved.id, added.id);
         assert_eq!(resolved.model_preference, ModelPreference::Test);
+    }
+
+    #[test]
+    fn a_workspace_is_stored_canonical_and_clears_back_to_none() {
+        let database = ScratchDatabase::new();
+        let service = database.service();
+        let workspace = env::temp_dir().join(format!("companion-workspace-{}", Uuid::new_v4()));
+        fs::create_dir_all(&workspace).expect("the scratch workspace should be created");
+
+        let created = service
+            .create(CreateCompanionInput {
+                name: Some("Bjorn".to_owned()),
+                model_preference: ModelPreference::Inherit,
+                workspace_dir: Some(workspace.to_string_lossy().into_owned()),
+            })
+            .expect("a companion with a workspace should be created");
+        let stored = created.workspace_dir.expect("the workspace should be kept");
+        assert_eq!(
+            stored,
+            fs::canonicalize(&workspace)
+                .expect("the workspace should canonicalise")
+                .to_string_lossy(),
+            "the stored path is the canonical one"
+        );
+
+        // The workspace survives a round-trip through the database, and the
+        // resolver — chat's door — hands it back with the identity.
+        let resolved = database
+            .resolver()
+            .resolve(Some(&created.id))
+            .expect("the companion should resolve");
+        assert_eq!(resolved.workspace_dir.as_deref(), Some(stored.as_str()));
+
+        // Blank means none — the workspace is revocable.
+        let cleared = service
+            .update(UpdateCompanionInput {
+                companion_id: created.id,
+                name: None,
+                model_preference: ModelPreference::Inherit,
+                workspace_dir: Some("   ".to_owned()),
+            })
+            .expect("the workspace should clear");
+        assert_eq!(cleared.workspace_dir, None);
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_workspace_that_is_not_an_existing_folder_is_rejected() {
+        let database = ScratchDatabase::new();
+        let service = database.service();
+        assert!(
+            service
+                .create(CreateCompanionInput {
+                    name: None,
+                    model_preference: ModelPreference::Inherit,
+                    workspace_dir: Some("/definitely/not/a/real/folder".to_owned()),
+                })
+                .is_err(),
+            "a missing folder must be rejected, not stored"
+        );
     }
 }

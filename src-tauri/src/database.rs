@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 8;
+const LATEST_SCHEMA_VERSION: i64 = 9;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -309,6 +309,15 @@ fn migration_sql(version: i64) -> &'static str {
 
              CREATE INDEX IF NOT EXISTS idx_conversations_companion
                  ON conversations(companion_id);"
+        }
+        9 => {
+            // A companion may be granted a workspace: ONE folder on this
+            // machine it can touch with its file tools. NULL — the default —
+            // means no workspace, and without one the file tools are never
+            // even declared to the model. The path is stored canonical, and
+            // every tool call re-proves containment before it acts.
+            "ALTER TABLE companions ADD COLUMN workspace_dir TEXT
+                 CHECK (workspace_dir IS NULL OR length(trim(workspace_dir)) > 0);"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
