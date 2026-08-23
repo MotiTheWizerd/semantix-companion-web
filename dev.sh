@@ -11,6 +11,16 @@ if [ "$#" -gt 0 ]; then
   shift
 fi
 
+# web_search ground: borrow the SerpApi key from the cognitive server's .env
+# when the environment doesn't already carry one. No key → tool not declared.
+if [ -z "${SERPAPI_API_KEY:-}" ]; then
+  serpapi_env="$HOME/projects/semantix-bridge/semantix-cognitive-system-server/.env"
+  if [ -f "$serpapi_env" ]; then
+    SERPAPI_API_KEY="$(sed -n 's/^SERPAPI_API_KEY=//p' "$serpapi_env" | head -1 | tr -d '"'"'"'')"
+    export SERPAPI_API_KEY
+  fi
+fi
+
 env -u GTK_PATH \
     -u GIO_MODULE_DIR \
     -u GDK_PIXBUF_MODULE_FILE \

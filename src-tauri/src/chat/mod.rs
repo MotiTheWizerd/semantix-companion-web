@@ -288,6 +288,10 @@ impl ChatService {
                 .map(str::to_owned),
             archive_database_path: Some(self.database_path.clone()),
             conversation_id: Some(accepted.conversation.id.clone()),
+            serpapi_api_key: std::env::var("SERPAPI_API_KEY")
+                .ok()
+                .map(|key| key.trim().to_owned())
+                .filter(|key| !key.is_empty()),
         };
 
         Ok(PreparedSubmission {

@@ -9,11 +9,15 @@ const MEMORY_VERBS: Record<string, [verb: string, argument: string, fallback: st
   recall_memory: ["recalled", "name", "recalled a memory"],
   carve_memory: ["carved", "name", "carved a memory"],
   search_conversations: ["searched past conversations for", "query", "searched past conversations"],
+  web_search: ["searched the web for", "query", "searched the web"],
+  web_fetch: ["read", "url", "read a web page"],
 };
 
 const ICONS: Record<string, string> = {
   carve_memory: "🪶",
   search_conversations: "🔍",
+  web_search: "🌐",
+  web_fetch: "📄",
 };
 
 function callLabel(call: ToolCallChipItem): string {

@@ -24,12 +24,14 @@ pub(crate) struct CommitUserMessage<'a> {
 }
 
 /// One hit from the raw-memory drill (search_conversations tool): where the
-/// match sits and a snippet of what was said, »match« markers included.
+/// match sits and the WHOLE message it sits in — a snippet proved too thin to
+/// answer from, so the full text rides along and size is governed by message
+/// count at render time, never by truncation.
 pub(crate) struct ArchiveHit {
     pub(crate) conversation_title: String,
     pub(crate) role: String,
     pub(crate) day: String,
-    pub(crate) snippet: String,
+    pub(crate) content: String,
 }
 
 impl ChatRepository {
@@ -53,7 +55,7 @@ impl ChatRepository {
             .prepare(
                 "SELECT c.title, m.role,
                         date(m.created_at / 1000, 'unixepoch') AS day,
-                        snippet(messages_fts, 0, '»', '«', ' … ', 14) AS snip
+                        m.content
                  FROM messages_fts
                  JOIN messages m ON m.rowid = messages_fts.rowid
                  JOIN conversations c ON c.id = m.conversation_id
@@ -72,7 +74,7 @@ impl ChatRepository {
                     conversation_title: row.get(0)?,
                     role: row.get(1)?,
                     day: row.get(2)?,
-                    snippet: row.get(3)?,
+                    content: row.get(3)?,
                 })
             })
             .map_err(AppError::database)?
@@ -587,7 +589,11 @@ mod tests {
             .expect("search should succeed");
         assert_eq!(hits.len(), 2, "only the OTHER conversation's messages match");
         assert!(hits.iter().all(|hit| hit.conversation_title == "Talk about ships"));
-        assert!(hits[0].snippet.contains("»Serpent«"), "matches are marked: {}", hits[0].snippet);
+        let contents: Vec<&str> = hits.iter().map(|hit| hit.content.as_str()).collect();
+        assert!(
+            contents.contains(&"My favorite ship is the Long Serpent."),
+            "the WHOLE message comes back, not a snippet: {contents:?}"
+        );
         assert_eq!(hits[0].day, "2025-08-21");
         let roles: Vec<&str> = hits.iter().map(|hit| hit.role.as_str()).collect();
         assert!(roles.contains(&"user") && roles.contains(&"assistant"));

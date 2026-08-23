@@ -5,6 +5,7 @@ mod database;
 mod inference;
 mod memory;
 mod tools;
+mod web;
 mod models;
 mod preferences;
 mod secret_vault;
