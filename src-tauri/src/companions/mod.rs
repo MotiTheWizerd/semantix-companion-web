@@ -107,6 +107,15 @@ impl CompanionResolver {
     /// Who answers this thread. A named companion wins; otherwise the built-in
     /// one — which is why deleting a companion leaves its old threads working
     /// rather than mute, and why a brand-new thread needs no pick to send.
+    /// Whether this id names a companion that actually lives here.
+    ///
+    /// The question `resolve` cannot answer, because it is built to always
+    /// return SOMEONE. A caller that must not silently address the wrong
+    /// companion asks this first.
+    pub(crate) fn exists(&self, companion_id: &str) -> Result<bool, AppError> {
+        Ok(self.repository.get(companion_id.trim())?.is_some())
+    }
+
     pub(crate) fn resolve(&self, companion_id: Option<&str>) -> Result<Companion, AppError> {
         if let Some(id) = companion_id.map(str::trim).filter(|id| !id.is_empty()) {
             if let Some(companion) = self.repository.get(id)? {

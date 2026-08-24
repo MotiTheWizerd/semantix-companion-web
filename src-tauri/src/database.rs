@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 14;
+const LATEST_SCHEMA_VERSION: i64 = 15;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -535,6 +535,21 @@ fn migration_sql(version: i64) -> &'static str {
 
              CREATE INDEX idx_raven_call_messages_call
                  ON raven_call_messages(call_id, created_at);"
+        }
+        15 => {
+            // THE WAKE GUARD.
+            //
+            // A companion is woken when a call is waiting on it. Without a
+            // record of what it was woken FOR, a companion that reads a call
+            // and decides not to answer gets woken again on the next tick, and
+            // the next, forever — a turn burned every interval, on the user's
+            // key, to reach the same decision.
+            //
+            // This stores the message id the last wake was about. A wake fires
+            // only when the call's newest turn is one nobody has been woken
+            // for. Declining to answer is therefore a stable state, which it
+            // has to be: not replying must be as cheap as replying.
+            "ALTER TABLE raven_calls ADD COLUMN woken_for_message_id TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

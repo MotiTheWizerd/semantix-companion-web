@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use super::{
-    CallStatus, RavenCall, RavenCallMessage, MAX_BODY_LENGTH, MAX_CALLS_PER_DAY,
+    CallStatus, PendingWake, RavenCall, RavenCallMessage, MAX_BODY_LENGTH, MAX_CALLS_PER_DAY,
     MAX_MESSAGES_PER_CALL,
 };
 use crate::{app_error::AppError, credentials::unix_timestamp_ms, database};
@@ -229,6 +229,64 @@ impl RavenCallRepository {
             .map_err(AppError::database)?;
 
         Ok(messages)
+    }
+
+    /// Calls whose newest turn is addressed to someone who has not been woken
+    /// for it yet — the work list of the waker.
+    ///
+    /// The agent named is the one who OWES a reply: it is the recipient of the
+    /// last thing said. A call where that agent has already been woken is not
+    /// returned, however it answered or whether it answered at all — see the
+    /// wake guard in schema 15. Declining must be a stable state, or a
+    /// companion that decides "nothing to say here" pays for that decision
+    /// again every tick.
+    pub(crate) fn calls_awaiting_wake(&self, limit: i64) -> Result<Vec<PendingWake>, AppError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT c.id, m.id, m.to_agent_id
+                 FROM raven_calls c
+                 JOIN raven_call_messages m ON m.id = (
+                     SELECT id FROM raven_call_messages
+                     WHERE call_id = c.id
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT 1
+                 )
+                 WHERE c.status = 'open'
+                   AND (c.woken_for_message_id IS NULL OR c.woken_for_message_id <> m.id)
+                 ORDER BY m.created_at ASC
+                 LIMIT ?1",
+            )
+            .map_err(AppError::database)?;
+
+        let pending = statement
+            .query_map([limit.max(1)], |row| {
+                Ok(PendingWake {
+                    call_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    agent_id: row.get(2)?,
+                })
+            })
+            .map_err(AppError::database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::database)?;
+
+        Ok(pending)
+    }
+
+    /// Record that a wake was fired for this call's current newest turn.
+    ///
+    /// ⚑ CALLED BEFORE THE TURN RUNS, NOT AFTER. A turn that panics, hangs or
+    /// fails must still count as "we tried", or a companion whose model is
+    /// erroring gets woken in a loop for as long as the error lasts.
+    pub(crate) fn mark_woken(&self, call_id: &str, message_id: &str) -> Result<(), AppError> {
+        self.connection()?
+            .execute(
+                "UPDATE raven_calls SET woken_for_message_id = ?2 WHERE id = ?1",
+                params![call_id, message_id],
+            )
+            .map_err(AppError::database)?;
+        Ok(())
     }
 
     /// The open calls one agent is part of — as the one who opened it, or as
@@ -697,6 +755,105 @@ mod tests {
             .messages_visible_to(&call.id, "rook", 50)
             .unwrap()
             .is_some());
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_waker_names_whoever_owes_a_reply_and_only_once_per_turn() {
+        let (calls, path) = open_calls("wake-scan");
+
+        // Nothing to wake for: an empty call has nobody waiting on it.
+        let call = calls.open_call("rook", None).unwrap();
+        assert!(calls.calls_awaiting_wake(10).unwrap().is_empty());
+
+        calls
+            .append_message(&call.id, "rook", "hugin", "are you there?")
+            .unwrap();
+
+        // Hugin owes a reply, because Hugin is who the newest turn is to.
+        let pending = calls.calls_awaiting_wake(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].agent_id, "hugin");
+        assert_eq!(pending[0].call_id, call.id);
+
+        // ⚑ THE GUARD. Once woken for that turn, it does not come back —
+        // whether or not the companion chose to answer. Declining has to be a
+        // stable state, or a companion that decides "nothing to say" pays for
+        // that decision again every tick, forever.
+        calls.mark_woken(&call.id, &pending[0].message_id).unwrap();
+        assert!(calls.calls_awaiting_wake(10).unwrap().is_empty());
+
+        // A NEW turn is a new thing to be woken for, and now Rook owes.
+        calls
+            .append_message(&call.id, "hugin", "rook", "I am.")
+            .unwrap();
+        let pending = calls.calls_awaiting_wake(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].agent_id, "rook", "the debt changed hands");
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_full_call_stops_waking_anyone() {
+        let (calls, path) = open_calls("wake-terminates");
+        let call = calls.open_call("rook", None).unwrap();
+
+        // ⚑ THE REAL LEASH ON TWO AGENTS WAKING EACH OTHER. Every reply hands
+        // the debt to the other side, so without a ceiling this alternates
+        // forever. Walk it to the cap and prove the waker goes quiet.
+        let mut woken = 0;
+        for turn in 0..MAX_MESSAGES_PER_CALL {
+            let (from, to) = if turn % 2 == 0 {
+                ("rook", "hugin")
+            } else {
+                ("hugin", "rook")
+            };
+            calls
+                .append_message(&call.id, from, to, &format!("turn {turn}"))
+                .unwrap();
+            for wake in calls.calls_awaiting_wake(10).unwrap() {
+                calls.mark_woken(&wake.call_id, &wake.message_id).unwrap();
+                woken += 1;
+            }
+        }
+
+        assert_eq!(
+            calls.get(&call.id).unwrap().unwrap().status,
+            CallStatus::Closed,
+            "the call filled and closed itself"
+        );
+        assert!(
+            calls.calls_awaiting_wake(10).unwrap().is_empty(),
+            "a closed call wakes nobody, however the last turn was addressed"
+        );
+        // ONE FEWER WAKE THAN THERE ARE TURNS, and the missing one is the
+        // point: the final turn closes the call, so it hands the debt to
+        // nobody. A whole two-agent exchange costs four woken turns, bounded,
+        // with no human involved in stopping it.
+        assert_eq!(
+            woken,
+            MAX_MESSAGES_PER_CALL as usize - 1,
+            "the turn that fills a call wakes no one, because there is no call left to answer in"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_wake_scan_honours_its_limit() {
+        let (calls, path) = open_calls("wake-limit");
+        for index in 0..3 {
+            let call = calls.open_call("rook", None).unwrap();
+            calls
+                .append_message(&call.id, "rook", "hugin", &format!("call {index}"))
+                .unwrap();
+        }
+        // One wake per tick, process-wide: a backlog drains at a visible pace
+        // instead of starting three model calls at once.
+        assert_eq!(calls.calls_awaiting_wake(1).unwrap().len(), 1);
+        assert_eq!(calls.calls_awaiting_wake(10).unwrap().len(), 3);
 
         fs::remove_file(path).ok();
     }

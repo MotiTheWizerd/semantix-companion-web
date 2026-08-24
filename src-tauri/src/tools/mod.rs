@@ -416,7 +416,11 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                 "properties": {
                     "to_agent_id": {
                         "type": "string",
-                        "description": "The agent to call, from list_agents."
+                        "description": concat!(
+                            "The agent's ID from list_agents — a uuid, NOT a ",
+                            "name. Call list_agents first if you do not have ",
+                            "the exact id in front of you; a name is refused."
+                        )
                     },
                     "body": {
                         "type": "string",
@@ -695,6 +699,29 @@ fn execute_call(
             let (to, body) = parse_send_arguments(arguments)?;
             if to == me {
                 return Err("that is your own id — you cannot call yourself".to_owned());
+            }
+
+            // ⚑ THE RECIPIENT MUST BE SOMEONE WHO CAN ACTUALLY PICK UP.
+            // `send_message` deliberately does NOT check this — a letter may be
+            // addressed to an agent on another machine and wait. A CALL cannot:
+            // the only thing that can answer one is a companion this process is
+            // able to wake, so an unresolvable recipient is a call that will
+            // ring forever while still spending one of today's five.
+            //
+            // Found the hard way (s502): asked to ring Hugin, the model passed
+            // the NAME "hugin" instead of the id, and made a call nobody could
+            // answer. The description already said "from list_agents"; saying
+            // it was not enough, which is the whole lesson of the manifest.
+            let roster = CompanionRepository::open(path).map_err(|error| error.to_string())?;
+            let companions = roster.list().map_err(|error| error.to_string())?;
+            if !companions.iter().any(|companion| companion.id == to) {
+                // The roster rides the refusal so the model can correct itself
+                // in this same turn instead of calling list_agents and retrying.
+                return Err(format!(
+                    "\"{to}\" is not an agent id, so nobody could ever answer that call — \
+                     names are not addresses. Use one of these ids:\n{}",
+                    render_agents(&companions, me)
+                ));
             }
 
             // ⚑ OPENING AND SPEAKING ARE ONE ACT, DELIBERATELY. A tool that
@@ -1223,6 +1250,28 @@ mod tests {
         id.to_owned()
     }
 
+    /// A real second companion to call.
+    ///
+    /// ⚑ NOT A FIXTURE CONVENIENCE. Every call test used to invent a uuid for
+    /// the recipient, which meant they all passed while the live app was making
+    /// calls nobody could answer — the tests agreed with each other about a
+    /// world where a recipient need not exist. A recipient has to be somebody.
+    fn companion(path: &std::path::Path, name: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = crate::credentials::unix_timestamp_ms().expect("a clock");
+        rusqlite::Connection::open(path)
+            .expect("database should open")
+            .execute(
+                "INSERT INTO companions (
+                    id, name, memory_agent_name, is_built_in,
+                    model_preference_mode, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 0, 'inherit', ?4, ?4)",
+                rusqlite::params![id, name, format!("agent-{id}"), now],
+            )
+            .expect("the companion should insert");
+        id
+    }
+
     fn built_in(path: &std::path::Path) -> String {
         rusqlite::Connection::open(path)
             .expect("database should open")
@@ -1453,7 +1502,7 @@ mod tests {
     fn a_call_round_trips_and_a_reply_costs_the_replier_nothing() {
         let path = mail_fixture("call-round-trip");
         let rook = built_in(&path);
-        let hugin = uuid::Uuid::new_v4().to_string();
+        let hugin = companion(&path, "Hugin");
 
         let root = conversation(&path, "conv-1");
 
@@ -1509,11 +1558,41 @@ mod tests {
     }
 
     #[test]
+    fn calling_a_name_instead_of_an_id_is_refused_with_the_roster() {
+        let path = mail_fixture("call-by-name");
+        let rook = built_in(&path);
+
+        // ⚑ THE s502 LIVE BUG. Asked to ring Hugin, the model passed the NAME
+        // and made a call nobody could ever answer — the waker can only wake a
+        // companion it can resolve, so the call rang forever and still cost one
+        // of the day's five.
+        let error = execute_call(
+            OPEN_CALL,
+            &serde_json::json!({ "to_agent_id": "hugin", "body": "pick up" }).to_string(),
+            &rook,
+            None,
+            &path,
+        )
+        .expect_err("a name is not an address");
+        assert!(error.contains("not an agent id"), "got: {error}");
+        assert!(
+            error.contains("no other agents") || error.contains("id "),
+            "the refusal carries the roster so the model can fix itself: {error}"
+        );
+
+        // And the refused call spent nothing.
+        let listed = execute_call(LIST_CALLS, "{}", &rook, None, &path).unwrap();
+        assert!(listed.contains("5 of today's 5 calls left"), "got: {listed}");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn a_stranger_cannot_read_or_speak_into_someone_elses_call() {
         let path = mail_fixture("call-privacy");
         let rook = built_in(&path);
-        let hugin = uuid::Uuid::new_v4().to_string();
-        let magpie = uuid::Uuid::new_v4().to_string();
+        let hugin = companion(&path, "Hugin");
+        let magpie = companion(&path, "Magpie");
 
         execute_call(
             OPEN_CALL,
@@ -1574,7 +1653,7 @@ mod tests {
     fn the_sixth_call_is_refused_with_a_sentence_the_model_can_act_on() {
         let path = mail_fixture("call-cap");
         let rook = built_in(&path);
-        let hugin = uuid::Uuid::new_v4().to_string();
+        let hugin = companion(&path, "Hugin");
         let open = serde_json::json!({ "to_agent_id": &hugin, "body": "again" }).to_string();
 
         for _ in 0..raven_calls::MAX_CALLS_PER_DAY {
@@ -1616,7 +1695,7 @@ mod tests {
         // ⚑ `root_conversation_id` is not a parameter. A model that supplies
         // one is passing an unknown key, and the call still belongs to the
         // conversation the TURN came from.
-        let hugin = uuid::Uuid::new_v4().to_string();
+        let hugin = companion(&path, "Hugin");
         let real = conversation(&path, "the-real-conversation");
         let other = conversation(&path, "somebody-elses-thread");
         execute_call(

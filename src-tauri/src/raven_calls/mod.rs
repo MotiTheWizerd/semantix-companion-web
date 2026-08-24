@@ -27,11 +27,22 @@
 //! Otherwise the answer arrives with a fresh budget, the chain never touches a
 //! ceiling, and both limits above are decorative.
 
+use std::{path::Path, sync::Arc};
+
 use serde::Serialize;
+use tauri::State;
+
+use crate::app_error::AppError;
 
 mod repository;
+mod waker;
 
 pub(crate) use repository::RavenCallRepository;
+pub(crate) use waker::spawn as spawn_waker;
+
+/// Emitted app-wide when a call changed under its own steam, so a window
+/// showing one knows to look again.
+pub(crate) const CALLS_CHANGED_EVENT: &str = "calls://changed";
 
 /// Calls one companion may open between local midnight and local midnight.
 /// Counted across every recipient — the cap is on the companion, not the pair.
@@ -100,4 +111,73 @@ pub(crate) struct RavenCallMessage {
     pub(crate) to_agent_id: String,
     pub(crate) body: String,
     pub(crate) created_at: i64,
+}
+
+/// A call waiting on someone, and the turn it is waiting because of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingWake {
+    pub(crate) call_id: String,
+    /// The newest turn in the call. Doubles as the wake guard's key — a
+    /// companion is woken at most once per thing said to it.
+    pub(crate) message_id: String,
+    /// Who owes a reply: the recipient of that turn.
+    pub(crate) agent_id: String,
+}
+
+/// A call and everything said in it — what a person needs to see one, in a
+/// single trip rather than a call list plus a fetch per row.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CallThread {
+    pub(crate) call: RavenCall,
+    pub(crate) messages: Vec<RavenCallMessage>,
+}
+
+/// Turns loaded per call for the UI. A call cannot exceed
+/// `MAX_MESSAGES_PER_CALL`, so this only bites if that limit is raised — but
+/// the query is bounded on principle, because this is the table that grows.
+const THREAD_MESSAGE_LIMIT: i64 = 50;
+
+pub(crate) struct RavenCallState {
+    repository: Arc<RavenCallRepository>,
+}
+
+impl RavenCallState {
+    pub(crate) fn open(database_path: &Path) -> Result<Self, AppError> {
+        Ok(Self {
+            repository: Arc::new(RavenCallRepository::open(database_path)?),
+        })
+    }
+
+    /// A second handle on the store for the waker, which outlives any command.
+    pub(crate) fn repository(&self) -> Arc<RavenCallRepository> {
+        Arc::clone(&self.repository)
+    }
+}
+
+/// Every call born out of one conversation, newest first, with its turns.
+///
+/// Read-only and conversation-scoped. There is deliberately no command that
+/// returns calls across conversations or by agent: the human surface answers
+/// "what was said on my behalf HERE", and a wider door would have to justify
+/// itself separately.
+#[tauri::command]
+pub(crate) async fn list_conversation_calls(
+    state: State<'_, RavenCallState>,
+    conversation_id: String,
+) -> Result<Vec<CallThread>, String> {
+    let repository = Arc::clone(&state.repository);
+    tauri::async_runtime::spawn_blocking(move || {
+        let calls = repository.calls_for_conversation(&conversation_id)?;
+        calls
+            .into_iter()
+            .map(|call| {
+                let messages = repository.messages(&call.id, THREAD_MESSAGE_LIMIT)?;
+                Ok(CallThread { call, messages })
+            })
+            .collect::<Result<Vec<_>, AppError>>()
+    })
+    .await
+    .map_err(|error| format!("Call task failed: {error}"))?
+    .map_err(String::from)
 }

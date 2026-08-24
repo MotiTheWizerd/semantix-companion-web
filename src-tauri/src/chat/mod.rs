@@ -7,7 +7,7 @@ use std::{
 
 use repository::{ChatRepository, CommitUserMessage};
 use serde::{Deserialize, Serialize};
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::{
@@ -171,11 +171,57 @@ pub(crate) enum ChatEvent {
     },
 }
 
+/// Where a turn's events go.
+///
+/// ⚑ THE ONE ABSTRACTION THAT LETS A TURN RUN WITHOUT A PERSON. Every event a
+/// turn produces used to go to a `Channel` the frontend created for that
+/// submission, which quietly meant a turn could only exist because someone
+/// pressed enter. A turn nobody asked for has no such channel — it has the
+/// app. Both are just somewhere to send events, so the loop takes this and
+/// stops caring which it got.
+pub(crate) trait ChatEventSink: Send + Sync {
+    fn send(&self, event: ChatEvent);
+}
+
+/// The human lane: events go to the one window that asked for them.
+impl ChatEventSink for Channel<ChatEvent> {
+    fn send(&self, event: ChatEvent) {
+        let _ = Channel::send(self, event);
+    }
+}
+
+/// The woken lane: events go app-wide, because nobody is holding a channel
+/// open for a turn they did not start. The frontend listens for this and folds
+/// the events into whichever thread they name.
+pub(crate) struct AppEventSink {
+    app: AppHandle,
+}
+
+impl AppEventSink {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl ChatEventSink for AppEventSink {
+    fn send(&self, event: ChatEvent) {
+        let _ = self.app.emit(CHAT_EVENT, event);
+    }
+}
+
+/// App-wide chat events — the woken lane's only way to reach a window.
+pub(crate) const CHAT_EVENT: &str = "chat://event";
+
 pub(crate) struct ChatState {
     service: Arc<ChatService>,
 }
 
 impl ChatState {
+    /// A handle on the turn engine for the waker, which has no `State` to ask.
+    pub(crate) fn service(&self) -> Arc<ChatService> {
+        Arc::clone(&self.service)
+    }
+
     pub(crate) fn open(database_path: &Path) -> Result<Self, AppError> {
         let repository = ChatRepository::open(database_path)?;
         repository.fail_interrupted_streams(unix_timestamp_ms()?)?;
@@ -192,7 +238,7 @@ impl ChatState {
     }
 }
 
-struct ChatService {
+pub(crate) struct ChatService {
     repository: ChatRepository,
     model_resolver: ModelResolver,
     companions: CompanionResolver,
@@ -247,7 +293,11 @@ impl ChatService {
             .update_companion(conversation_id, &companion.id)
     }
 
-    fn submit(&self, mut input: SubmitMessageInput) -> Result<PreparedSubmission, AppError> {
+    fn submit(
+        &self,
+        mut input: SubmitMessageInput,
+        role: &str,
+    ) -> Result<PreparedSubmission, AppError> {
         let attachments = accept_attachments(std::mem::take(&mut input.attachments))?;
         let content = input.content.trim();
         if content.is_empty() && attachments.is_empty() {
@@ -312,6 +362,7 @@ impl ChatService {
         let title = conversation_title(content);
         let accepted = self.repository.commit_user_message(CommitUserMessage {
             conversation_id,
+            role,
             companion_id: &companion.id,
             content,
             title: &title,
@@ -389,6 +440,87 @@ impl ChatService {
         })
     }
 
+    /// Prepare a turn nobody asked for.
+    ///
+    /// ⚑ THE NOTICE IS A `system` MESSAGE, NOT A `user` ONE. A woken turn needs
+    /// something to answer, and the tempting shortcut is to write a user
+    /// message saying "you have a call waiting" — which would put words in the
+    /// user's mouth, in their own transcript, forever. The companion is told by
+    /// the system, which is what actually happened.
+    ///
+    /// It lands in the companion's most recent thread, or a new one. A person
+    /// looking for what their companion did while they were away should find it
+    /// where they last left that companion, not in a hidden place.
+    pub(crate) fn prepare_woken(
+        &self,
+        companion_id: &str,
+        notice: String,
+    ) -> Result<PreparedSubmission, AppError> {
+        // ⚑ NO FALLBACK IN THIS LANE, AND THIS CHECK IS LOAD-BEARING.
+        // `resolve` answers an unknown id with the BUILT-IN companion, which is
+        // right for a composer whose selection went stale and catastrophic
+        // here: a call addressed to an agent that is not on this machine would
+        // wake the built-in one, and Rook would answer his own call believing
+        // it came from someone else. An id we cannot place is not ours to wake.
+        if !self.companions.exists(companion_id)? {
+            return Err(AppError::validation(
+                "that agent id is not a companion on this machine — nothing to wake",
+            ));
+        }
+
+        let conversation_id = self
+            .repository
+            .latest_conversation_for_companion(companion_id)?;
+        let mut prepared = self.submit(
+            SubmitMessageInput {
+                conversation_id,
+                companion_id: Some(companion_id.to_owned()),
+                content: notice.clone(),
+                // No recalled memory and no memory agent: the frontend's
+                // pre-send reflexes are a property of a person sending, and
+                // there is no frontend in this lane. The companion still has
+                // its tools, which is what it needs to answer a call.
+                memory_context: None,
+                memory_agent_id: None,
+                attachments: Vec::new(),
+            },
+            "system",
+        )?;
+
+        // ⚑ THE WOKEN TURN DOES NOT INHERIT THE CONVERSATION'S HISTORY, AND
+        // THIS IS THE LINE THAT MAKES THE FEATURE WORK AT ALL.
+        //
+        // Found by driving it (s502): the first working wake landed in a thread
+        // with thirty-nine turns of the companion talking to its user, and the
+        // companion answered the notice CONVERSATIONALLY — "I'm here, ready" —
+        // addressing the user by name, never touching read_call. One system
+        // line asking it to answer a call is a whisper against forty turns of
+        // evidence about what it is doing and who it is speaking to.
+        //
+        // A wake is not the next turn of that conversation. It is a different
+        // errand that happens to be recorded there, so the request carries only
+        // who it is and what it was woken for. The exchange still PERSISTS into
+        // the thread — the user must be able to see what their companion did —
+        // but the model is not asked to continue a talk nobody is having.
+        //
+        // It is also drastically cheaper: forty messages resent per wake, for
+        // context that actively misleads, was the worst of both.
+        let mut messages = Vec::new();
+        if let Some(identity) = self
+            .companions
+            .resolve(Some(companion_id))
+            .ok()
+            .as_ref()
+            .and_then(companion_identity)
+        {
+            messages.push(InferenceMessage::text(Role::System, identity));
+        }
+        messages.push(InferenceMessage::text(Role::System, notice));
+        prepared.execution.request.messages = messages;
+
+        Ok(prepared)
+    }
+
     fn begin_assistant(
         &self,
         conversation_id: &str,
@@ -415,7 +547,7 @@ impl ChatService {
     }
 }
 
-struct PreparedSubmission {
+pub(crate) struct PreparedSubmission {
     accepted: AcceptedMessage,
     execution: InferenceExecution,
     provider_id: String,
@@ -427,7 +559,7 @@ struct PreparedSubmission {
 /// becomes a tool result, whichever lane asked for it.
 struct ChatToolRunner {
     context: ToolContext,
-    on_event: Channel<ChatEvent>,
+    on_event: Arc<dyn ChatEventSink>,
     conversation_id: String,
     message_id: String,
 }
@@ -435,7 +567,7 @@ struct ChatToolRunner {
 #[async_trait::async_trait]
 impl ToolRunner for ChatToolRunner {
     async fn run(&self, call: &ToolCall) -> Result<String, String> {
-        let _ = self.on_event.send(ChatEvent::ToolCall {
+        self.on_event.send(ChatEvent::ToolCall {
             conversation_id: self.conversation_id.clone(),
             message_id: self.message_id.clone(),
             call_id: call.id.clone(),
@@ -445,7 +577,7 @@ impl ToolRunner for ChatToolRunner {
             detail: None,
         });
         let result = tools::execute(call, &self.context).await;
-        let _ = self.on_event.send(ChatEvent::ToolCall {
+        self.on_event.send(ChatEvent::ToolCall {
             conversation_id: self.conversation_id.clone(),
             message_id: self.message_id.clone(),
             call_id: call.id.clone(),
@@ -462,7 +594,7 @@ struct ChatStreamAdapter {
     assistant: Message,
     conversation_id: String,
     message_id: String,
-    on_event: Channel<ChatEvent>,
+    on_event: Arc<dyn ChatEventSink>,
     content: Mutex<String>,
     /// Tool calls the model requested in the round currently streaming;
     /// drained by the chat loop between rounds.
@@ -470,7 +602,7 @@ struct ChatStreamAdapter {
 }
 
 impl ChatStreamAdapter {
-    fn new(assistant: Message, on_event: Channel<ChatEvent>) -> Self {
+    fn new(assistant: Message, on_event: Arc<dyn ChatEventSink>) -> Self {
         Self {
             conversation_id: assistant.conversation_id.clone(),
             message_id: assistant.id.clone(),
@@ -511,7 +643,7 @@ impl ChatStreamAdapter {
         let separator = if content.ends_with('\n') { "\n" } else { "\n\n" };
         content.push_str(separator);
         drop(content);
-        let _ = self.on_event.send(ChatEvent::AssistantDelta {
+        self.on_event.send(ChatEvent::AssistantDelta {
             conversation_id: self.conversation_id.clone(),
             message_id: self.message_id.clone(),
             sequence: 0,
@@ -525,7 +657,7 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
     fn emit(&self, event: StreamEvent<InferenceDelta>) -> Result<(), StreamError> {
         match event {
             StreamEvent::Started => {
-                let _ = self.on_event.send(ChatEvent::AssistantStarted {
+                self.on_event.send(ChatEvent::AssistantStarted {
                     message: self.assistant.clone(),
                 });
             }
@@ -535,7 +667,7 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
                         .lock()
                         .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))?
                         .push_str(&text);
-                    let _ = self.on_event.send(ChatEvent::AssistantDelta {
+                    self.on_event.send(ChatEvent::AssistantDelta {
                         conversation_id: self.conversation_id.clone(),
                         message_id: self.message_id.clone(),
                         sequence,
@@ -601,10 +733,26 @@ pub(crate) async fn submit_message(
 ) -> Result<AcceptedMessage, String> {
     let service = Arc::clone(&state.service);
     let submit_service = Arc::clone(&service);
-    let prepared = tauri::async_runtime::spawn_blocking(move || submit_service.submit(input))
+    let prepared = tauri::async_runtime::spawn_blocking(move || submit_service.submit(input, "user"))
         .await
         .map_err(|error| format!("Message task failed: {error}"))?
         .map_err(String::from)?;
+    drive_turn(service, prepared, Arc::new(on_event)).await
+}
+
+/// One turn, start to finish, for whoever asked for it.
+///
+/// ⚑ THIS USED TO BE THE BODY OF `submit_message`, AND THAT WAS THE WHOLE
+/// PROBLEM. The loop lived inside a Tauri command, so the only thing in the
+/// process that could start a turn was a person pressing enter. Lifting it out
+/// changes nothing for the human lane — `submit_message` is now four lines and
+/// a call — and it is the entire reason a companion can be woken by something
+/// other than its user.
+pub(crate) async fn drive_turn(
+    service: Arc<ChatService>,
+    prepared: PreparedSubmission,
+    on_event: Arc<dyn ChatEventSink>,
+) -> Result<AcceptedMessage, String> {
     let PreparedSubmission {
         accepted,
         mut execution,
@@ -613,7 +761,7 @@ pub(crate) async fn submit_message(
         tool_context,
     } = prepared;
 
-    let _ = on_event.send(ChatEvent::Accepted {
+    on_event.send(ChatEvent::Accepted {
         conversation: accepted.conversation.clone(),
         message: accepted.message.clone(),
     });
@@ -630,7 +778,7 @@ pub(crate) async fn submit_message(
         Ok(message) => message,
         Err(error) => {
             let message = error.to_string();
-            let _ = on_event.send(ChatEvent::Failed {
+            on_event.send(ChatEvent::Failed {
                 conversation_id,
                 message_id: None,
                 message: message.clone(),
@@ -639,7 +787,7 @@ pub(crate) async fn submit_message(
         }
     };
 
-    let adapter = ChatStreamAdapter::new(assistant.clone(), on_event.clone());
+    let adapter = ChatStreamAdapter::new(assistant.clone(), Arc::clone(&on_event));
 
     // One executor, both lanes: the chat loop calls it between rounds, and a
     // provider that owns its own agentic loop (Claude Code) calls it
@@ -647,7 +795,7 @@ pub(crate) async fn submit_message(
     // place and lights the same UI card.
     let tool_runner = Arc::new(ChatToolRunner {
         context: tool_context.clone(),
-        on_event: on_event.clone(),
+        on_event: Arc::clone(&on_event),
         conversation_id: assistant.conversation_id.clone(),
         message_id: assistant.id.clone(),
     });
@@ -771,13 +919,13 @@ pub(crate) async fn submit_message(
         }
     };
 
-    let _ = on_event.send(ChatEvent::AssistantCompleted { message: completed });
+    on_event.send(ChatEvent::AssistantCompleted { message: completed });
     Ok(accepted)
 }
 
 async fn fail_stream(
     service: Arc<ChatService>,
-    on_event: &Channel<ChatEvent>,
+    on_event: &Arc<dyn ChatEventSink>,
     conversation_id: &str,
     message_id: &str,
     message: String,
@@ -788,7 +936,7 @@ async fn fail_stream(
         service.fail_assistant(&persisted_message_id, &persisted_error)
     })
     .await;
-    let _ = on_event.send(ChatEvent::Failed {
+    on_event.send(ChatEvent::Failed {
         conversation_id: conversation_id.to_owned(),
         message_id: Some(message_id.to_owned()),
         message: message.clone(),
@@ -986,14 +1134,17 @@ mod tests {
                 database_path.clone(),
             );
             let accepted = service
-                .submit(SubmitMessageInput {
-                    conversation_id: None,
-                    companion_id: None,
-                    content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
-                    memory_context: None,
-                    memory_agent_id: None,
-                    attachments: Vec::new(),
-                })
+                .submit(
+                    SubmitMessageInput {
+                        conversation_id: None,
+                        companion_id: None,
+                        content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
+                        memory_context: None,
+                        memory_agent_id: None,
+                        attachments: Vec::new(),
+                    },
+                    "user",
+                )
                 .expect("message should persist");
 
             let conversations = service

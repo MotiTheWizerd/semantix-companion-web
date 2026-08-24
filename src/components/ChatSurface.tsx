@@ -21,6 +21,7 @@ import type { Companion } from "../features/companions/types";
 import type { MemoryRecallChipData } from "../features/memory";
 import { EmptyState } from "./EmptyState";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { ConversationCalls } from "../features/calls";
 import { MemoryRecallChip } from "./MemoryRecallChip";
 import { ToolCallChip } from "./ToolCallChip";
 
@@ -197,6 +198,14 @@ export function ChatSurface({
               </article>
             );
           })}
+          {/* The calls module's one and only mount point. It reads its own
+              data and renders nothing when this thread placed no calls —
+              chat knows nothing about calls beyond these two props, so
+              moving this line moves the feature. */}
+          <ConversationCalls
+            conversationId={activeConversationId}
+            turnInProgress={isSending}
+          />
         </section>
       ) : (
         <EmptyState />

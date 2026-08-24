@@ -22,6 +22,7 @@ use credentials::CredentialState;
 use memory::MemoryState;
 use models::ModelState;
 use preferences::PreferenceState;
+use raven_calls::RavenCallState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -46,12 +47,22 @@ pub fn run() {
             let chat_state = ChatState::open(&database_path)?;
             let memory_state = MemoryState::open(&database_path)?;
             let companion_state = CompanionState::open(&database_path)?;
+            let raven_call_state = RavenCallState::open(&database_path)?;
             app.manage(companion_state);
             app.manage(credential_state);
             app.manage(model_state);
             app.manage(preference_state);
-            app.manage(chat_state);
             app.manage(memory_state);
+            // ⚑ THE WAKER IS STARTED HERE AND NOWHERE ELSE. Everything above
+            // this line is a system that still needs a person: calls could be
+            // placed, stored and rendered, and they sat in the table until
+            // someone pressed enter. This is the loop that reads the table and
+            // gives a companion a turn on its own.
+            let waker_calls = raven_call_state.repository();
+            let waker_chat = chat_state.service();
+            app.manage(chat_state);
+            app.manage(raven_call_state);
+            raven_calls::spawn_waker(app.handle().clone(), waker_calls, waker_chat);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -80,6 +91,7 @@ pub fn run() {
             memory::ensure_memory_agent,
             memory::recall_memories,
             memory::sleep_conversation,
+            raven_calls::list_conversation_calls,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Semantix Companion");

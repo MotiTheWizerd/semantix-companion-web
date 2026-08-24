@@ -18,6 +18,10 @@ pub(crate) struct ChatRepository {
 
 pub(crate) struct CommitUserMessage<'a> {
     pub(crate) conversation_id: Option<&'a str>,
+    /// "user" for a person's message, "system" for a notice a woken turn is
+    /// answering. Parameterised rather than hardcoded so a turn nobody asked
+    /// for does not have to put words in the user's mouth to exist.
+    pub(crate) role: &'a str,
     /// Who is answering. Stored on the conversation, so reopening a thread
     /// brings back its companion — and with it the voice and the memory.
     pub(crate) companion_id: &'a str,
@@ -89,6 +93,25 @@ impl ChatRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::database)?;
         Ok(hits)
+    }
+
+    /// Where a woken companion should speak: the live thread it was last used
+    /// in. `None` means it has none, and the caller opens a fresh one.
+    pub(crate) fn latest_conversation_for_companion(
+        &self,
+        companion_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        self.connection()?
+            .query_row(
+                "SELECT id FROM conversations
+                 WHERE companion_id = ?1 AND archived_at IS NULL
+                 ORDER BY updated_at DESC, id ASC
+                 LIMIT 1",
+                [companion_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::database)
     }
 
     pub(crate) fn list_conversations(&self) -> Result<Vec<Conversation>, AppError> {
@@ -178,6 +201,7 @@ impl ChatRepository {
     ) -> Result<AcceptedMessage, AppError> {
         let CommitUserMessage {
             conversation_id,
+            role,
             companion_id,
             content,
             title,
@@ -245,8 +269,8 @@ impl ChatRepository {
                 "INSERT INTO messages (
                     id, conversation_id, sequence, role, status, content,
                     provider_id, model_id, error_message, created_at, updated_at, completed_at
-                 ) VALUES (?1, ?2, ?3, 'user', 'completed', ?4, NULL, NULL, NULL, ?5, ?5, ?5)",
-                params![message_id, conversation.id, sequence, content, timestamp],
+                 ) VALUES (?1, ?2, ?3, ?6, 'completed', ?4, NULL, NULL, NULL, ?5, ?5, ?5)",
+                params![message_id, conversation.id, sequence, content, timestamp, role],
             )
             .map_err(AppError::database)?;
         for attachment in attachments {
@@ -283,7 +307,7 @@ impl ChatRepository {
                 id: message_id.to_owned(),
                 conversation_id: conversation_id.unwrap_or(new_conversation_id).to_owned(),
                 sequence,
-                role: "user".to_owned(),
+                role: role.to_owned(),
                 status: "completed".to_owned(),
                 content: content.to_owned(),
                 provider_id: None,
@@ -601,6 +625,7 @@ mod tests {
         let conversation_id = format!("conversation-{tag}");
         repository
             .commit_user_message(CommitUserMessage {
+                role: "user",
                 conversation_id: None,
                 companion_id,
                 content: user_text,
@@ -688,6 +713,7 @@ mod tests {
         }];
         let accepted = repository
             .commit_user_message(CommitUserMessage {
+                role: "user",
                 conversation_id: None,
                 companion_id,
                 content: "Look at this.",
@@ -703,6 +729,7 @@ mod tests {
         // A second, imageless message in the same thread.
         repository
             .commit_user_message(CommitUserMessage {
+                role: "user",
                 conversation_id: Some("conversation-images"),
                 companion_id,
                 content: "And a plain one.",

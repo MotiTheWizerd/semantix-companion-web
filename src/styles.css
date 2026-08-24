@@ -2084,3 +2084,109 @@ a {
     animation: none;
   }
 }
+
+/* ── ☎ Conversation calls — exchanges your companion had with other agents ──
+   Owned by features/calls. Scoped under .calls so the block travels with the
+   module if it is ever mounted somewhere other than the chat thread. */
+
+.calls {
+  margin: 14px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.calls__heading {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  opacity: 0.8;
+}
+
+.calls__error {
+  margin: 0;
+  color: #c98787;
+}
+
+.calls__row {
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.calls__summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.calls__summary:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.calls__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calls__status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.calls__status--open {
+  color: #8fbf9f;
+}
+
+.calls__meter {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+.calls__turns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 10px 10px;
+}
+
+.calls__turn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.calls__speaker {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+
+.calls__body {
+  margin: 0;
+  color: var(--text-primary, inherit);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.calls__empty {
+  margin: 0;
+  opacity: 0.7;
+}
