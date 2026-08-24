@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 13;
+const LATEST_SCHEMA_VERSION: i64 = 14;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -469,6 +469,72 @@ fn migration_sql(version: i64) -> &'static str {
 
              CREATE INDEX idx_agent_messages_sent
                  ON agent_messages(from_agent_id, created_at DESC);"
+        }
+        14 => {
+            // RAVEN CALLS. `agent_messages` is a flat mailbox — a letter with no
+            // account of why it exists. A CALL is the container that gives one:
+            // an exchange between two companions, born out of a specific human
+            // conversation and answerable to it.
+            //
+            // ⚑ THE ROOT CONVERSATION IS THE BUDGET HOLDER, AND THAT IS THE
+            // POINT OF THE TABLE. Two agents that can wake each other are an
+            // unbounded loop with a token meter attached. Scoping every call to
+            // the conversation it came from is what makes the loop stoppable:
+            // the cap is read off ONE row before a hop is allowed, instead of
+            // scanned out of the message table.
+            //
+            // A REPLY INHERITS THE SENDER'S CALL — it does not open its own.
+            // Otherwise the answer arrives with a fresh budget and the cap is
+            // decorative. This is the invariant the whole design rests on.
+            //
+            // root_conversation_id is NULLABLE on purpose: a scheduled wake, or
+            // a companion writing cold, has no human conversation behind it.
+            // NULL means unrooted, and those still count against the daily cap
+            // because the cap is per-companion, not per-conversation.
+            //
+            // ON DELETE CASCADE from conversations: closing a thread takes its
+            // calls with it. The messages cascade from the call in turn, so the
+            // whole tree goes in one statement.
+            //
+            // message_count is DENORMALISED deliberately. It is the number the
+            // cap check reads on every single hop, and paying a COUNT(*) over a
+            // table that grows at machine speed to learn "is this call full" is
+            // the one place in this schema where the shortcut is worth it.
+            "CREATE TABLE raven_calls (
+                 id                   TEXT    PRIMARY KEY,
+                 root_conversation_id TEXT    REFERENCES conversations(id) ON DELETE CASCADE,
+                 initiator_agent_id   TEXT    NOT NULL,
+                 status               TEXT    NOT NULL DEFAULT 'open'
+                                              CHECK (status IN ('open', 'closed')),
+                 message_count        INTEGER NOT NULL DEFAULT 0,
+                 created_at           INTEGER NOT NULL,
+                 closed_at            INTEGER
+             );
+
+             -- The daily cap query: calls this companion opened, by local day.
+             CREATE INDEX idx_raven_calls_initiator_day
+                 ON raven_calls(initiator_agent_id, created_at DESC);
+
+             CREATE INDEX idx_raven_calls_root
+                 ON raven_calls(root_conversation_id);
+
+             -- The turns inside one call. This table grows at MACHINE speed and
+             -- unattended, unlike every other table here — it will outgrow the
+             -- rest of the database by orders of magnitude once companions run
+             -- on their own. Hence: the call cascade above (a delete path that
+             -- exists from day one, not written later under duress), and the
+             -- single covering index for the only hot read there is.
+             CREATE TABLE raven_call_messages (
+                 id            TEXT    PRIMARY KEY,
+                 call_id       TEXT    NOT NULL REFERENCES raven_calls(id) ON DELETE CASCADE,
+                 from_agent_id TEXT    NOT NULL,
+                 to_agent_id   TEXT    NOT NULL,
+                 body          TEXT    NOT NULL CHECK (length(trim(body)) > 0),
+                 created_at    INTEGER NOT NULL
+             );
+
+             CREATE INDEX idx_raven_call_messages_call
+                 ON raven_call_messages(call_id, created_at);"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

@@ -324,8 +324,7 @@ mod tests {
                 .expect_err("an empty message must be refused");
             assert!(
                 error.to_string().contains("needs something in it"),
-                "got: {}",
-                error.to_string()
+                "got: {error}"
             );
         }
 
