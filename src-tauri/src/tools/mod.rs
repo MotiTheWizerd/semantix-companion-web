@@ -9,9 +9,11 @@
 
 mod files;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::agent_mail::{AgentMailRepository, SendAgentMessage};
 use crate::chat::repository::{ArchiveHit, ChatRepository};
+use crate::companions::{Companion, CompanionRepository};
 use crate::inference::{ToolCall, ToolDeclaration};
 use crate::memory;
 use crate::web;
@@ -21,6 +23,13 @@ pub(crate) const CARVE_MEMORY: &str = "carve_memory";
 pub(crate) const SEARCH_CONVERSATIONS: &str = "search_conversations";
 pub(crate) const WEB_SEARCH: &str = "web_search";
 pub(crate) const WEB_FETCH: &str = "web_fetch";
+pub(crate) const LIST_AGENTS: &str = "list_agents";
+pub(crate) const SEND_MESSAGE: &str = "send_message";
+pub(crate) const READ_MESSAGES: &str = "read_messages";
+pub(crate) const MARK_MESSAGE_READ: &str = "mark_message_read";
+
+const INBOX_DEFAULT_LIMIT: u32 = 20;
+const INBOX_MAX_LIMIT: u32 = 100;
 
 const SEARCH_DEFAULT_LIMIT: u32 = 6;
 const SEARCH_MAX_LIMIT: u32 = 20;
@@ -43,7 +52,7 @@ pub(crate) struct ToolContext {
     pub(crate) memory_agent_id: Option<String>,
     /// The local chat database — ground of the raw-memory drill. The tool
     /// opens its own read connection so it never contends with the stream.
-    pub(crate) archive_database_path: Option<PathBuf>,
+    pub(crate) database_path: Option<PathBuf>,
     /// Current conversation, excluded from archive search — the model
     /// already holds it in context.
     pub(crate) conversation_id: Option<String>,
@@ -54,6 +63,13 @@ pub(crate) struct ToolContext {
     /// tools. No workspace → no file tools, and there is no fallback
     /// directory, ever.
     pub(crate) workspace_dir: Option<PathBuf>,
+    /// WHO IS SPEAKING — the companion this turn belongs to, and the return
+    /// address on everything it sends. Ground of the mail tools.
+    ///
+    /// It is taken from the resolved companion and never from the model's own
+    /// arguments, so a companion cannot write a letter over another's name.
+    /// The `from` on a message is a fact about the turn, not a parameter.
+    pub(crate) companion_id: Option<String>,
 }
 
 pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
@@ -123,7 +139,7 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             }),
         });
     }
-    if context.archive_database_path.is_some() {
+    if context.database_path.is_some() {
         tools.push(ToolDeclaration {
             name: SEARCH_CONVERSATIONS.to_owned(),
             description: concat!(
@@ -281,6 +297,90 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             }),
         });
     }
+    // MAIL. Ground is an identity to sign with plus the local database — both
+    // present on any real turn, absent only in tests and in the seconds before
+    // a companion is resolved.
+    if context.companion_id.is_some() && context.database_path.is_some() {
+        tools.push(ToolDeclaration {
+            name: LIST_AGENTS.to_owned(),
+            description: concat!(
+                "List the other agents you can write to, with their ids. ",
+                "Call this before send_message when you do not already know ",
+                "the recipient's id — an id is the only way to address ",
+                "someone, and names are not unique.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        });
+        tools.push(ToolDeclaration {
+            name: SEND_MESSAGE.to_owned(),
+            description: concat!(
+                "Send a message to another agent. It waits in their inbox ",
+                "until they read it — they are not interrupted, and you will ",
+                "not get a reply in this turn. Your own id is attached ",
+                "automatically; you cannot send as anyone else. Say who you ",
+                "are and what you want in the message itself, because the ",
+                "recipient may read it in a conversation you are not part of.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to_agent_id": {
+                        "type": "string",
+                        "description": "The recipient's agent id, from list_agents."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "What you want to say. Plain text."
+                    }
+                },
+                "required": ["to_agent_id", "body"]
+            }),
+        });
+        tools.push(ToolDeclaration {
+            name: READ_MESSAGES.to_owned(),
+            description: concat!(
+                "Read your inbox — messages other agents have sent you. ",
+                "Defaults to unread only. Reading does NOT mark anything ",
+                "read; call mark_message_read once you have actually dealt ",
+                "with a message.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "unread_only": {
+                        "type": "boolean",
+                        "description": "Default true. False returns read mail too."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to return (default 20, max 100)."
+                    }
+                }
+            }),
+        });
+        tools.push(ToolDeclaration {
+            name: MARK_MESSAGE_READ.to_owned(),
+            description: concat!(
+                "Mark one message in your inbox as read, once you have acted ",
+                "on it or decided it needs nothing. Only your own mail — you ",
+                "cannot clear anyone else's.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The id of the message, from read_messages."
+                    }
+                },
+                "required": ["message_id"]
+            }),
+        });
+    }
     // Fetch's ground is the network itself, so it always rides.
     tools.push(ToolDeclaration {
         name: WEB_FETCH.to_owned(),
@@ -331,7 +431,7 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
         }
         SEARCH_CONVERSATIONS => {
             let path = context
-                .archive_database_path
+                .database_path
                 .clone()
                 .ok_or_else(|| "the conversation archive is not available".to_owned())?;
             let (query, limit) = parse_search_arguments(&call.arguments)?;
@@ -362,6 +462,27 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
             let page = web::fetch(&url).await?;
             Ok(render_web_page(&url, &page))
         }
+        LIST_AGENTS | SEND_MESSAGE | READ_MESSAGES | MARK_MESSAGE_READ => {
+            // Every mail tool needs the same two things, so they are resolved
+            // once here rather than four times below.
+            let me = context
+                .companion_id
+                .clone()
+                .ok_or_else(|| "no companion identity for this turn".to_owned())?;
+            let path = context
+                .database_path
+                .clone()
+                .ok_or_else(|| "the local database is not available".to_owned())?;
+            let name = call.name.clone();
+            let arguments = call.arguments.clone();
+            // Blocking sqlite work off the async runtime, same as the file
+            // tools — the mail store opens its own connection.
+            tauri::async_runtime::spawn_blocking(move || {
+                execute_mail(&name, &arguments, &me, &path)
+            })
+            .await
+            .map_err(|error| format!("the mail task failed: {error}"))?
+        }
         name if files::FILE_TOOL_NAMES.contains(&name) => {
             let root = context
                 .workspace_dir
@@ -375,6 +496,159 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
         }
         other => Err(format!("unknown tool \"{other}\"")),
     }
+}
+
+/// The four mail tools, synchronous because sqlite is.
+///
+/// `me` is the speaking companion's id, taken from the resolved turn — never
+/// from `arguments`. That is the whole reason a companion cannot forge a
+/// sender: there is no parameter it could put a different id in.
+fn execute_mail(name: &str, arguments: &str, me: &str, path: &Path) -> Result<String, String> {
+    let mail = AgentMailRepository::open(path).map_err(|error| error.to_string())?;
+
+    match name {
+        LIST_AGENTS => {
+            let roster = CompanionRepository::open(path).map_err(|error| error.to_string())?;
+            let companions = roster.list().map_err(|error| error.to_string())?;
+            Ok(render_agents(&companions, me))
+        }
+        SEND_MESSAGE => {
+            let (to, body) = parse_send_arguments(arguments)?;
+            if to == me {
+                return Err("that is your own id — you cannot write to yourself".to_owned());
+            }
+            let sent = mail
+                .send(SendAgentMessage {
+                    from_agent_id: me,
+                    to_agent_id: &to,
+                    from_user_id: None,
+                    to_user_id: None,
+                    project_id: None,
+                    body: &body,
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "[sent to {} · id {} · it waits in their inbox until they read it]",
+                sent.to_agent_id, sent.id
+            ))
+        }
+        READ_MESSAGES => {
+            let (unread_only, limit) = parse_inbox_arguments(arguments)?;
+            let mut messages = mail.inbox(me, unread_only).map_err(|error| error.to_string())?;
+            messages.truncate(limit as usize);
+            Ok(render_inbox(&messages, unread_only))
+        }
+        MARK_MESSAGE_READ => {
+            let id = parse_message_id_argument(arguments)?;
+            if mail.mark_read(me, &id).map_err(|error| error.to_string())? {
+                Ok(format!("[{id} marked read]"))
+            } else {
+                // One message for both causes on purpose: "already read" and
+                // "not yours" must not be distinguishable, or the tool becomes
+                // an oracle for whether someone else's message id exists.
+                Ok(format!(
+                    "[nothing to do — {id} is not an unread message in your inbox]"
+                ))
+            }
+        }
+        other => Err(format!("unknown mail tool \"{other}\"")),
+    }
+}
+
+fn parse_send_arguments(arguments: &str) -> Result<(String, String), String> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|error| format!("arguments were not valid JSON: {error}"))?;
+    let to = parsed
+        .get("to_agent_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            "a non-empty \"to_agent_id\" is required — call list_agents for ids".to_owned()
+        })?;
+    let body = parsed
+        .get("body")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "a non-empty \"body\" argument is required".to_owned())?;
+    Ok((to, body))
+}
+
+fn parse_inbox_arguments(arguments: &str) -> Result<(bool, u32), String> {
+    // An absent or empty argument object is normal here — every parameter has
+    // a default, so `read_messages` with no arguments must succeed.
+    let parsed: serde_json::Value =
+        serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+    let unread_only = parsed
+        .get("unread_only")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let limit = parsed
+        .get("limit")
+        .and_then(|value| value.as_u64())
+        .map(|value| value.clamp(1, u64::from(INBOX_MAX_LIMIT)) as u32)
+        .unwrap_or(INBOX_DEFAULT_LIMIT);
+    Ok((unread_only, limit))
+}
+
+fn parse_message_id_argument(arguments: &str) -> Result<String, String> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|error| format!("arguments were not valid JSON: {error}"))?;
+    parsed
+        .get("message_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "a non-empty \"message_id\" argument is required".to_owned())
+}
+
+fn render_agents(companions: &[Companion], me: &str) -> String {
+    let others: Vec<&Companion> = companions
+        .iter()
+        .filter(|companion| companion.id != me)
+        .collect();
+    if others.is_empty() {
+        return "[no other agents on this machine yet — you are the only one]".to_owned();
+    }
+
+    let mut out = String::from("Agents you can write to:\n");
+    for companion in others {
+        let name = companion.name.as_deref().unwrap_or("(unnamed)");
+        out.push_str(&format!("  · {name} — id {}\n", companion.id));
+    }
+    out.push_str("\n[address send_message with the id, not the name]");
+    out
+}
+
+fn render_inbox(messages: &[super::agent_mail::AgentMessage], unread_only: bool) -> String {
+    if messages.is_empty() {
+        return if unread_only {
+            "[no unread messages]".to_owned()
+        } else {
+            "[your inbox is empty]".to_owned()
+        };
+    }
+
+    let mut out = format!(
+        "{} message{} in your inbox:\n",
+        messages.len(),
+        if messages.len() == 1 { "" } else { "s" }
+    );
+    for message in messages {
+        out.push_str(&format!(
+            "\n── from {} · id {}{}\n{}\n",
+            message.from_agent_id,
+            message.id,
+            if message.read_at.is_some() { " · read" } else { "" },
+            message.body,
+        ));
+    }
+    out.push_str("\n[reply with send_message; mark_message_read once you have dealt with one]");
+    out
 }
 
 fn parse_search_arguments(arguments: &str) -> Result<(String, u32), String> {
@@ -604,8 +878,236 @@ mod tests {
         render_archive_hits, render_carve_outcome, render_memory, render_web_page,
         render_web_search, ToolContext,
     };
+    use super::{execute_mail, LIST_AGENTS, MARK_MESSAGE_READ, READ_MESSAGES, SEND_MESSAGE};
     use crate::chat::repository::ArchiveHit;
     use crate::web;
+
+    /// A real database, migrated, with the built-in companion in it.
+    fn mail_fixture(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "companion-mailtool-test-{tag}-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        crate::database::initialise(&path).expect("test database should initialise");
+        path
+    }
+
+    fn built_in(path: &std::path::Path) -> String {
+        rusqlite::Connection::open(path)
+            .expect("database should open")
+            .query_row("SELECT id FROM companions WHERE is_built_in = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("the built-in companion should exist")
+    }
+
+    #[test]
+    fn an_empty_inbox_says_so_rather_than_failing() {
+        let path = mail_fixture("empty");
+        let me = built_in(&path);
+
+        // No arguments at all — every parameter has a default, so the bare
+        // call a model is most likely to make must work.
+        let unread = execute_mail(READ_MESSAGES, "{}", &me, &path).expect("reading should succeed");
+        assert_eq!(unread, "[no unread messages]");
+
+        let all = execute_mail(READ_MESSAGES, r#"{"unread_only":false}"#, &me, &path)
+            .expect("reading should succeed");
+        assert_eq!(all, "[your inbox is empty]");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn list_agents_shows_the_others_and_never_yourself() {
+        let path = mail_fixture("roster");
+        let me = built_in(&path);
+
+        // A lone companion has nobody to write to, and the tool says that
+        // plainly instead of returning an empty list the model must interpret.
+        let alone = execute_mail(LIST_AGENTS, "{}", &me, &path).expect("listing should succeed");
+        assert!(alone.contains("no other agents"), "got: {alone}");
+        assert!(!alone.contains(&me), "you are never in your own roster");
+
+        // Now with company: a named one and an unnamed one, since a companion
+        // may have no name and the roster still has to be addressable.
+        let huginn = uuid::Uuid::new_v4().to_string();
+        let nameless = uuid::Uuid::new_v4().to_string();
+        let connection = rusqlite::Connection::open(&path).expect("database should open");
+        for (id, name) in [(&huginn, Some("Huginn")), (&nameless, None)] {
+            connection
+                .execute(
+                    "INSERT INTO companions (id, name, memory_agent_name, is_built_in,
+                        model_preference_mode, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 0, 'inherit', 0, 0)",
+                    rusqlite::params![id, name, format!("companion-{id}")],
+                )
+                .expect("a companion should insert");
+        }
+        drop(connection);
+
+        let roster = execute_mail(LIST_AGENTS, "{}", &me, &path).expect("listing should succeed");
+        assert!(roster.contains("Huginn"), "got: {roster}");
+        assert!(roster.contains(&huginn), "the id is what send_message needs");
+        assert!(roster.contains("(unnamed)"), "an unnamed companion is still listed");
+        assert!(roster.contains(&nameless), "and still addressable");
+        assert!(!roster.contains(&me), "you are never in your own roster");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_letter_round_trips_between_two_agents() {
+        let path = mail_fixture("round-trip");
+        let rook = built_in(&path);
+        let huginn = uuid::Uuid::new_v4().to_string();
+
+        let sent = execute_mail(
+            SEND_MESSAGE,
+            &serde_json::json!({ "to_agent_id": &huginn, "body": "Shall we settle the name?" })
+                .to_string(),
+            &rook,
+            &path,
+        )
+        .expect("sending should succeed");
+        assert!(sent.contains("waits in their inbox"), "got: {sent}");
+
+        // The recipient sees it; the sender's own inbox stays empty.
+        let inbox = execute_mail(READ_MESSAGES, "{}", &huginn, &path).expect("inbox should read");
+        assert!(inbox.contains("Shall we settle the name?"), "got: {inbox}");
+        assert!(inbox.contains(&rook), "the letter names its sender");
+        assert_eq!(
+            execute_mail(READ_MESSAGES, "{}", &rook, &path).unwrap(),
+            "[no unread messages]"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_companion_cannot_forge_a_sender_or_write_to_itself() {
+        let path = mail_fixture("forge");
+        let rook = built_in(&path);
+        let huginn = uuid::Uuid::new_v4().to_string();
+
+        // There is no `from` parameter, so an attempt to supply one is simply
+        // an unknown key — the sender stays whoever the turn belongs to.
+        execute_mail(
+            SEND_MESSAGE,
+            &serde_json::json!({
+                "to_agent_id": &huginn,
+                "from_agent_id": "somebody-else",
+                "body": "Not who you think."
+            })
+            .to_string(),
+            &rook,
+            &path,
+        )
+        .expect("sending should succeed");
+        let inbox = execute_mail(READ_MESSAGES, "{}", &huginn, &path).unwrap();
+        assert!(inbox.contains(&rook), "the real sender is recorded");
+        assert!(!inbox.contains("somebody-else"), "the forged sender is ignored");
+
+        let error = execute_mail(
+            SEND_MESSAGE,
+            &serde_json::json!({ "to_agent_id": &rook, "body": "hello me" }).to_string(),
+            &rook,
+            &path,
+        )
+        .expect_err("writing to yourself should be refused");
+        assert!(error.contains("your own id"), "got: {error}");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn marking_read_is_scoped_and_tells_a_stranger_nothing() {
+        let path = mail_fixture("mark");
+        let rook = built_in(&path);
+        let huginn = uuid::Uuid::new_v4().to_string();
+        let magpie = uuid::Uuid::new_v4().to_string();
+
+        execute_mail(
+            SEND_MESSAGE,
+            &serde_json::json!({ "to_agent_id": &huginn, "body": "Read me." }).to_string(),
+            &rook,
+            &path,
+        )
+        .unwrap();
+        let inbox = execute_mail(READ_MESSAGES, "{}", &huginn, &path).unwrap();
+        let id = inbox
+            .split("id ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("the inbox should print an id")
+            .to_owned();
+
+        // A stranger gets the SAME sentence as a no-op, so the tool cannot be
+        // used to discover whether someone else's message id is real.
+        let stranger = execute_mail(
+            MARK_MESSAGE_READ,
+            &serde_json::json!({ "message_id": &id }).to_string(),
+            &magpie,
+            &path,
+        )
+        .unwrap();
+        let invented = execute_mail(
+            MARK_MESSAGE_READ,
+            &serde_json::json!({ "message_id": "no-such-message" }).to_string(),
+            &magpie,
+            &path,
+        )
+        .unwrap();
+        assert!(stranger.contains("nothing to do"), "got: {stranger}");
+        assert_eq!(
+            stranger.replace(&id, "X"),
+            invented.replace("no-such-message", "X"),
+            "a real id and an invented one must be indistinguishable to a stranger"
+        );
+
+        // Still unread for its actual owner, who can clear it.
+        assert!(execute_mail(READ_MESSAGES, "{}", &huginn, &path)
+            .unwrap()
+            .contains("Read me."));
+        let owner = execute_mail(
+            MARK_MESSAGE_READ,
+            &serde_json::json!({ "message_id": &id }).to_string(),
+            &huginn,
+            &path,
+        )
+        .unwrap();
+        assert!(owner.contains("marked read"), "got: {owner}");
+        assert_eq!(
+            execute_mail(READ_MESSAGES, "{}", &huginn, &path).unwrap(),
+            "[no unread messages]"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_mail_tools_ride_only_when_there_is_an_identity_to_sign_with() {
+        let anonymous = declarations(&ToolContext {
+            database_path: Some("companion.db".into()),
+            ..Default::default()
+        });
+        assert!(
+            !anonymous.iter().any(|tool| tool.name == SEND_MESSAGE),
+            "no companion id means no mail tools at all"
+        );
+
+        let signed = declarations(&ToolContext {
+            database_path: Some("companion.db".into()),
+            companion_id: Some("companion-1".to_owned()),
+            ..Default::default()
+        });
+        for expected in [LIST_AGENTS, SEND_MESSAGE, READ_MESSAGES, MARK_MESSAGE_READ] {
+            assert!(
+                signed.iter().any(|tool| tool.name == expected),
+                "{expected} should be declared"
+            );
+        }
+    }
 
     #[test]
     fn tools_are_declared_only_when_their_ground_exists() {
@@ -628,7 +1130,7 @@ mod tests {
         );
 
         let archive_only = declarations(&ToolContext {
-            archive_database_path: Some("companion.db".into()),
+            database_path: Some("companion.db".into()),
             ..ToolContext::default()
         });
         assert_eq!(archive_only.len(), 2);
@@ -661,12 +1163,13 @@ mod tests {
 
         let everything = declarations(&ToolContext {
             memory_agent_id: Some("agent-1".to_owned()),
-            archive_database_path: Some("companion.db".into()),
+            database_path: Some("companion.db".into()),
             conversation_id: Some("conversation-1".to_owned()),
             serpapi_api_key: Some("a-key".to_owned()),
             workspace_dir: Some("/a/workspace".into()),
+            companion_id: Some("companion-1".to_owned()),
         });
-        assert_eq!(everything.len(), 10);
+        assert_eq!(everything.len(), 14, "ten, plus the four mail tools");
     }
 
     #[test]

@@ -95,6 +95,12 @@ impl AgentMailRepository {
 
     /// Everything one agent has sent, newest first. The other half of "own mail
     /// only" — a sender may see its own record of what it wrote.
+    ///
+    /// Along with `unread_count` and `get` below: tested, and waiting on the
+    /// inbox UI, which is what a human needs them for. The model's four tools
+    /// do not — an agent reads its inbox and marks things read; a person wants
+    /// a badge, a sent folder, and one message open.
+    #[allow(dead_code)]
     pub(crate) fn sent(&self, agent_id: &str) -> Result<Vec<AgentMessage>, AppError> {
         let connection = self.connection()?;
         let mut statement = connection
@@ -116,6 +122,7 @@ impl AgentMailRepository {
     }
 
     /// The badge. One indexed count rather than loading an inbox to measure it.
+    #[allow(dead_code)]
     pub(crate) fn unread_count(&self, agent_id: &str) -> Result<i64, AppError> {
         self.connection()?
             .query_row(
@@ -146,6 +153,7 @@ impl AgentMailRepository {
     }
 
     /// One letter, readable only by the two ends that hold it.
+    #[allow(dead_code)]
     pub(crate) fn get(&self, agent_id: &str, message_id: &str) -> Result<Option<AgentMessage>, AppError> {
         self.connection()?
             .query_row(

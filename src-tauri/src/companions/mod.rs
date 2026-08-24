@@ -17,7 +17,7 @@ mod repository;
 
 use std::{path::Path, sync::Arc};
 
-use repository::CompanionRepository;
+pub(crate) use repository::CompanionRepository;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;

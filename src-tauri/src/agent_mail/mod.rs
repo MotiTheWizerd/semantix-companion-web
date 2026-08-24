@@ -16,22 +16,12 @@
 //! has. It leaves an unsolicited-mail vector open on purpose — the answer to
 //! that is blocking and reporting later, not a smaller inbox now.
 
-// The store ships before its callers: migration, repository and tests are
-// complete, and the IPC commands + inbox UI are the next slice. DELETE THIS
-// ALLOW when they land — it exists to keep one deliberate gap quiet, not to
-// make dead code permanently invisible in this module.
-#![allow(dead_code)]
-
 use serde::Serialize;
 
 use crate::app_error::AppError;
 
 mod repository;
 
-// The store is complete and tested; nothing calls it yet. The IPC commands and
-// the inbox UI are the next slice, and this re-export is what they will reach
-// for — kept here so the seam is visible rather than discovered later.
-#[allow(unused_imports)]
 pub(crate) use repository::AgentMailRepository;
 
 /// A single letter. `read_at: None` is the unread state and the only flag the

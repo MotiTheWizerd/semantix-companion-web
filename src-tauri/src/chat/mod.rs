@@ -347,7 +347,7 @@ impl ChatService {
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .map(str::to_owned),
-            archive_database_path: Some(self.database_path.clone()),
+            database_path: Some(self.database_path.clone()),
             conversation_id: Some(accepted.conversation.id.clone()),
             serpapi_api_key: std::env::var("SERPAPI_API_KEY")
                 .ok()
@@ -361,6 +361,10 @@ impl ChatService {
                 .as_deref()
                 .and_then(|path| std::fs::canonicalize(path).ok())
                 .filter(|path| path.is_dir()),
+            // From the RESOLVED companion, never from the model's arguments —
+            // this is the return address on everything it sends, and a sender
+            // it could choose would not be a sender at all.
+            companion_id: Some(companion.id.clone()),
         };
 
         let conversation_session_id = accepted.conversation.id.clone();
