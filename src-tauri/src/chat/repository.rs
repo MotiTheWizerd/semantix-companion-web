@@ -579,8 +579,21 @@ mod tests {
         (ChatRepository::open(&path).expect("repository should open"), path)
     }
 
+    /// The built-in companion's id is a uuid minted at migration time, so a
+    /// fixture has to look it up rather than name it. Nothing may hardcode it —
+    /// that is the whole point of schema 12.
+    fn built_in_id(path: &std::path::Path) -> String {
+        rusqlite::Connection::open(path)
+            .expect("test database should open")
+            .query_row("SELECT id FROM companions WHERE is_built_in = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("the built-in companion should exist")
+    }
+
     fn seed_conversation(
         repository: &ChatRepository,
+        companion_id: &str,
         tag: &str,
         user_text: &str,
         assistant_text: &str,
@@ -589,7 +602,7 @@ mod tests {
         repository
             .commit_user_message(CommitUserMessage {
                 conversation_id: None,
-                companion_id: "companion-built-in",
+                companion_id,
                 content: user_text,
                 title: format!("Talk about {tag}").as_str(),
                 timestamp: 1_755_800_000_000,
@@ -620,14 +633,17 @@ mod tests {
     #[test]
     fn the_raw_memory_drill_finds_ranks_and_excludes() {
         let (repository, path) = open_repository("drill");
+        let companion_id = built_in_id(&path);
         let ships = seed_conversation(
             &repository,
+            &companion_id,
             "ships",
             "My favorite ship is the Long Serpent.",
             "The Long Serpent was Olaf Tryggvason's flagship.",
         );
         let current = seed_conversation(
             &repository,
+            &companion_id,
             "current",
             "The Long Serpent again, but from the conversation being excluded.",
             "Understood.",
@@ -663,6 +679,8 @@ mod tests {
     #[test]
     fn attachments_survive_the_round_trip_and_ride_only_their_own_message() {
         let (repository, path) = open_repository("attachments");
+        let companion_id = built_in_id(&path);
+        let companion_id = companion_id.as_str();
         let attachments = vec![crate::chat::MessageAttachment {
             id: "attachment-1".to_owned(),
             media_type: "image/png".to_owned(),
@@ -671,7 +689,7 @@ mod tests {
         let accepted = repository
             .commit_user_message(CommitUserMessage {
                 conversation_id: None,
-                companion_id: "companion-built-in",
+                companion_id,
                 content: "Look at this.",
                 title: "Look at this.",
                 timestamp: 1_755_800_000_000,
@@ -686,7 +704,7 @@ mod tests {
         repository
             .commit_user_message(CommitUserMessage {
                 conversation_id: Some("conversation-images"),
-                companion_id: "companion-built-in",
+                companion_id,
                 content: "And a plain one.",
                 title: "Look at this.",
                 timestamp: 1_755_800_001_000,

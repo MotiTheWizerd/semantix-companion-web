@@ -997,9 +997,15 @@ mod tests {
                 .expect("conversations should reload");
             assert_eq!(conversations.len(), 1);
             assert_eq!(conversations[0].id, accepted.accepted.conversation.id);
+            let built_in_id: String = rusqlite::Connection::open(&database_path)
+                .expect("test database should open")
+                .query_row("SELECT id FROM companions WHERE is_built_in = 1", [], |row| {
+                    row.get(0)
+                })
+                .expect("the built-in companion should exist");
             assert_eq!(
                 conversations[0].companion_id.as_deref(),
-                Some("companion-built-in"),
+                Some(built_in_id.as_str()),
                 "a thread sent with no pick belongs to the built-in companion"
             );
 

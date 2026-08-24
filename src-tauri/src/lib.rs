@@ -1,3 +1,4 @@
+mod agent_mail;
 mod app_error;
 mod chat;
 mod companions;

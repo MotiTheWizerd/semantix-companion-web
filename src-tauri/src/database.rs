@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 11;
+const LATEST_SCHEMA_VERSION: i64 = 13;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -388,6 +388,88 @@ fn migration_sql(version: i64) -> &'static str {
              CREATE UNIQUE INDEX IF NOT EXISTS idx_companions_built_in
                  ON companions(is_built_in) WHERE is_built_in = 1;"
         }
+        12 => {
+            // EVERY COMPANION GETS A UUID — including the built-in one.
+            //
+            // Schema 7 seeded the built-in row from SQL, and SQL cannot call
+            // Uuid::new_v4(), so its id was typed by hand: 'companion-built-in'.
+            // Every companion a user creates goes through the Rust path and gets
+            // a real v4 uuid; only this one row did not. That made the single
+            // companion EVERY install ships with the one whose id is identical
+            // on every machine in the world.
+            //
+            // Harmless while an id only ever means something inside one local
+            // database. Not harmless the moment an id becomes an ADDRESS —
+            // agent-to-agent messages, anything that crosses machines — because
+            // 'companion-built-in' would name a different entity on each one.
+            // Fixed before any such column exists, so this is a one-line seed
+            // rewrite instead of a backfill across installed machines.
+            //
+            // memory_agent_name is deliberately NOT touched. It stays the bare
+            // 'companion' the built-in has answered to since s483; that string
+            // is the pointer to everything Rook has ever remembered, and
+            // changing it would strand the lot. Identity and memory-pointer are
+            // separate columns precisely so one can move without the other.
+            //
+            // Order matters: the parent row is renamed first, then the children
+            // are repointed at it. Migrations run with foreign_keys OFF and a
+            // foreign_key_check afterwards, so the window is safe and the repair
+            // is verified rather than assumed.
+            //
+            // Guarded by `WHERE id = 'companion-built-in'` so it is idempotent
+            // and a no-op on any database that never carried the literal.
+            "UPDATE companions
+                 SET id = lower(
+                         hex(randomblob(4)) || '-' ||
+                         hex(randomblob(2)) || '-4' ||
+                         substr(hex(randomblob(2)), 2) || '-' ||
+                         substr('89ab', abs(random()) % 4 + 1, 1) ||
+                         substr(hex(randomblob(2)), 2) || '-' ||
+                         hex(randomblob(6))
+                     )
+                 WHERE id = 'companion-built-in';
+
+             UPDATE conversations
+                 SET companion_id = (SELECT id FROM companions WHERE is_built_in = 1)
+                 WHERE companion_id = 'companion-built-in';"
+        }
+        13 => {
+            // AGENT MAIL. Not `messages` — that name is taken by chat turns, and
+            // these are a different animal: one agent addressing another, with
+            // no conversation to belong to.
+            //
+            // NO FOREIGN KEY on the agent ids, deliberately. A recipient is not
+            // guaranteed to live in this database — the whole reason the ids are
+            // uuids now is that they may one day name a companion on someone
+            // else's machine. An FK would make the local roster the limit of who
+            // can be addressed, which is exactly the ceiling we are avoiding.
+            //
+            // The user columns are SPLIT by side. One `user_id` cannot describe
+            // a message that crosses users: it belongs to the sender's account
+            // and the recipient's both, and "what is addressed to me" has no
+            // column to ask about. NULL means single-user-local, which is every
+            // row today.
+            //
+            // read_at doubles as the unread flag — NULL is unread. One column,
+            // and the inbox index covers the badge query without a second one.
+            "CREATE TABLE agent_messages (
+                 id            TEXT    PRIMARY KEY,
+                 from_agent_id TEXT    NOT NULL,
+                 to_agent_id   TEXT    NOT NULL,
+                 from_user_id  TEXT,
+                 to_user_id    TEXT,
+                 project_id    TEXT,
+                 body          TEXT    NOT NULL CHECK (length(trim(body)) > 0),
+                 created_at    INTEGER NOT NULL,
+                 read_at       INTEGER
+             );
+
+             CREATE INDEX idx_agent_messages_inbox
+                 ON agent_messages(to_agent_id, read_at);
+
+             CREATE INDEX idx_agent_messages_sent
+                 ON agent_messages(from_agent_id, created_at DESC);"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -395,6 +477,7 @@ fn migration_sql(version: i64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
+    use uuid::Uuid;
 
     use super::{migrate, migration_sql, LATEST_SCHEMA_VERSION};
 
@@ -543,7 +626,17 @@ mod tests {
         migrate(&mut connection).expect("version three should upgrade");
 
         // Both threads survive, and both now answer to the built-in companion
-        // instead of carrying a model of their own.
+        // instead of carrying a model of their own. Compared against the id the
+        // built-in actually holds rather than a literal, because schema 12
+        // rewrites it to a uuid and the point of the assertion is that the
+        // conversations still POINT AT IT, whatever it is called.
+        let built_in_id: String = connection
+            .query_row(
+                "SELECT id FROM companions WHERE is_built_in = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the built-in companion should exist");
         for conversation in ["conversation-configured", "conversation-test"] {
             let companion_id: Option<String> = connection
                 .query_row(
@@ -552,7 +645,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("the conversation should survive every migration");
-            assert_eq!(companion_id.as_deref(), Some("companion-built-in"));
+            assert_eq!(companion_id.as_deref(), Some(built_in_id.as_str()));
         }
 
         // The per-conversation override is gone, not merely unused.
@@ -579,7 +672,7 @@ mod tests {
         let (companion_mode, companion_model): (String, Option<String>) = connection
             .query_row(
                 "SELECT model_preference_mode, model_id FROM companions
-                 WHERE id = 'companion-built-in'",
+                 WHERE is_built_in = 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -642,7 +735,14 @@ mod tests {
             )
             .expect("the conversation should survive its own rebuild");
         assert_eq!(title, "A real thread");
-        assert_eq!(companion_id.as_deref(), Some("companion-built-in"));
+        let built_in_id: String = connection
+            .query_row(
+                "SELECT id FROM companions WHERE is_built_in = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the built-in companion should exist");
+        assert_eq!(companion_id.as_deref(), Some(built_in_id.as_str()));
 
         // And enforcement is back on afterwards, not silently left off.
         let enforcing: i64 = connection
@@ -748,10 +848,76 @@ mod tests {
             )
             .expect("exactly one companion should be seeded");
 
-        assert_eq!(id, "companion-built-in");
+        assert!(
+            Uuid::parse_str(&id).is_ok(),
+            "the built-in companion must carry a real uuid like every other \
+             companion, not a hand-typed literal — got {id:?}"
+        );
         assert_eq!(name, None, "the built-in companion starts unnamed");
         assert_eq!(agent, "companion", "it adopts the pre-existing memory agent");
         assert_eq!(built_in, 1);
+    }
+
+    #[test]
+    fn migration_twelve_replaces_the_hand_typed_built_in_id_and_repoints_its_threads() {
+        // An installed database that already carries the literal — the state
+        // every existing copy of the app is in.
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("foreign keys should disable");
+        for version in 1..=11 {
+            connection
+                .execute_batch(migration_sql(version))
+                .unwrap_or_else(|error| panic!("migration {version} should apply: {error}"));
+        }
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, companion_id, created_at, updated_at)
+                 VALUES ('conversation-1', 'A thread of Rook''s', 'companion-built-in', 0, 0)",
+                [],
+            )
+            .expect("a conversation on the built-in companion should insert");
+        connection
+            .pragma_update(None, "user_version", 11)
+            .expect("the legacy version should stamp");
+
+        migrate(&mut connection).expect("schema twelve should upgrade");
+
+        let id: String = connection
+            .query_row("SELECT id FROM companions WHERE is_built_in = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("the built-in companion should survive");
+        assert!(
+            Uuid::parse_str(&id).is_ok(),
+            "the hand-typed id must be replaced by a real uuid — got {id:?}"
+        );
+
+        // The memory pointer must NOT move with it, or Rook loses everything it
+        // has ever remembered.
+        let agent: String = connection
+            .query_row(
+                "SELECT memory_agent_name FROM companions WHERE is_built_in = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the memory agent should be readable");
+        assert_eq!(agent, "companion", "the memory pointer must not move");
+
+        // And every thread that pointed at the old literal follows the rename.
+        let companion_id: Option<String> = connection
+            .query_row(
+                "SELECT companion_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the conversation should survive");
+        assert_eq!(
+            companion_id.as_deref(),
+            Some(id.as_str()),
+            "a thread must not be orphaned by its companion's rename"
+        );
     }
 
     #[test]
