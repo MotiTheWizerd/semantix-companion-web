@@ -515,7 +515,23 @@ impl ChatService {
         {
             messages.push(InferenceMessage::text(Role::System, identity));
         }
-        messages.push(InferenceMessage::text(Role::System, notice));
+        // ⚑ THE NOTICE RIDES AS A **USER** MESSAGE, THOUGH IT IS PERSISTED AS A
+        // SYSTEM ONE. Not a contradiction — the two roles answer two different
+        // questions.
+        //
+        // In the TRANSCRIPT the role is a claim about who spoke, and writing
+        // this as a user message would put words in Moti's mouth in his own
+        // history. It stays `system` there, permanently.
+        //
+        // In the REQUEST the role is a protocol slot, and Claude Code rejects a
+        // turn outright without a user message: "A Claude Code turn needs a
+        // user message to answer" (observed live, s502 — the turn failed at
+        // sequence 43 with an empty body). A request of nothing but system
+        // messages is not a request that provider will answer.
+        //
+        // Honesty is carried by the TEXT rather than the role: the notice's
+        // first line says the user did not send it and is not reading it.
+        messages.push(InferenceMessage::text(Role::User, notice));
         prepared.execution.request.messages = messages;
 
         Ok(prepared)
