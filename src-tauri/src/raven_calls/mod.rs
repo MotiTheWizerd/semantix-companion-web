@@ -31,11 +31,6 @@ use serde::Serialize;
 
 mod repository;
 
-// Built and proven, waiting on its callers: the tools a companion uses to open
-// a call, and the surface a person watches one through. The schema and the caps
-// land first deliberately — the limits are the part that must exist before any
-// agent can spend anything.
-#[allow(unused_imports)]
 pub(crate) use repository::RavenCallRepository;
 
 /// Calls one companion may open between local midnight and local midnight.

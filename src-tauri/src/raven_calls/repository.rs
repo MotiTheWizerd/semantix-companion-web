@@ -231,6 +231,72 @@ impl RavenCallRepository {
         Ok(messages)
     }
 
+    /// The open calls one agent is part of — as the one who opened it, or as
+    /// someone who has written or been written to inside it.
+    ///
+    /// This is how the RECEIVING side finds a call at all. Until a companion
+    /// can be woken, nothing tells Hugin that Rook opened one; this is the
+    /// query that lets it look.
+    pub(crate) fn open_calls_for_agent(&self, agent_id: &str) -> Result<Vec<RavenCall>, AppError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {CALL_COLUMNS} FROM raven_calls
+                 WHERE status = 'open'
+                   AND (initiator_agent_id = ?1
+                        OR EXISTS (SELECT 1 FROM raven_call_messages
+                                   WHERE call_id = raven_calls.id
+                                     AND (from_agent_id = ?1 OR to_agent_id = ?1)))
+                 ORDER BY created_at DESC, id ASC"
+            ))
+            .map_err(AppError::database)?;
+
+        let calls = statement
+            .query_map([agent_id.trim()], map_call)
+            .map_err(AppError::database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::database)?;
+
+        Ok(calls)
+    }
+
+    /// The turns of a call, readable ONLY by someone in it.
+    ///
+    /// ⚑ THE PRIVACY IS IN THIS SIGNATURE, the same law `agent_mail` runs on.
+    /// `messages` above takes no agent and is for callers that have already
+    /// established the right to look; this is the one the model reaches, and
+    /// there is deliberately no argument that widens it. `None` means "not
+    /// yours or not there" — ONE answer for both, or knowing a uuid becomes a
+    /// way to test whether someone else's call exists.
+    pub(crate) fn messages_visible_to(
+        &self,
+        call_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> Result<Option<Vec<RavenCallMessage>>, AppError> {
+        let agent_id = agent_id.trim();
+        let participates: bool = self
+            .connection()?
+            .query_row(
+                "SELECT EXISTS (
+                     SELECT 1 FROM raven_calls
+                     WHERE id = ?1
+                       AND (initiator_agent_id = ?2
+                            OR EXISTS (SELECT 1 FROM raven_call_messages
+                                       WHERE call_id = ?1
+                                         AND (from_agent_id = ?2 OR to_agent_id = ?2)))
+                 )",
+                params![call_id, agent_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::database)?;
+
+        if !participates {
+            return Ok(None);
+        }
+        Ok(Some(self.messages(call_id, limit)?))
+    }
+
     /// Every call born out of one human conversation, newest first. This is the
     /// provenance query the whole table exists to make answerable: "what did my
     /// companion say to anyone else while working on THIS."
@@ -269,9 +335,18 @@ impl RavenCallRepository {
             .map_err(AppError::database)
     }
 
-    /// End a call early. Idempotent: closing a closed call keeps the original
+    /// End a call early.
+    ///
+    /// Deliberately NOT given to the model. A call closes itself on its last
+    /// turn, and leaving one open costs nothing — the daily allowance is spent
+    /// on OPENING, so a "hang up" tool would buy the model nothing and add a
+    /// fifth thing for it to get wrong. This is for the human surface: a person
+    /// watching an exchange they do not like should be able to end it.
+    ///
+    /// Idempotent: closing a closed call keeps the original
     /// `closed_at`, because that stamp records when the exchange actually
     /// stopped and a second call must not rewrite history.
+    #[allow(dead_code)]
     pub(crate) fn close(&self, call_id: &str) -> Result<bool, AppError> {
         let now = unix_timestamp_ms()?;
         let changed = self
@@ -575,6 +650,53 @@ mod tests {
             0,
             "a refused turn must not have moved the counter"
         );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_call_is_findable_by_both_ends_and_by_nobody_else() {
+        let (calls, path) = open_calls("participants");
+        let call = calls.open_call("rook", None).unwrap();
+
+        // The initiator finds it before anyone has spoken.
+        assert_eq!(calls.open_calls_for_agent("rook").unwrap().len(), 1);
+        // The recipient cannot — nothing addresses them yet.
+        assert!(calls.open_calls_for_agent("hugin").unwrap().is_empty());
+
+        calls
+            .append_message(&call.id, "rook", "hugin", "are you there?")
+            .unwrap();
+
+        // Now both ends see it, and a stranger still does not.
+        assert_eq!(calls.open_calls_for_agent("hugin").unwrap().len(), 1);
+        assert!(calls.open_calls_for_agent("magpie").unwrap().is_empty());
+
+        // Reading is scoped the same way, and answers a stranger with the SAME
+        // "nothing here" as a call that does not exist.
+        assert!(calls
+            .messages_visible_to(&call.id, "hugin", 50)
+            .unwrap()
+            .is_some());
+        assert!(
+            calls
+                .messages_visible_to(&call.id, "magpie", 50)
+                .unwrap()
+                .is_none(),
+            "knowing the id must not be enough to read the call"
+        );
+        assert!(calls
+            .messages_visible_to("no-such-call", "magpie", 50)
+            .unwrap()
+            .is_none());
+
+        // A closed call drops out of the open list but stays readable.
+        calls.close(&call.id).unwrap();
+        assert!(calls.open_calls_for_agent("rook").unwrap().is_empty());
+        assert!(calls
+            .messages_visible_to(&call.id, "rook", 50)
+            .unwrap()
+            .is_some());
 
         fs::remove_file(path).ok();
     }

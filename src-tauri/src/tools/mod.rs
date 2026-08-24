@@ -16,6 +16,7 @@ use crate::chat::repository::{ArchiveHit, ChatRepository};
 use crate::companions::{Companion, CompanionRepository};
 use crate::inference::{ToolCall, ToolDeclaration};
 use crate::memory;
+use crate::raven_calls::{self, RavenCallRepository};
 use crate::web;
 
 pub(crate) const RECALL_MEMORY: &str = "recall_memory";
@@ -27,6 +28,14 @@ pub(crate) const LIST_AGENTS: &str = "list_agents";
 pub(crate) const SEND_MESSAGE: &str = "send_message";
 pub(crate) const READ_MESSAGES: &str = "read_messages";
 pub(crate) const MARK_MESSAGE_READ: &str = "mark_message_read";
+pub(crate) const OPEN_CALL: &str = "open_call";
+pub(crate) const SEND_IN_CALL: &str = "send_in_call";
+pub(crate) const READ_CALL: &str = "read_call";
+pub(crate) const LIST_CALLS: &str = "list_calls";
+
+/// Turns returned by `read_call`. A call cannot hold more than
+/// `MAX_MESSAGES_PER_CALL`, so this only ever bites if that limit is raised.
+const CALL_READ_LIMIT: i64 = 50;
 
 const INBOX_DEFAULT_LIMIT: u32 = 20;
 const INBOX_MAX_LIMIT: u32 = 100;
@@ -380,6 +389,99 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                 "required": ["message_id"]
             }),
         });
+
+        // CALLS. Same ground as mail, and the same identity signs them.
+        //
+        // A letter waits in a drawer; a CALL is an exchange with a shape — it
+        // belongs to the conversation it was opened from, it holds both sides'
+        // turns in order, and it runs out. The description tells the model the
+        // limits UP FRONT rather than only at the refusal, so it can decide
+        // whether a question is worth a call before spending one.
+        tools.push(ToolDeclaration {
+            name: OPEN_CALL.to_owned(),
+            description: concat!(
+                "Start a call with another agent and say your first line. Use ",
+                "this instead of send_message when you expect a back-and-forth ",
+                "rather than a note — a call keeps both sides' turns together ",
+                "and belongs to this conversation, so the user can see what ",
+                "was said on their behalf. ",
+                "You may open only 5 calls a day, and each call holds only 5 ",
+                "messages from both sides together, so open one for something ",
+                "worth the exchange. The other agent will not answer inside ",
+                "this turn.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to_agent_id": {
+                        "type": "string",
+                        "description": "The agent to call, from list_agents."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": concat!(
+                            "Your opening line. Say who you are and what you ",
+                            "want — they may read it with no other context."
+                        )
+                    }
+                },
+                "required": ["to_agent_id", "body"]
+            }),
+        });
+        tools.push(ToolDeclaration {
+            name: SEND_IN_CALL.to_owned(),
+            description: concat!(
+                "Say something into a call that is already open. This does NOT ",
+                "cost one of your 5 daily calls — replying inside a call is ",
+                "free, and the call's own 5-message limit still applies. The ",
+                "call closes itself on its last message.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "call_id": {
+                        "type": "string",
+                        "description": "The call, from open_call or list_calls."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "What you want to say. Plain text."
+                    }
+                },
+                "required": ["call_id", "body"]
+            }),
+        });
+        tools.push(ToolDeclaration {
+            name: READ_CALL.to_owned(),
+            description: concat!(
+                "Read everything said in one call, oldest first. Only calls ",
+                "you are part of.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "call_id": {
+                        "type": "string",
+                        "description": "The call, from list_calls or open_call."
+                    }
+                },
+                "required": ["call_id"]
+            }),
+        });
+        tools.push(ToolDeclaration {
+            name: LIST_CALLS.to_owned(),
+            description: concat!(
+                "List the open calls you are part of, including ones another ",
+                "agent opened with you, and how many of today's calls you have ",
+                "left. Check this when you want to know whether someone is ",
+                "waiting on you.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        });
     }
     // Fetch's ground is the network itself, so it always rides.
     tools.push(ToolDeclaration {
@@ -483,6 +585,28 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
             .await
             .map_err(|error| format!("the mail task failed: {error}"))?
         }
+        OPEN_CALL | SEND_IN_CALL | READ_CALL | LIST_CALLS => {
+            let me = context
+                .companion_id
+                .clone()
+                .ok_or_else(|| "no companion identity for this turn".to_owned())?;
+            let path = context
+                .database_path
+                .clone()
+                .ok_or_else(|| "the local database is not available".to_owned())?;
+            // ⚑ THE ROOT CONVERSATION COMES FROM THE TURN, NOT THE MODEL.
+            // Same law as the sender's id: there is no parameter a companion
+            // could put a different conversation in, so where a call came from
+            // is a fact about the turn rather than a claim the model makes.
+            let root = context.conversation_id.clone();
+            let name = call.name.clone();
+            let arguments = call.arguments.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                execute_call(&name, &arguments, &me, root.as_deref(), &path)
+            })
+            .await
+            .map_err(|error| format!("the call task failed: {error}"))?
+        }
         name if files::FILE_TOOL_NAMES.contains(&name) => {
             let root = context
                 .workspace_dir
@@ -553,6 +677,190 @@ fn execute_mail(name: &str, arguments: &str, me: &str, path: &Path) -> Result<St
         }
         other => Err(format!("unknown mail tool \"{other}\"")),
     }
+}
+
+/// The call tools. `me` signs every turn and `root` is the conversation this
+/// turn belongs to — both come from the turn, neither from the model.
+fn execute_call(
+    name: &str,
+    arguments: &str,
+    me: &str,
+    root: Option<&str>,
+    path: &Path,
+) -> Result<String, String> {
+    let calls = RavenCallRepository::open(path).map_err(|error| error.to_string())?;
+
+    match name {
+        OPEN_CALL => {
+            let (to, body) = parse_send_arguments(arguments)?;
+            if to == me {
+                return Err("that is your own id — you cannot call yourself".to_owned());
+            }
+
+            // ⚑ OPENING AND SPEAKING ARE ONE ACT, DELIBERATELY. A tool that
+            // only opened an empty call would let a confused model spend the
+            // whole day's allowance on five silent rooms, and would cost a
+            // tool round to say anything. There is no way to open a call
+            // without saying something in it.
+            let call = calls
+                .open_call(me, root)
+                .map_err(|error| error.to_string())?;
+            calls
+                .append_message(&call.id, me, &to, &body)
+                .map_err(|error| error.to_string())?;
+
+            let left = calls
+                .calls_remaining_today(me)
+                .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "[call opened with {to} · id {} · your line was sent]\n\
+                 [{} of today's calls left · {} more messages fit in this call · \
+                 they will not answer inside this turn]",
+                call.id,
+                left,
+                raven_calls::MAX_MESSAGES_PER_CALL - 1,
+            ))
+        }
+        SEND_IN_CALL => {
+            let (call_id, body) = parse_call_message_arguments(arguments)?;
+
+            // Scoped BEFORE the write: without this, knowing a uuid would be
+            // enough to speak into someone else's call.
+            let turns = calls
+                .messages_visible_to(&call_id, me, CALL_READ_LIMIT)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "there is no open call with that id that you are part of".to_owned()
+                })?;
+            let to = other_end(&turns, me).ok_or_else(|| {
+                "that call has nobody else in it yet — open_call starts one".to_owned()
+            })?;
+
+            calls
+                .append_message(&call_id, me, &to, &body)
+                .map_err(|error| error.to_string())?;
+
+            let remaining = raven_calls::MAX_MESSAGES_PER_CALL - (turns.len() as i64 + 1);
+            Ok(if remaining <= 0 {
+                "[sent · that was the call's last message, so it is now closed]".to_owned()
+            } else {
+                format!("[sent to {to} · {remaining} more messages fit in this call]")
+            })
+        }
+        READ_CALL => {
+            let call_id = parse_call_id_argument(arguments)?;
+            match calls
+                .messages_visible_to(&call_id, me, CALL_READ_LIMIT)
+                .map_err(|error| error.to_string())?
+            {
+                // One answer for "not yours" and "not there", the same reason
+                // mark_message_read has one: otherwise the tool is an oracle
+                // for whether someone else's call exists.
+                None => Ok(format!(
+                    "[nothing to read — {call_id} is not a call you are part of]"
+                )),
+                Some(turns) => Ok(render_call(&call_id, &turns)),
+            }
+        }
+        LIST_CALLS => {
+            let open = calls
+                .open_calls_for_agent(me)
+                .map_err(|error| error.to_string())?;
+            let left = calls
+                .calls_remaining_today(me)
+                .map_err(|error| error.to_string())?;
+            Ok(render_calls(&open, left))
+        }
+        other => Err(format!("unknown call tool \"{other}\"")),
+    }
+}
+
+/// Who the other end of a call is, read from its turns rather than stored.
+/// A call has exactly two participants, so the first id that is not mine is
+/// the answer — and taking it from the record means a reply cannot be
+/// redirected to a third party by argument.
+fn other_end(turns: &[raven_calls::RavenCallMessage], me: &str) -> Option<String> {
+    turns.iter().find_map(|turn| {
+        if turn.from_agent_id != me {
+            Some(turn.from_agent_id.clone())
+        } else if turn.to_agent_id != me {
+            Some(turn.to_agent_id.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn render_call(call_id: &str, turns: &[raven_calls::RavenCallMessage]) -> String {
+    if turns.is_empty() {
+        return format!("[call {call_id} has nothing in it yet]");
+    }
+    let mut out = format!("Call {call_id} — {} messages:\n", turns.len());
+    for turn in turns {
+        out.push_str(&format!("\n── {}\n{}\n", turn.from_agent_id, turn.body));
+    }
+    let left = raven_calls::MAX_MESSAGES_PER_CALL - turns.len() as i64;
+    out.push_str(&if left > 0 {
+        format!("\n[{left} more messages fit · reply with send_in_call]")
+    } else {
+        "\n[this call is full and closed]".to_owned()
+    });
+    out
+}
+
+fn render_calls(open: &[raven_calls::RavenCall], calls_left: i64) -> String {
+    let mut out = if open.is_empty() {
+        "[no open calls]".to_owned()
+    } else {
+        let mut listed = format!("{} open call(s):\n", open.len());
+        for call in open {
+            listed.push_str(&format!(
+                "  · id {} · opened by {} · {} of {} messages used\n",
+                call.id,
+                call.initiator_agent_id,
+                call.message_count,
+                raven_calls::MAX_MESSAGES_PER_CALL,
+            ));
+        }
+        listed
+    };
+    out.push_str(&format!(
+        "\n[{calls_left} of today's {} calls left · the allowance resets at midnight]",
+        raven_calls::MAX_CALLS_PER_DAY
+    ));
+    out
+}
+
+fn parse_call_message_arguments(arguments: &str) -> Result<(String, String), String> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|error| format!("arguments were not valid JSON: {error}"))?;
+    let call_id = parsed
+        .get("call_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "a non-empty \"call_id\" is required — call list_calls for ids".to_owned())?;
+    let body = parsed
+        .get("body")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "a non-empty \"body\" argument is required".to_owned())?;
+    Ok((call_id, body))
+}
+
+fn parse_call_id_argument(arguments: &str) -> Result<String, String> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|error| format!("arguments were not valid JSON: {error}"))?;
+    parsed
+        .get("call_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "a non-empty \"call_id\" argument is required".to_owned())
 }
 
 fn parse_send_arguments(arguments: &str) -> Result<(String, String), String> {
@@ -879,7 +1187,9 @@ mod tests {
         render_web_search, ToolContext,
     };
     use super::{execute_mail, LIST_AGENTS, MARK_MESSAGE_READ, READ_MESSAGES, SEND_MESSAGE};
+    use super::{execute_call, LIST_CALLS, OPEN_CALL, READ_CALL, SEND_IN_CALL};
     use crate::chat::repository::ArchiveHit;
+    use crate::raven_calls::{self, RavenCallRepository};
     use crate::web;
 
     /// A real database, migrated, with the built-in companion in it.
@@ -890,6 +1200,27 @@ mod tests {
         ));
         crate::database::initialise(&path).expect("test database should initialise");
         path
+    }
+
+    /// A committed conversation for a call to hang from.
+    ///
+    /// ⚑ NOT A TEST CONVENIENCE — the FK from `raven_calls` is real, and an
+    /// invented id is refused outright. That is the constraint working: in a
+    /// live turn the conversation is committed by `submit` before any tool
+    /// runs, so a call's provenance can never point at a thread that is not
+    /// there. A test that faked the id would have been testing a world we
+    /// deliberately made impossible.
+    fn conversation(path: &std::path::Path, id: &str) -> String {
+        let now = crate::credentials::unix_timestamp_ms().expect("a clock");
+        rusqlite::Connection::open(path)
+            .expect("database should open")
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at)
+                 VALUES (?1, 'a thread', ?2, ?2)",
+                rusqlite::params![id, now],
+            )
+            .expect("the conversation should insert");
+        id.to_owned()
     }
 
     fn built_in(path: &std::path::Path) -> String {
@@ -1101,12 +1432,216 @@ mod tests {
             companion_id: Some("companion-1".to_owned()),
             ..Default::default()
         });
-        for expected in [LIST_AGENTS, SEND_MESSAGE, READ_MESSAGES, MARK_MESSAGE_READ] {
+        for expected in [
+            LIST_AGENTS,
+            SEND_MESSAGE,
+            READ_MESSAGES,
+            MARK_MESSAGE_READ,
+            OPEN_CALL,
+            SEND_IN_CALL,
+            READ_CALL,
+            LIST_CALLS,
+        ] {
             assert!(
                 signed.iter().any(|tool| tool.name == expected),
                 "{expected} should be declared"
             );
         }
+    }
+
+    #[test]
+    fn a_call_round_trips_and_a_reply_costs_the_replier_nothing() {
+        let path = mail_fixture("call-round-trip");
+        let rook = built_in(&path);
+        let hugin = uuid::Uuid::new_v4().to_string();
+
+        let root = conversation(&path, "conv-1");
+
+        let opened = execute_call(
+            OPEN_CALL,
+            &serde_json::json!({ "to_agent_id": &hugin, "body": "Are you awake?" }).to_string(),
+            &rook,
+            Some(&root),
+            &path,
+        )
+        .expect("opening a call should succeed");
+        assert!(opened.contains("call opened"), "got: {opened}");
+        assert!(opened.contains("4 of today's calls left"), "got: {opened}");
+
+        // The recipient finds the call without being told its id.
+        let listed = execute_call(LIST_CALLS, "{}", &hugin, None, &path).expect("list should work");
+        assert!(listed.contains("1 open call"), "got: {listed}");
+        assert!(
+            listed.contains("5 of today's 5 calls left"),
+            "being called costs the recipient nothing: {listed}"
+        );
+
+        let call_id = listed
+            .split("id ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("the listing names the call id")
+            .to_owned();
+
+        let replied = execute_call(
+            SEND_IN_CALL,
+            &serde_json::json!({ "call_id": &call_id, "body": "I am." }).to_string(),
+            &hugin,
+            None,
+            &path,
+        )
+        .expect("replying should succeed");
+        assert!(replied.contains(&rook), "the reply is addressed back: {replied}");
+        assert!(replied.contains("3 more messages"), "got: {replied}");
+
+        let read = execute_call(
+            READ_CALL,
+            &serde_json::json!({ "call_id": &call_id }).to_string(),
+            &rook,
+            None,
+            &path,
+        )
+        .expect("reading should succeed");
+        assert!(read.contains("Are you awake?"), "got: {read}");
+        assert!(read.contains("I am."), "got: {read}");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_stranger_cannot_read_or_speak_into_someone_elses_call() {
+        let path = mail_fixture("call-privacy");
+        let rook = built_in(&path);
+        let hugin = uuid::Uuid::new_v4().to_string();
+        let magpie = uuid::Uuid::new_v4().to_string();
+
+        execute_call(
+            OPEN_CALL,
+            &serde_json::json!({ "to_agent_id": &hugin, "body": "Between us two." }).to_string(),
+            &rook,
+            None,
+            &path,
+        )
+        .unwrap();
+        let call_id = execute_call(LIST_CALLS, "{}", &rook, None, &path)
+            .unwrap()
+            .split("id ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("a call id")
+            .to_owned();
+
+        // ⚑ The same sentence a real-but-foreign call and an invented id both
+        // get, so the tool cannot be used to test whether a call exists.
+        let peeked = execute_call(
+            READ_CALL,
+            &serde_json::json!({ "call_id": &call_id }).to_string(),
+            &magpie,
+            None,
+            &path,
+        )
+        .unwrap();
+        let invented = execute_call(
+            READ_CALL,
+            &serde_json::json!({ "call_id": "no-such-call" }).to_string(),
+            &magpie,
+            None,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(
+            peeked.replace(&call_id, "ID"),
+            invented.replace("no-such-call", "ID"),
+            "a stranger must not learn that the call is real"
+        );
+
+        assert!(
+            execute_call(
+                SEND_IN_CALL,
+                &serde_json::json!({ "call_id": &call_id, "body": "Let me in." }).to_string(),
+                &magpie,
+                None,
+                &path,
+            )
+            .is_err(),
+            "knowing the id must not be enough to speak into the call"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_sixth_call_is_refused_with_a_sentence_the_model_can_act_on() {
+        let path = mail_fixture("call-cap");
+        let rook = built_in(&path);
+        let hugin = uuid::Uuid::new_v4().to_string();
+        let open = serde_json::json!({ "to_agent_id": &hugin, "body": "again" }).to_string();
+
+        for _ in 0..raven_calls::MAX_CALLS_PER_DAY {
+            execute_call(OPEN_CALL, &open, &rook, None, &path).expect("within the allowance");
+        }
+
+        let refused = execute_call(OPEN_CALL, &open, &rook, None, &path)
+            .expect_err("the sixth call must be refused");
+        assert!(refused.contains("midnight"), "got: {refused}");
+        assert!(
+            refused.contains(&raven_calls::MAX_CALLS_PER_DAY.to_string()),
+            "got: {refused}"
+        );
+
+        // And the model is not left guessing what it has left.
+        let listed = execute_call(LIST_CALLS, "{}", &rook, None, &path).unwrap();
+        assert!(listed.contains("0 of today's 5 calls left"), "got: {listed}");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_companion_cannot_call_itself_or_choose_its_calls_conversation() {
+        let path = mail_fixture("call-forge");
+        let rook = built_in(&path);
+
+        assert!(
+            execute_call(
+                OPEN_CALL,
+                &serde_json::json!({ "to_agent_id": &rook, "body": "hello me" }).to_string(),
+                &rook,
+                None,
+                &path,
+            )
+            .is_err(),
+            "a companion cannot call itself"
+        );
+
+        // ⚑ `root_conversation_id` is not a parameter. A model that supplies
+        // one is passing an unknown key, and the call still belongs to the
+        // conversation the TURN came from.
+        let hugin = uuid::Uuid::new_v4().to_string();
+        let real = conversation(&path, "the-real-conversation");
+        let other = conversation(&path, "somebody-elses-thread");
+        execute_call(
+            OPEN_CALL,
+            &serde_json::json!({
+                "to_agent_id": &hugin,
+                "root_conversation_id": &other,
+                "body": "where does this land?"
+            })
+            .to_string(),
+            &rook,
+            Some(&real),
+            &path,
+        )
+        .expect("the call should open");
+
+        let calls = RavenCallRepository::open(&path).unwrap();
+        let mine = calls.calls_for_conversation("the-real-conversation").unwrap();
+        assert_eq!(mine.len(), 1, "provenance comes from the turn");
+        assert!(calls
+            .calls_for_conversation("somebody-elses-thread")
+            .unwrap()
+            .is_empty());
+
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
@@ -1169,7 +1704,11 @@ mod tests {
             workspace_dir: Some("/a/workspace".into()),
             companion_id: Some("companion-1".to_owned()),
         });
-        assert_eq!(everything.len(), 14, "ten, plus the four mail tools");
+        assert_eq!(
+            everything.len(),
+            18,
+            "ten, plus the four mail tools and the four call tools"
+        );
     }
 
     #[test]

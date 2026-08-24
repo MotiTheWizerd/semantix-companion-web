@@ -10,11 +10,6 @@ mod tools;
 mod web;
 mod models;
 mod preferences;
-// The schema and the limits land before the tools that spend them, on purpose:
-// a cap that arrives after the capability is a cap that was never enforced.
-// Everything here is proven by its own tests and unreachable until the call
-// tools are wired — drop this allow the moment they are.
-#[allow(dead_code)]
 mod raven_calls;
 mod secret_vault;
 mod streaming;
