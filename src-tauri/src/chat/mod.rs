@@ -391,13 +391,27 @@ impl ChatService {
             messages.insert(0, InferenceMessage::text(Role::System, identity));
         }
 
+        let memory_agent_id = input
+            .memory_agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+
         let tool_context = ToolContext {
-            memory_agent_id: input
-                .memory_agent_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned),
+            // Resolved HERE, where the companion is already known, and never
+            // in the tool loop: the backend is a property of who is answering,
+            // not of what the model asked for.
+            memory_target: memory_agent_id.as_deref().map(|agent_id| {
+                if companion.is_origin {
+                    crate::memory::MemoryTarget::Muninn {
+                        channel: companion.memory_agent_name.clone(),
+                    }
+                } else {
+                    crate::memory::MemoryTarget::Organ { agent_id: agent_id.to_owned() }
+                }
+            }),
+            memory_agent_id,
             database_path: Some(self.database_path.clone()),
             conversation_id: Some(accepted.conversation.id.clone()),
             serpapi_api_key: std::env::var("SERPAPI_API_KEY")
@@ -1090,6 +1104,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             workspace_dir: None,
+            is_origin: false,
         };
 
         assert_eq!(

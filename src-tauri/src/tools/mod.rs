@@ -59,6 +59,11 @@ const WEB_FETCH_RENDER_BUDGET_CHARS: usize = 24_000;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ToolContext {
     pub(crate) memory_agent_id: Option<String>,
+    /// WHICH brain the two memory tools reach, resolved from the roster at
+    /// submission time. Deliberately not derivable here: the tool loop must
+    /// never be able to pick a backend, and the model must never be able to
+    /// name one. `None` alongside a present agent id means the organ.
+    pub(crate) memory_target: Option<crate::memory::MemoryTarget>,
     /// The local chat database — ground of the raw-memory drill. The tool
     /// opens its own read connection so it never contends with the stream.
     pub(crate) database_path: Option<PathBuf>,
@@ -515,24 +520,32 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
 /// Execute one call. `Err` is a tool-level failure the model should read and
 /// recover from — the chat loop folds it back as the tool's result, it never
 /// kills the stream.
+/// Where this turn's memory tools write. Falls back to the organ when a target
+/// was never resolved — the shape every install but this one has — so an older
+/// caller that only set `memory_agent_id` still reaches the same place it did.
+fn memory_target(context: &ToolContext) -> Result<memory::MemoryTarget, String> {
+    if let Some(target) = context.memory_target.clone() {
+        return Ok(target);
+    }
+    context
+        .memory_agent_id
+        .as_deref()
+        .map(|agent_id| memory::MemoryTarget::Organ { agent_id: agent_id.to_owned() })
+        .ok_or_else(|| "memory is not connected for this conversation".to_owned())
+}
+
 pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<String, String> {
     match call.name.as_str() {
         RECALL_MEMORY => {
-            let agent_id = context
-                .memory_agent_id
-                .as_deref()
-                .ok_or_else(|| "memory is not connected for this conversation".to_owned())?;
+            let target = memory_target(context)?;
             let name = parse_name_argument(&call.arguments)?;
-            let memory = memory::fetch_memory(agent_id, &name).await?;
+            let memory = memory::fetch_memory(&target, &name).await?;
             Ok(render_memory(&memory))
         }
         CARVE_MEMORY => {
-            let agent_id = context
-                .memory_agent_id
-                .as_deref()
-                .ok_or_else(|| "memory is not connected for this conversation".to_owned())?;
+            let target = memory_target(context)?;
             let payload = parse_carve_arguments(&call.arguments)?;
-            let result = memory::write_memory(agent_id, &payload).await?;
+            let result = memory::write_memory(&target, &payload).await?;
             Ok(render_carve_outcome(&payload, &result))
         }
         SEARCH_CONVERSATIONS => {
@@ -1777,6 +1790,7 @@ mod tests {
 
         let everything = declarations(&ToolContext {
             memory_agent_id: Some("agent-1".to_owned()),
+            memory_target: None,
             database_path: Some("companion.db".into()),
             conversation_id: Some("conversation-1".to_owned()),
             serpapi_api_key: Some("a-key".to_owned()),

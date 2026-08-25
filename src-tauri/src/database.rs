@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 15;
+const LATEST_SCHEMA_VERSION: i64 = 16;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -550,6 +550,23 @@ fn migration_sql(version: i64) -> &'static str {
             // for. Declining to answer is therefore a stable state, which it
             // has to be: not replying must be as cheap as replying.
             "ALTER TABLE raven_calls ADD COLUMN woken_for_message_id TEXT;"
+        }
+        16 => {
+            // WHERE THIS COMPANION'S MEMORY LIVES — not what it is.
+            //
+            // Every companion's memories are blobs in Postgres; this column
+            // only decides WHICH Postgres. 0 is the Semantix organ on :8002,
+            // the account-scoped one every install talks to. 1 routes to the
+            // canonical Muninn on :8005 — a machine-local server no other
+            // install can reach, which is why the flag is inert everywhere
+            // but here and fails closed by construction rather than by check.
+            //
+            // Deliberately not exposed through the app: there is no field for
+            // it on UpdateCompanionInput and no control in Settings, so the
+            // public product carries a column it never reads. Flipping it is
+            // a hand-edit of the local database, which is the correct amount
+            // of ceremony for pointing a companion at a different brain.
+            "ALTER TABLE companions ADD COLUMN is_origin INTEGER NOT NULL DEFAULT 0;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

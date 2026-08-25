@@ -51,6 +51,12 @@ pub(crate) struct Companion {
     /// The ONE folder this companion's file tools may touch, stored canonical.
     /// `None` — the default — means no workspace and no file tools at all.
     pub(crate) workspace_dir: Option<String>,
+    /// WHICH Postgres holds this companion's memories — never what it is.
+    /// `false` (the only value a public install ever has) is the Semantix
+    /// organ; `true` is the machine-local canonical Muninn, unreachable from
+    /// anywhere else. There is no setter: it is a hand-edit of the local
+    /// database, on purpose. See schema 16.
+    pub(crate) is_origin: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +122,12 @@ impl CompanionResolver {
         Ok(self.repository.get(companion_id.trim())?.is_some())
     }
 
+    /// Whether the companion behind this memory agent reads from the canonical
+    /// Muninn rather than the Semantix organ. See `Companion::is_origin`.
+    pub(crate) fn is_origin_agent(&self, memory_agent_name: &str) -> Result<bool, AppError> {
+        self.repository.is_origin_agent(memory_agent_name.trim())
+    }
+
     pub(crate) fn resolve(&self, companion_id: Option<&str>) -> Result<Companion, AppError> {
         if let Some(id) = companion_id.map(str::trim).filter(|id| !id.is_empty()) {
             if let Some(companion) = self.repository.get(id)? {
@@ -170,6 +182,10 @@ impl CompanionService {
             created_at: timestamp,
             updated_at: timestamp,
             workspace_dir,
+            // A companion made through the app always speaks to the organ.
+            // Pointing one at the canonical Muninn is a hand-edit, never a
+            // thing the UI can do — see schema 16.
+            is_origin: false,
         };
 
         self.repository.insert(&companion)?;
@@ -388,6 +404,90 @@ mod tests {
         }
     }
 
+    /// The public product's guarantee, held by a test rather than by care: a
+    /// build nobody has hand-edited routes every companion to the organ.
+    #[test]
+    fn no_companion_is_an_origin_companion_without_a_hand_edit() {
+        let database = ScratchDatabase::new();
+        let service = database.service();
+
+        let built_in = service
+            .repository
+            .built_in()
+            .expect("the built-in should load")
+            .expect("a fresh install seeds one");
+        assert!(!built_in.is_origin);
+
+        let made = service
+            .create(CreateCompanionInput {
+                name: Some("Rook".to_owned()),
+                model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
+            })
+            .expect("a companion should be creatable");
+        assert!(!made.is_origin, "the app has no door that sets this");
+
+        let resolver = database.resolver();
+        assert!(!resolver
+            .is_origin_agent(&made.memory_agent_name)
+            .expect("the lookup should run"));
+    }
+
+    /// An agent id the roster has never seen is an ORGAN id — the uuid every
+    /// normal companion carries. It must never be read as a Muninn channel,
+    /// or a plain install would try to address a brain it cannot reach.
+    #[test]
+    fn an_unknown_agent_name_routes_to_the_organ() {
+        let database = ScratchDatabase::new();
+        let resolver = database.resolver();
+
+        for stranger in ["", "   ", "8f0d3c1e-0000-4000-8000-000000000000", "companion-nope"] {
+            assert!(
+                !resolver.is_origin_agent(stranger).expect("the lookup should run"),
+                "unknown agent {stranger:?} must fall through to the organ"
+            );
+        }
+    }
+
+    /// Flipping the flag is a hand-edit of the local database, on purpose —
+    /// this proves the read side honours it once someone does.
+    #[test]
+    fn a_hand_flipped_companion_is_recognised_as_an_origin_companion() {
+        let database = ScratchDatabase::new();
+        let made = database
+            .service()
+            .create(CreateCompanionInput {
+                name: Some("Arc".to_owned()),
+                model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
+            })
+            .expect("a companion should be creatable");
+
+        let connection =
+            database::open_connection(&database.path).expect("the database should open");
+        connection
+            .execute(
+                "UPDATE companions SET is_origin = 1 WHERE id = ?1",
+                [&made.id],
+            )
+            .expect("the hand-edit should apply");
+
+        let resolver = database.resolver();
+        assert!(resolver
+            .is_origin_agent(&made.memory_agent_name)
+            .expect("the lookup should run"));
+        // and it stays scoped to that one companion
+        let built_in = database
+            .service()
+            .repository
+            .built_in()
+            .expect("the built-in should load")
+            .expect("a fresh install seeds one");
+        assert!(!resolver
+            .is_origin_agent(&built_in.memory_agent_name)
+            .expect("the lookup should run"));
+    }
+
     #[test]
     fn a_fresh_install_has_exactly_one_unnamed_built_in_companion() {
         let database = ScratchDatabase::new();
@@ -556,6 +656,7 @@ mod tests {
                 created_at: 1,
                 updated_at: 1,
                 workspace_dir: None,
+                is_origin: false,
             },
         })
         .expect("created event should serialize");

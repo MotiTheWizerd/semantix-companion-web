@@ -23,6 +23,54 @@ use crate::{
 const MEMORY_ORGAN_BASE: &str = "http://localhost:8002/api/v1/memory";
 const ACCOUNT_TOKEN_REF: &str = "semantix-account-token";
 
+/// The canonical Muninn. Machine-local by construction: nothing outside this
+/// box can route to it, so a companion flagged `is_origin` on any other
+/// install simply fails to connect rather than reaching someone else's brain.
+const MUNINN_BASE: &str = "http://localhost:8005/api/v1";
+
+/// WHICH brain a companion reads and writes — resolved once per turn from the
+/// roster, never chosen by the model and never named in a tool argument.
+///
+/// The two organs disagree about more than a port. The Semantix organ scopes a
+/// memory by putting the agent in the PATH and proves the caller with an
+/// account bearer; Muninn scopes by CHANNEL in the body and, being local,
+/// authenticates nobody. Everything above this enum is spared both facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MemoryTarget {
+    /// Account-scoped, on :8002. What every install uses and the only value a
+    /// public build can produce.
+    Organ { agent_id: String },
+    /// The canonical Muninn on :8005, addressed by channel. The channel name
+    /// IS the companion's `memory_agent_name`: one companion, one namespace,
+    /// structurally unable to read another's.
+    ///
+    /// The channel is the WHOLE address. Muninn also accepts an `X-Agent-Id`
+    /// header for authorship, but it must be a UUID and a companion has no
+    /// such id to offer — sending the channel name there is rejected outright
+    /// (verified against the live server, not inferred). Carves therefore land
+    /// under the server's default author, which is honest: the channel already
+    /// says who wrote them.
+    Muninn { channel: String },
+}
+
+impl MemoryTarget {
+    /// Read the roster, not the argument. `agent_ref` is whatever
+    /// `ensure_memory_agent` handed the frontend — an organ uuid for a normal
+    /// companion, the agent name for an origin one — and only the local
+    /// companions table decides which it was.
+    fn resolve(companions: &CompanionResolver, agent_ref: &str) -> Result<Self, String> {
+        let agent_ref = agent_ref.trim();
+        let origin = companions
+            .is_origin_agent(agent_ref)
+            .map_err(|error| format!("The companion roster could not be read: {error}"))?;
+        Ok(if origin {
+            Self::Muninn { channel: agent_ref.to_owned() }
+        } else {
+            Self::Organ { agent_id: agent_ref.to_owned() }
+        })
+    }
+}
+
 /// Chat/completions bases per provider — the organ's sleep model speaks
 /// OpenAI-compat, so only providers with such an endpoint can distill.
 fn provider_base_url(provider_id: &str) -> Result<&'static str, AppError> {
@@ -314,6 +362,32 @@ pub(crate) struct MemoryAgentDto {
     updated_at: String,
 }
 
+/// The carve payload, spoken as Muninn speaks it.
+///
+/// A rename, not a remap — the two organs want the same five facts under three
+/// different names. `mem_type` is `type` here and is REQUIRED where the organ
+/// let it default, so a carve that names no type is filed as `episodic`: the
+/// honest label for something a conversation produced. `project_tag` has no
+/// counterpart because `channel` already does that work, and it carries the
+/// isolation the tag only hinted at.
+fn muninn_carve_body(payload: &serde_json::Value, channel: &str) -> serde_json::Value {
+    let text = |key: &str| payload.get(key).and_then(|value| value.as_str()).unwrap_or_default();
+    let mut body = serde_json::json!({
+        "name": text("name"),
+        "description": text("description"),
+        "body": text("body"),
+        "type": payload
+            .get("mem_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("episodic"),
+        "channel": channel,
+    });
+    if let Some(importance) = payload.get("importance").and_then(|value| value.as_f64()) {
+        body["importance"] = serde_json::json!(importance);
+    }
+    body
+}
+
 async fn organ_bearer() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(load_account_token)
         .await
@@ -324,9 +398,32 @@ async fn organ_bearer() -> Result<String, String> {
 
 #[tauri::command]
 pub(crate) async fn ensure_memory_agent(
+    state: State<'_, MemoryState>,
     name: String,
     description: String,
 ) -> Result<MemoryAgentDto, String> {
+    // An origin companion has no roster round-trip to make. Muninn materialises
+    // a channel on first write, so there is nothing to create and nothing that
+    // can fail here — and crucially no bearer to demand, which is what would
+    // otherwise stop an origin companion from ever reaching its memory without
+    // a Semantix account it does not need.
+    //
+    // The synthetic id is the agent NAME, which is what every later call reads
+    // back as `agent_ref` and what `MemoryTarget::resolve` recognises.
+    if MemoryTarget::resolve(&state.service.companions, &name)?
+        != (MemoryTarget::Organ { agent_id: name.trim().to_owned() })
+    {
+        let now = "";
+        return Ok(MemoryAgentDto {
+            agent_id: name.trim().to_owned(),
+            name: name.trim().to_owned(),
+            description,
+            memory_count: 0,
+            created_at: now.to_owned(),
+            updated_at: now.to_owned(),
+        });
+    }
+
     let bearer = organ_bearer().await?;
     let client = reqwest::Client::new();
 
@@ -373,19 +470,34 @@ pub(crate) async fn ensure_memory_agent(
 /// through untyped — the organ's schema can grow without touching Rust.
 #[tauri::command]
 pub(crate) async fn recall_memories(
+    state: State<'_, MemoryState>,
     agent_id: String,
     query: String,
     limit: Option<u32>,
 ) -> Result<serde_json::Value, String> {
-    let bearer = organ_bearer().await?;
-    let response = reqwest::Client::new()
-        .post(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/recall"))
-        .bearer_auth(&bearer)
-        .json(&serde_json::json!({
-            "query": query,
-            "limit": limit.unwrap_or(8),
-            "project_tag": "companion",
-        }))
+    let target = MemoryTarget::resolve(&state.service.companions, &agent_id)?;
+    let client = reqwest::Client::new();
+    let limit = limit.unwrap_or(8);
+
+    let request = match &target {
+        MemoryTarget::Organ { agent_id } => client
+            .post(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/recall"))
+            .bearer_auth(organ_bearer().await?)
+            .json(&serde_json::json!({
+                "query": query,
+                "limit": limit,
+                "project_tag": "companion",
+            })),
+        MemoryTarget::Muninn { channel } => client
+            .post(format!("{MUNINN_BASE}/recall"))
+            .json(&serde_json::json!({
+                "query": query,
+                "limit": limit,
+                "channel": channel,
+            })),
+    };
+
+    let response = request
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
@@ -405,14 +517,20 @@ pub(crate) async fn recall_memories(
 /// upserts by name (created=false means an existing memory was overwritten)
 /// and embeds server-side; project_tag pins the carve to companion's shelf.
 pub(crate) async fn write_memory(
-    agent_id: &str,
+    target: &MemoryTarget,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let bearer = organ_bearer().await?;
-    let response = reqwest::Client::new()
-        .post(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories"))
-        .bearer_auth(&bearer)
-        .json(payload)
+    let client = reqwest::Client::new();
+    let request = match target {
+        MemoryTarget::Organ { agent_id } => client
+            .post(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories"))
+            .bearer_auth(organ_bearer().await?)
+            .json(payload),
+        MemoryTarget::Muninn { channel } => client
+            .post(format!("{MUNINN_BASE}/memories"))
+            .json(&muninn_carve_body(payload, channel)),
+    };
+    let response = request
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
@@ -436,13 +554,19 @@ pub(crate) async fn write_memory(
 /// One full memory by its exact name — the drill-down behind the model's
 /// `recall_memory` tool. Not a command: the chat tool loop is the only caller.
 pub(crate) async fn fetch_memory(
-    agent_id: &str,
+    target: &MemoryTarget,
     name: &str,
 ) -> Result<serde_json::Value, String> {
-    let bearer = organ_bearer().await?;
-    let response = reqwest::Client::new()
-        .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories/{name}"))
-        .bearer_auth(&bearer)
+    let client = reqwest::Client::new();
+    let request = match target {
+        MemoryTarget::Organ { agent_id } => client
+            .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories/{name}"))
+            .bearer_auth(organ_bearer().await?),
+        MemoryTarget::Muninn { channel } => client
+            .get(format!("{MUNINN_BASE}/memories/{name}"))
+            .query(&[("channel", channel.as_str())]),
+    };
+    let response = request
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
@@ -600,6 +724,21 @@ pub(crate) async fn sleep_conversation(
     agent_id: String,
     on_progress: Channel<serde_json::Value>,
 ) -> Result<SleepOutcome, String> {
+    // Sleep does not cross. The organ distils through `/agents/{id}/sleep`;
+    // Muninn has no agent-scoped sleep route at all — its own pass is a
+    // different design, not a renamed endpoint — so there is nothing to point
+    // this at. Refuse in one clear sentence rather than fail as a 404 the user
+    // would read as a broken connection.
+    if let MemoryTarget::Muninn { .. } =
+        MemoryTarget::resolve(&state.service.companions, &agent_id)?
+    {
+        return Err(
+            "This companion remembers through the canonical Muninn, which distils as it goes \
+             rather than at the end of a conversation. There is no sleep pass to run."
+                .to_owned(),
+        );
+    }
+
     let service = Arc::clone(&state.service);
     let prepare_conversation_id = conversation_id.clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
@@ -649,4 +788,59 @@ pub(crate) async fn sleep_conversation(
     }
 
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{muninn_carve_body, MemoryTarget, MUNINN_BASE};
+
+    /// The organ let `mem_type` default; Muninn requires `type`. A carve that
+    /// names none must still be filable, or the model loses the tool on its
+    /// first sloppy call.
+    #[test]
+    fn a_carve_without_a_type_is_filed_as_episodic() {
+        let payload = serde_json::json!({
+            "name": "a-thing",
+            "description": "one line",
+            "body": "the fact",
+            "project_tag": "companion",
+        });
+        let body = muninn_carve_body(&payload, "arc");
+
+        assert_eq!(body["type"], "episodic");
+        assert_eq!(body["channel"], "arc");
+        assert_eq!(body["name"], "a-thing");
+        assert!(body.get("project_tag").is_none(), "the tag has no counterpart");
+        assert!(body.get("importance").is_none(), "an unset importance stays unset");
+    }
+
+    #[test]
+    fn a_carve_carries_its_type_and_importance_across() {
+        let payload = serde_json::json!({
+            "name": "a-thing",
+            "description": "one line",
+            "body": "the fact",
+            "mem_type": "insight",
+            "importance": 0.75,
+        });
+        let body = muninn_carve_body(&payload, "arc");
+
+        assert_eq!(body["type"], "insight");
+        assert_eq!(body["importance"], 0.75);
+    }
+
+    /// The whole safety story in one line: the local brain is addressed by a
+    /// loopback URL, so an origin flag on anyone else's machine reaches
+    /// nothing rather than reaching someone.
+    #[test]
+    fn the_local_brain_is_only_ever_addressed_over_loopback() {
+        assert!(MUNINN_BASE.starts_with("http://localhost:"));
+    }
+
+    #[test]
+    fn the_two_backends_are_never_equal() {
+        let organ = MemoryTarget::Organ { agent_id: "arc".to_owned() };
+        let muninn = MemoryTarget::Muninn { channel: "arc".to_owned() };
+        assert_ne!(organ, muninn, "same string, different brain");
+    }
 }
