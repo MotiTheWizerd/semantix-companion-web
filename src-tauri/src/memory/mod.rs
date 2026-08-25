@@ -44,13 +44,18 @@ pub(crate) enum MemoryTarget {
     /// IS the companion's `memory_agent_name`: one companion, one namespace,
     /// structurally unable to read another's.
     ///
-    /// The channel is the WHOLE address. Muninn also accepts an `X-Agent-Id`
-    /// header for authorship, but it must be a UUID and a companion has no
-    /// such id to offer — sending the channel name there is rejected outright
-    /// (verified against the live server, not inferred). Carves therefore land
-    /// under the server's default author, which is honest: the channel already
-    /// says who wrote them.
-    Muninn { channel: String },
+    /// The channel is the whole ADDRESS; `agent_id` is the SIGNATURE. Muninn
+    /// takes authorship from an `X-Agent-Id` header, which must be a UUID on
+    /// its holy list (verified against the live server, not inferred — the
+    /// channel name there is rejected outright).
+    ///
+    /// `None` was the s508 shape and it was wrong: a carve with no author is
+    /// stored NULL, and the per-prompt recall renders a NULL author as "an
+    /// unidentified raven, NOT you". Two carvings made through the Companion
+    /// on s509 came back to studio-raven minutes later flagged as a stranger's
+    /// lived experience. The channel says WHERE a memory lives; only the
+    /// header says who lived it.
+    Muninn { channel: String, agent_id: Option<String> },
 }
 
 impl MemoryTarget {
@@ -61,12 +66,14 @@ impl MemoryTarget {
     fn resolve(companions: &CompanionResolver, agent_ref: &str) -> Result<Self, String> {
         let agent_ref = agent_ref.trim();
         let origin = companions
-            .is_origin_agent(agent_ref)
+            .origin_identity(agent_ref)
             .map_err(|error| format!("The companion roster could not be read: {error}"))?;
-        Ok(if origin {
-            Self::Muninn { channel: agent_ref.to_owned() }
-        } else {
-            Self::Organ { agent_id: agent_ref.to_owned() }
+        Ok(match origin {
+            Some(identity) => Self::Muninn {
+                channel: agent_ref.to_owned(),
+                agent_id: identity.agent_id,
+            },
+            None => Self::Organ { agent_id: agent_ref.to_owned() },
         })
     }
 }
@@ -488,7 +495,9 @@ pub(crate) async fn recall_memories(
                 "limit": limit,
                 "project_tag": "companion",
             })),
-        MemoryTarget::Muninn { channel } => client
+        // Reads stay unsigned: the header is authorship, and recall writes no
+        // authorship. Sending it here would only change access bookkeeping.
+        MemoryTarget::Muninn { channel, .. } => client
             .post(format!("{MUNINN_BASE}/recall"))
             .json(&serde_json::json!({
                 "query": query,
@@ -506,10 +515,73 @@ pub(crate) async fn recall_memories(
     if !status.is_success() {
         return Err(format!("recall failed: HTTP {}", status.as_u16()));
     }
-    response
+    let body = response
         .json::<serde_json::Value>()
         .await
-        .map_err(|error| format!("The recall result could not be read: {error}"))
+        .map_err(|error| format!("The recall result could not be read: {error}"))?;
+
+    Ok(match &target {
+        MemoryTarget::Organ { .. } => body,
+        MemoryTarget::Muninn { channel, .. } => muninn_recall_as_organ(&body, channel),
+    })
+}
+
+/// Muninn answers `{results: [<flat memory>, ...]}`; the organ answers
+/// `{hits: [{memory, score}], vector_leg}` and the frontend reads only the
+/// organ's shape. Translate here, where the target is known — the TS contract
+/// stays one shape for both products, which is the whole point of the seam.
+///
+/// Fields Muninn does not carry are filled from what it does: `id` from the
+/// name (unique per channel, and the frontend only uses it to dedupe hits
+/// riding into one prompt), `agent_id`/`project_tag` from the channel.
+fn muninn_recall_as_organ(body: &serde_json::Value, channel: &str) -> serde_json::Value {
+    let results = body
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // A vector leg ran if any hit scored on it. All-zero means the embedder
+    // was down and recall fell back to keywords — the same warning the organ's
+    // own flag carries.
+    let vector_leg = results.iter().any(|hit| {
+        hit.get("vec_score")
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|score| score > 0.0)
+    });
+
+    let hits: Vec<serde_json::Value> = results
+        .iter()
+        .map(|hit| {
+            let text = |key: &str| {
+                hit.get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let name = text("name");
+            serde_json::json!({
+                "memory": {
+                    "id": name,
+                    "agent_id": channel,
+                    "name": name,
+                    "description": text("description"),
+                    "body": text("body"),
+                    "mem_type": text("type"),
+                    "importance": hit.get("importance").cloned().unwrap_or(serde_json::json!(0.5)),
+                    "project_tag": channel,
+                    "links": serde_json::Value::Array(Vec::new()),
+                    "access_count": hit.get("access_count").cloned().unwrap_or(serde_json::json!(0)),
+                    "archived_at": hit.get("archived_at").cloned().unwrap_or(serde_json::Value::Null),
+                    "created_at": text("created_at"),
+                    "updated_at": text("updated_at"),
+                },
+                "score": hit.get("score").cloned().unwrap_or(serde_json::json!(0.0)),
+            })
+        })
+        .collect();
+
+    serde_json::json!({ "hits": hits, "vector_leg": vector_leg })
 }
 
 /// Write one memory into the organ — the pen behind the model's `carve_memory`
@@ -526,9 +598,18 @@ pub(crate) async fn write_memory(
             .post(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories"))
             .bearer_auth(organ_bearer().await?)
             .json(payload),
-        MemoryTarget::Muninn { channel } => client
-            .post(format!("{MUNINN_BASE}/memories"))
-            .json(&muninn_carve_body(payload, channel)),
+        MemoryTarget::Muninn { channel, agent_id } => {
+            let request = client
+                .post(format!("{MUNINN_BASE}/memories"))
+                .json(&muninn_carve_body(payload, channel));
+            // Signed when the companion has an identity, unsigned when it does
+            // not. An unsigned carve still lands — anonymously — rather than
+            // failing, because losing the memory is worse than losing the name.
+            match agent_id {
+                Some(id) => request.header("X-Agent-Id", id),
+                None => request,
+            }
+        }
     };
     let response = request
         .timeout(std::time::Duration::from_secs(60))
@@ -562,7 +643,7 @@ pub(crate) async fn fetch_memory(
         MemoryTarget::Organ { agent_id } => client
             .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/memories/{name}"))
             .bearer_auth(organ_bearer().await?),
-        MemoryTarget::Muninn { channel } => client
+        MemoryTarget::Muninn { channel, .. } => client
             .get(format!("{MUNINN_BASE}/memories/{name}"))
             .query(&[("channel", channel.as_str())]),
     };
@@ -792,7 +873,64 @@ pub(crate) async fn sleep_conversation(
 
 #[cfg(test)]
 mod tests {
-    use super::{muninn_carve_body, MemoryTarget, MUNINN_BASE};
+    use super::{muninn_carve_body, muninn_recall_as_organ, MemoryTarget, MUNINN_BASE};
+
+    /// The frontend reads only the organ's shape. Muninn answering
+    /// `{results: [...]}` reached the reflexes as `hits: undefined` and killed
+    /// the ambient recall with "undefined is not an object" — live, s509.
+    #[test]
+    fn a_muninn_recall_arrives_in_the_organs_shape() {
+        let body = serde_json::json!({
+            "query": "q",
+            "mode": "hybrid",
+            "results": [{
+                "name": "user-moti",
+                "description": "one line",
+                "body": "the fact",
+                "type": "user",
+                "importance": 0.9,
+                "access_count": 4,
+                "archived_at": null,
+                "created_at": "2026-08-25T18:00:00+00:00",
+                "updated_at": "2026-08-25T18:00:00+00:00",
+                "score": 0.42,
+                "vec_score": 0.6,
+            }],
+        });
+
+        let shaped = muninn_recall_as_organ(&body, "canonical");
+        let hit = &shaped["hits"][0];
+
+        assert_eq!(shaped["vector_leg"], true);
+        assert_eq!(hit["score"], 0.42);
+        assert_eq!(hit["memory"]["name"], "user-moti");
+        assert_eq!(hit["memory"]["mem_type"], "user", "`type` becomes `mem_type`");
+        assert_eq!(hit["memory"]["id"], "user-moti", "the name is the dedupe key");
+        assert_eq!(hit["memory"]["agent_id"], "canonical");
+        assert_eq!(hit["memory"]["project_tag"], "canonical");
+        assert!(hit["memory"]["links"].is_array());
+    }
+
+    /// All-zero vector scores mean the embedder was down and recall ran on the
+    /// keyword leg alone — the same warning the organ's own flag carries.
+    #[test]
+    fn a_recall_with_no_vector_scores_reports_a_dead_vector_leg() {
+        let body = serde_json::json!({
+            "results": [{ "name": "a-thing", "score": 0.1, "vec_score": 0.0 }],
+        });
+
+        assert_eq!(muninn_recall_as_organ(&body, "canonical")["vector_leg"], false);
+    }
+
+    /// A recall that found nothing must still be a readable empty result, not
+    /// a missing key the frontend trips over.
+    #[test]
+    fn an_empty_recall_is_an_empty_hit_list() {
+        let shaped = muninn_recall_as_organ(&serde_json::json!({ "results": [] }), "canonical");
+
+        assert_eq!(shaped["hits"].as_array().map(Vec::len), Some(0));
+        assert_eq!(shaped["vector_leg"], false);
+    }
 
     /// The organ let `mem_type` default; Muninn requires `type`. A carve that
     /// names none must still be filable, or the model loses the tool on its
@@ -840,7 +978,7 @@ mod tests {
     #[test]
     fn the_two_backends_are_never_equal() {
         let organ = MemoryTarget::Organ { agent_id: "arc".to_owned() };
-        let muninn = MemoryTarget::Muninn { channel: "arc".to_owned() };
+        let muninn = MemoryTarget::Muninn { channel: "arc".to_owned(), agent_id: None };
         assert_ne!(organ, muninn, "same string, different brain");
     }
 }

@@ -406,6 +406,7 @@ impl ChatService {
                 if companion.is_origin {
                     crate::memory::MemoryTarget::Muninn {
                         channel: companion.memory_agent_name.clone(),
+                        agent_id: companion.origin_agent_id.clone(),
                     }
                 } else {
                     crate::memory::MemoryTarget::Organ { agent_id: agent_id.to_owned() }
@@ -980,12 +981,35 @@ async fn fail_stream(
 /// Silence is the honest state there, and inventing a line about namelessness
 /// would tell the model something the user never said.
 fn companion_identity(companion: &Companion) -> Option<String> {
-    let name = companion.name.as_deref()?.trim();
-    if name.is_empty() {
+    let name = companion.name.as_deref().map(str::trim).filter(|name| !name.is_empty());
+    let mut lines = Vec::new();
+    if let Some(name) = name {
+        lines.push(format!("The user prefers to call you {name}."));
+    }
+    if companion.is_origin {
+        lines.push(ORIGIN_CLOCK_ETIQUETTE.to_owned());
+    }
+    if lines.is_empty() {
         return None;
     }
-    Some(format!("The user prefers to call you {name}."))
+    Some(lines.join("\n"))
 }
+
+/// An origin companion reads a mind that numbers its own sessions — s509, s508
+/// — and every memory in it is stamped with one. Nothing in this app knows
+/// which session is current: the counter lives in the raven's repository, not
+/// here, and a conversation is not a session. Left alone the model picks the
+/// number it saw most recently in recall, which is always the LAST one, not
+/// this one. Proven live s509: two carvings, both stamped s508, both wrong.
+///
+/// So it is told the shape of what it cannot know, rather than handed a guess.
+/// The current time itself arrives every turn from the time-awareness reflex.
+const ORIGIN_CLOCK_ETIQUETTE: &str = "\
+You carve into a memory whose entries are numbered by session (s508, s509, and so on). \
+YOU DO NOT KNOW THE CURRENT SESSION NUMBER — it is not in this app, and a number you read \
+in a recalled memory belongs to that memory, not to now. Never guess one, and never copy one \
+forward into something you carve. Date the memories you write by the date, which you are given \
+each turn.";
 
 fn canonical_messages(messages: &[Message]) -> Vec<InferenceMessage> {
     messages
@@ -1082,7 +1106,7 @@ mod tests {
 
     use super::{
         companion_identity, conversation_title, repository::ChatRepository, ChatEvent, ChatService,
-        SubmitMessageInput,
+        SubmitMessageInput, ORIGIN_CLOCK_ETIQUETTE,
     };
     use crate::{
         companions::{Companion, CompanionResolver},
@@ -1105,6 +1129,7 @@ mod tests {
             updated_at: 1,
             workspace_dir: None,
             is_origin: false,
+            origin_agent_id: None,
         };
 
         assert_eq!(
@@ -1116,6 +1141,41 @@ mod tests {
             companion_identity(&companion(Some("   "))),
             None,
             "a blank name says nothing rather than saying something empty"
+        );
+        assert!(
+            !companion_identity(&companion(Some("Ragnar")))
+                .expect("a named companion says something")
+                .contains("session"),
+            "a normal companion reads no numbered mind and needs no warning about one"
+        );
+    }
+
+    /// An origin companion reads memories stamped s508/s509 and, left alone,
+    /// copies the last number it saw into what it carves — which is always the
+    /// previous session, never this one (proven live s509, twice in one hour).
+    #[test]
+    fn an_origin_companion_is_warned_off_guessing_the_session_number() {
+        let origin = |name: Option<&str>| Companion {
+            id: "companion-1".to_owned(),
+            name: name.map(str::to_owned),
+            memory_agent_name: "canonical".to_owned(),
+            model_preference: ModelPreference::Inherit,
+            is_built_in: false,
+            created_at: 1,
+            updated_at: 1,
+            workspace_dir: None,
+            is_origin: true,
+            origin_agent_id: None,
+        };
+
+        let told = companion_identity(&origin(Some("Studio"))).expect("an origin is told something");
+        assert!(told.starts_with("The user prefers to call you Studio."));
+        assert!(told.contains("YOU DO NOT KNOW THE CURRENT SESSION NUMBER"));
+
+        assert_eq!(
+            companion_identity(&origin(None)).as_deref(),
+            Some(ORIGIN_CLOCK_ETIQUETTE),
+            "an unnamed origin still gets the warning — it is about the memory, not the name"
         );
     }
 

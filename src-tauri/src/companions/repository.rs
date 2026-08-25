@@ -5,11 +5,11 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::Companion;
+use super::{Companion, OriginIdentity};
 use crate::{app_error::AppError, database, preferences::ModelPreference};
 
 const COMPANION_COLUMNS: &str = "id, name, memory_agent_name, model_preference_mode, model_id,
-     is_built_in, created_at, updated_at, workspace_dir, is_origin";
+     is_built_in, created_at, updated_at, workspace_dir, is_origin, origin_agent_id";
 
 pub(crate) struct CompanionRepository {
     connection: Mutex<Connection>,
@@ -76,17 +76,27 @@ impl CompanionRepository {
     /// `false`: an agent this roster has never heard of is not one of ours to
     /// point at the local Muninn, so an unknown name fails safely toward the
     /// organ every install can reach.
-    pub(crate) fn is_origin_agent(&self, memory_agent_name: &str) -> Result<bool, AppError> {
+    pub(crate) fn origin_identity(
+        &self,
+        memory_agent_name: &str,
+    ) -> Result<Option<OriginIdentity>, AppError> {
         let connection = self.connection()?;
-        let origin: Option<i64> = connection
+        let row: Option<(i64, Option<String>)> = connection
             .query_row(
-                "SELECT is_origin FROM companions WHERE memory_agent_name = ?1",
+                "SELECT is_origin, origin_agent_id FROM companions WHERE memory_agent_name = ?1",
                 [memory_agent_name],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(AppError::database)?;
-        Ok(origin.unwrap_or(0) != 0)
+        Ok(match row {
+            Some((origin, agent_id)) if origin != 0 => Some(OriginIdentity {
+                agent_id: agent_id
+                    .map(|id| id.trim().to_owned())
+                    .filter(|id| !id.is_empty()),
+            }),
+            _ => None,
+        })
     }
 
     pub(crate) fn insert(&self, companion: &Companion) -> Result<(), AppError> {
@@ -96,8 +106,9 @@ impl CompanionRepository {
             .execute(
                 "INSERT INTO companions (
                     id, name, memory_agent_name, model_preference_mode, model_id,
-                    is_built_in, created_at, updated_at, workspace_dir, is_origin
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    is_built_in, created_at, updated_at, workspace_dir, is_origin,
+                    origin_agent_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     companion.id,
                     companion.name,
@@ -109,6 +120,7 @@ impl CompanionRepository {
                     companion.updated_at,
                     companion.workspace_dir,
                     i64::from(companion.is_origin),
+                    companion.origin_agent_id,
                 ],
             )
             .map_err(AppError::database)?;
@@ -171,5 +183,6 @@ fn map_companion(row: &rusqlite::Row<'_>) -> rusqlite::Result<Companion> {
         updated_at: row.get(7)?,
         workspace_dir: row.get(8)?,
         is_origin: row.get::<_, i64>(9)? != 0,
+        origin_agent_id: row.get(10)?,
     })
 }

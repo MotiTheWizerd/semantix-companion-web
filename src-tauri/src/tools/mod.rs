@@ -1210,7 +1210,13 @@ fn render_memory(memory: &serde_json::Value) -> String {
         return memory.to_string();
     }
     let created = field("created_at").chars().take(10).collect::<String>();
-    let mut header = format!("[{name}] ({}", field("mem_type"));
+    // The organ calls it `mem_type`, Muninn calls it `type`. One renderer,
+    // both backends — verified against the live :8005 response, not inferred.
+    let kind = match field("mem_type") {
+        "" => field("type"),
+        organ => organ,
+    };
+    let mut header = format!("[{name}] ({kind}");
     if !created.is_empty() {
         header.push_str(&format!(" · carved {created}"));
     }
@@ -1979,6 +1985,24 @@ mod tests {
         assert_eq!(
             rendered,
             "[the-memory] (project · carved 2026-08-22) — a one-liner\nthe full body"
+        );
+    }
+
+    /// Muninn names the field `type`, the organ names it `mem_type`. An origin
+    /// companion's recall_memory must render the kind either way, or the model
+    /// reads its own memory with an empty pair of brackets.
+    #[test]
+    fn a_muninn_memory_renders_its_kind_from_type() {
+        let rendered = render_memory(&serde_json::json!({
+            "name": "the-memory",
+            "type": "insight",
+            "description": "a one-liner",
+            "body": "the full body",
+            "created_at": "2026-08-22T13:03:15Z",
+        }));
+        assert_eq!(
+            rendered,
+            "[the-memory] (insight · carved 2026-08-22) — a one-liner\nthe full body"
         );
     }
 }

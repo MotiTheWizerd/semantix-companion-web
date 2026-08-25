@@ -57,6 +57,19 @@ pub(crate) struct Companion {
     /// anywhere else. There is no setter: it is a hand-edit of the local
     /// database, on purpose. See schema 16.
     pub(crate) is_origin: bool,
+    /// WHO this companion signs its carvings as — a UUID on Muninn's holy
+    /// list, sent as `X-Agent-Id`. `None` leaves the author NULL, which the
+    /// per-prompt recall reads as "an unidentified raven" and warns the reader
+    /// off their own memory. Only meaningful alongside `is_origin`; the organ
+    /// takes its identity from the bearer token. See schema 17.
+    pub(crate) origin_agent_id: Option<String>,
+}
+
+/// What an origin companion is allowed to sign with. Absent = the companion is
+/// not an origin at all, which is a different thing from an origin that has no
+/// identity yet — the first goes to the organ, the second carves anonymously.
+pub(crate) struct OriginIdentity {
+    pub(crate) agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,9 +136,13 @@ impl CompanionResolver {
     }
 
     /// Whether the companion behind this memory agent reads from the canonical
-    /// Muninn rather than the Semantix organ. See `Companion::is_origin`.
-    pub(crate) fn is_origin_agent(&self, memory_agent_name: &str) -> Result<bool, AppError> {
-        self.repository.is_origin_agent(memory_agent_name.trim())
+    /// Muninn rather than the Semantix organ, and who it signs as when it does.
+    /// See `Companion::is_origin` and `Companion::origin_agent_id`.
+    pub(crate) fn origin_identity(
+        &self,
+        memory_agent_name: &str,
+    ) -> Result<Option<OriginIdentity>, AppError> {
+        self.repository.origin_identity(memory_agent_name.trim())
     }
 
     pub(crate) fn resolve(&self, companion_id: Option<&str>) -> Result<Companion, AppError> {
@@ -186,6 +203,7 @@ impl CompanionService {
             // Pointing one at the canonical Muninn is a hand-edit, never a
             // thing the UI can do — see schema 16.
             is_origin: false,
+            origin_agent_id: None,
         };
 
         self.repository.insert(&companion)?;
@@ -428,9 +446,10 @@ mod tests {
         assert!(!made.is_origin, "the app has no door that sets this");
 
         let resolver = database.resolver();
-        assert!(!resolver
-            .is_origin_agent(&made.memory_agent_name)
-            .expect("the lookup should run"));
+        assert!(resolver
+            .origin_identity(&made.memory_agent_name)
+            .expect("the lookup should run")
+            .is_none());
     }
 
     /// An agent id the roster has never seen is an ORGAN id — the uuid every
@@ -443,9 +462,74 @@ mod tests {
 
         for stranger in ["", "   ", "8f0d3c1e-0000-4000-8000-000000000000", "companion-nope"] {
             assert!(
-                !resolver.is_origin_agent(stranger).expect("the lookup should run"),
+                resolver.origin_identity(stranger).expect("the lookup should run").is_none(),
                 "unknown agent {stranger:?} must fall through to the organ"
             );
+        }
+    }
+
+    /// An origin companion with no identity still routes to Muninn — it just
+    /// carves anonymously. Losing the name is bad; losing the memory is worse,
+    /// so the missing id must never be read as "not an origin".
+    #[test]
+    fn an_origin_without_an_identity_is_still_an_origin() {
+        let database = ScratchDatabase::new();
+        let made = database
+            .service()
+            .create(CreateCompanionInput {
+                name: Some("Arc".to_owned()),
+                model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
+            })
+            .expect("a companion should be creatable");
+
+        let connection =
+            database::open_connection(&database.path).expect("the database should open");
+        connection
+            .execute("UPDATE companions SET is_origin = 1 WHERE id = ?1", [&made.id])
+            .expect("the hand-edit should apply");
+
+        let identity = database
+            .resolver()
+            .origin_identity(&made.memory_agent_name)
+            .expect("the lookup should run")
+            .expect("an origin with no id is still an origin");
+        assert!(identity.agent_id.is_none(), "nothing was signed, so nothing is claimed");
+    }
+
+    /// The signature the carve rides on. A blank column must read as unsigned
+    /// rather than as an empty header, which Muninn would reject outright.
+    #[test]
+    fn a_hand_signed_companion_carries_its_agent_id_and_blanks_do_not_count() {
+        let database = ScratchDatabase::new();
+        let made = database
+            .service()
+            .create(CreateCompanionInput {
+                name: Some("Studio".to_owned()),
+                model_preference: ModelPreference::Inherit,
+                workspace_dir: None,
+            })
+            .expect("a companion should be creatable");
+        let connection =
+            database::open_connection(&database.path).expect("the database should open");
+
+        for (written, expected) in [
+            ("  ad629d1f-6665-4eb7-b272-8579f68fa0bb  ", Some("ad629d1f-6665-4eb7-b272-8579f68fa0bb")),
+            ("   ", None),
+        ] {
+            connection
+                .execute(
+                    "UPDATE companions SET is_origin = 1, origin_agent_id = ?2 WHERE id = ?1",
+                    rusqlite::params![&made.id, written],
+                )
+                .expect("the hand-edit should apply");
+
+            let identity = database
+                .resolver()
+                .origin_identity(&made.memory_agent_name)
+                .expect("the lookup should run")
+                .expect("the flag is set");
+            assert_eq!(identity.agent_id.as_deref(), expected, "written as {written:?}");
         }
     }
 
@@ -474,8 +558,9 @@ mod tests {
 
         let resolver = database.resolver();
         assert!(resolver
-            .is_origin_agent(&made.memory_agent_name)
-            .expect("the lookup should run"));
+            .origin_identity(&made.memory_agent_name)
+            .expect("the lookup should run")
+            .is_some());
         // and it stays scoped to that one companion
         let built_in = database
             .service()
@@ -483,9 +568,10 @@ mod tests {
             .built_in()
             .expect("the built-in should load")
             .expect("a fresh install seeds one");
-        assert!(!resolver
-            .is_origin_agent(&built_in.memory_agent_name)
-            .expect("the lookup should run"));
+        assert!(resolver
+            .origin_identity(&built_in.memory_agent_name)
+            .expect("the lookup should run")
+            .is_none());
     }
 
     #[test]
@@ -657,6 +743,7 @@ mod tests {
                 updated_at: 1,
                 workspace_dir: None,
                 is_origin: false,
+                origin_agent_id: None,
             },
         })
         .expect("created event should serialize");

@@ -91,6 +91,10 @@ a {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* The shell row is 100vh; without this the sidebar sizes to its content and
+     a long conversation list pushes the footer past the fold, out of reach. */
+  min-height: 0;
+  overflow: hidden;
   padding: 16px 12px 12px;
   background: var(--surface);
   border-right: 1px solid var(--border-subtle);
@@ -217,12 +221,35 @@ a {
 }
 
 .conversation-list {
+  /* Takes the leftover column space and scrolls inside it — the list grows,
+     the footer (Settings) never moves. */
+  flex: 1 1 auto;
   min-height: 0;
   margin-top: 28px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-subtle) transparent;
+}
+
+.conversation-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.conversation-list::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 4px;
+}
+
+.conversation-list::-webkit-scrollbar-thumb:hover {
+  background: var(--surface-active);
 }
 
 .sidebar-section-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
   margin: 0 10px 8px;
   color: var(--text-faint);
   font-size: 10px;
@@ -258,6 +285,15 @@ a {
 
 .sidebar-footer {
   margin-top: auto;
+}
+
+/* Everything that is not the conversation list keeps its size — only the list
+   gives way when the sidebar runs out of room. */
+.sidebar-brand,
+.new-chat-button,
+.sidebar-navigation,
+.sidebar-footer {
+  flex: none;
 }
 
 .sidebar-settings-button {

@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 16;
+const LATEST_SCHEMA_VERSION: i64 = 17;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -567,6 +567,24 @@ fn migration_sql(version: i64) -> &'static str {
             // a hand-edit of the local database, which is the correct amount
             // of ceremony for pointing a companion at a different brain.
             "ALTER TABLE companions ADD COLUMN is_origin INTEGER NOT NULL DEFAULT 0;"
+        }
+        17 => {
+            // WHO this companion signs its carvings as.
+            //
+            // Muninn stamps provenance from the X-Agent-Id header: a UUID on
+            // the holy list resolves to a raven's name, and a carve without
+            // one is stored with a NULL author. That is not cosmetic — the
+            // per-prompt recall reads a NULL author as "an unidentified raven,
+            // not you" and warns the reader off their own memory. Proven live
+            // s509: two carvings made through the Companion came back to
+            // studio-raven minutes later flagged as a stranger's lived
+            // experience.
+            //
+            // Only meaningful with is_origin = 1; the organ takes its identity
+            // from the bearer token and ignores this entirely. Hand-edited for
+            // the same reason is_origin is: signing another raven's name to
+            // your work is exactly the failure this prevents.
+            "ALTER TABLE companions ADD COLUMN origin_agent_id TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
