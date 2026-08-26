@@ -1,0 +1,74 @@
+.settings-screen {
+  min-height: 0;
+  overflow: auto;
+  padding: 46px 48px;
+}
+
+.settings-screen__inner {
+  width: min(840px, 100%);
+  margin: 0 auto;
+}
+
+.settings-screen__heading p {
+  margin: 0 0 8px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.settings-screen__heading h1 {
+  margin: 0;
+  color: #e4e4e4;
+  font-size: 28px;
+  font-weight: 520;
+  letter-spacing: -0.035em;
+}
+
+.settings-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 34px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tab {
+  position: relative;
+  min-height: 38px;
+  margin-bottom: -1px;
+  padding: 0 14px;
+  cursor: pointer;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 620;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+
+.settings-tab:hover {
+  color: var(--text-secondary);
+}
+
+.settings-tab.is-active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.settings-panel {
+  min-height: 360px;
+}
+
+@media (max-width: 720px) {
+  .settings-screen {
+    padding: 34px 26px;
+  }
+}
+
+@media (max-width: 520px) {
+  .settings-screen {
+    padding-inline: 18px;
+  }
+}

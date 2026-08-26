@@ -1,0 +1,40 @@
+.icon-button svg,
+.composer-button svg,
+.composer-send svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.45;
+}
+
+.icon-button,
+.composer-button,
+.composer-send {
+  display: grid;
+  flex: none;
+  place-items: center;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.icon-button {
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.icon-button:hover,
+.composer-button:hover {
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+}
+
+.icon-button svg {
+  fill: currentColor;
+  stroke: none;
+}

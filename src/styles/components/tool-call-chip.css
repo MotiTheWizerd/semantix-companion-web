@@ -1,0 +1,32 @@
+/* ── 📖 tool chip — tool calls made while composing an assistant reply ── */
+
+.tool-chip {
+  margin-top: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+/* Its own row in the thread — the first tool call in a turn opens it, later
+   calls in the same turn join it, the next text reply gets a row after it. */
+.chat-message--tool-activity .tool-chip {
+  margin-top: 0;
+}
+
+.tool-chip__call {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tool-chip__call--running {
+  opacity: 0.75;
+}
+
+.tool-chip__error {
+  color: #c98787;
+}

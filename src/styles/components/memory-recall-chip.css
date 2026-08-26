@@ -1,0 +1,58 @@
+/* 🧠 memory instrument chip — under the sent message, quiet until clicked */
+.memory-chip {
+  margin-top: 7px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.memory-chip--failed {
+  display: flex;
+  gap: 5px;
+  color: #c9a487;
+}
+
+.memory-chip__toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.memory-chip__toggle:hover {
+  color: var(--text-muted);
+}
+
+.memory-chip__chevron {
+  opacity: 0.7;
+}
+
+.memory-chip__hits {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  list-style: none;
+  color: var(--text-muted);
+}
+
+.memory-chip__hits li {
+  overflow-wrap: anywhere;
+}
+
+.memory-chip__name {
+  color: var(--text-secondary);
+}
+
+.memory-chip__meta {
+  opacity: 0.75;
+}
+
+.memory-chip__error {
+  color: #c9a487;
+}

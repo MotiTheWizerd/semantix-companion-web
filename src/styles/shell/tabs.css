@@ -1,0 +1,112 @@
+.conversation-tabs {
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+  padding: 5px 12px 0;
+  overflow: hidden;
+  background: rgba(12, 12, 12, 0.92);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.conversation-tabs__track {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: stretch;
+  gap: 3px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.conversation-tabs__track::-webkit-scrollbar {
+  display: none;
+}
+
+.conversation-tab {
+  display: flex;
+  width: min(210px, 22vw);
+  min-width: 118px;
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  color: var(--text-muted);
+}
+
+.conversation-tab:hover {
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-secondary);
+}
+
+.conversation-tab.is-active {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.conversation-tab__select {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 4px 0 10px;
+  cursor: pointer;
+  overflow: hidden;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.conversation-tab__select > span:last-child {
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-tab__unread {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 7px rgba(143, 182, 212, 0.42);
+}
+
+.conversation-tab__close,
+.conversation-tabs__add {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  align-self: center;
+  cursor: pointer;
+  background: transparent;
+  border-radius: 7px;
+  color: var(--text-faint);
+}
+
+.conversation-tab__close:hover,
+.conversation-tabs__add:hover {
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+}
+
+.conversation-tab__close svg,
+.conversation-tabs__add svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.4;
+}
+
+.conversation-tabs__add {
+  margin-left: 5px;
+}

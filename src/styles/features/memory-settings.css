@@ -1,0 +1,34 @@
+/* ── Semantix Memory settings ─────────────────────────────────────────── */
+
+.memory-settings__connected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-settings__toggles {
+  margin-top: 14px;
+}
+
+.memory-settings__toggle {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.memory-settings__toggle input[type="checkbox"] {
+  width: auto;
+  margin-top: 3px;
+  accent-color: var(--accent, #7c6cff);
+}
+
+.memory-settings__toggle span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memory-settings__toggle small {
+  opacity: 0.65;
+}

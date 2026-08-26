@@ -1,0 +1,327 @@
+.app-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* The shell row is 100vh; without this the sidebar sizes to its content and
+     a long conversation list pushes the footer past the fold, out of reach. */
+  min-height: 0;
+  overflow: hidden;
+  padding: 16px 12px 12px;
+  background: var(--surface);
+  border-right: 1px solid var(--border-subtle);
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 8px;
+  color: #e2e2e2;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.companion-mark {
+  position: relative;
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+}
+
+.companion-mark__core {
+  width: 38%;
+  height: 38%;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #c5dae9, #6c94b2);
+  box-shadow: 0 0 14px rgba(143, 182, 212, 0.35);
+}
+
+.companion-mark__orbit {
+  position: absolute;
+  inset: 4%;
+  border: 1px solid rgba(143, 182, 212, 0.38);
+  border-radius: 48% 52% 46% 54%;
+  transform: rotate(-28deg) scaleY(0.62);
+}
+
+.new-chat-button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 38px;
+  margin-top: 20px;
+  padding: 0 11px;
+  cursor: pointer;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 550;
+  text-align: left;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.new-chat-button:hover {
+  background: var(--surface-hover);
+  border-color: #323232;
+}
+
+.new-chat-button svg,
+.sidebar-navigation__item svg,
+.sidebar-settings-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.45;
+}
+
+.sidebar-navigation {
+  display: grid;
+  gap: 3px;
+  margin-top: 18px;
+}
+
+.sidebar-navigation__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.sidebar-navigation__item:hover {
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+}
+
+.sidebar-navigation__item.is-active {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.sidebar-navigation__hint {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.conversation-list {
+  /* Takes the leftover column space and scrolls inside it — the list grows,
+     the footer (Settings) never moves. */
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 28px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-subtle) transparent;
+}
+
+.conversation-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.conversation-list::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 4px;
+}
+
+.conversation-list::-webkit-scrollbar-thumb:hover {
+  background: var(--surface-active);
+}
+
+.sidebar-section-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  margin: 0 10px 8px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.conversation-list__item {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding: 8px 10px;
+  cursor: pointer;
+  background: transparent;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-list__item:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.conversation-list__item.is-active {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+}
+
+/* Everything that is not the conversation list keeps its size — only the list
+   gives way when the sidebar runs out of room. */
+.sidebar-brand,
+.new-chat-button,
+.sidebar-navigation,
+.sidebar-footer {
+  flex: none;
+}
+
+.sidebar-settings-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  margin-bottom: 8px;
+  padding: 0 10px;
+  cursor: pointer;
+  background: transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.sidebar-settings-button:hover {
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+}
+
+.sidebar-settings-button.is-active {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.sidebar-profile {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  padding: 7px 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sidebar-profile__avatar {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid #303030;
+  border-radius: 8px;
+  background: var(--surface-active);
+  color: #d8d8d8;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.sidebar-profile__identity {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.sidebar-profile__identity strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sidebar-profile__identity small {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.sidebar-profile__status {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(118, 184, 146, 0.35);
+}
+
+@media (max-width: 720px) {
+  .app-sidebar {
+    align-items: center;
+    padding-inline: 8px;
+  }
+
+  .sidebar-brand {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .sidebar-brand > span:last-child,
+  .new-chat-button span,
+  .sidebar-navigation__item span,
+  .sidebar-settings-button span,
+  .conversation-list,
+  .sidebar-profile__identity,
+  .sidebar-profile__status {
+    display: none;
+  }
+
+  .new-chat-button,
+  .sidebar-navigation__item,
+  .sidebar-settings-button {
+    justify-content: center;
+    width: 40px;
+    padding: 0;
+  }
+
+  .sidebar-navigation {
+    width: 100%;
+    justify-items: center;
+  }
+
+  .sidebar-profile {
+    justify-content: center;
+    width: 100%;
+    padding-inline: 0;
+  }
+
+  .sidebar-footer {
+    display: grid;
+    justify-items: center;
+    width: 100%;
+  }
+}
