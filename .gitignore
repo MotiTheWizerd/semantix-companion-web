@@ -5,3 +5,8 @@ src-tauri/target/
 .DS_Store
 *.log
 semantix-indexer
+
+# Build artifacts — emitted beside the sources, never authored.
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js

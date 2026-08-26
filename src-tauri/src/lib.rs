@@ -15,6 +15,7 @@ mod secret_vault;
 mod streaming;
 
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use chat::ChatState;
 use companions::CompanionState;
@@ -24,6 +25,79 @@ use models::ModelState;
 use preferences::PreferenceState;
 use raven_calls::RavenCallState;
 use tauri::Manager;
+
+/// `~/.semantix/companion/companion.db` — the Companion's ONE database, at a
+/// FIXED path anchored to the real home directory.
+///
+/// ⚑ IT USED TO LIVE IN TAURI'S `app_local_data_dir()`, AND THAT WAS A DATA-LOSS
+/// BUG, not a detail. That directory resolves through `$XDG_DATA_HOME`, and
+/// VSCode ships as a snap which redirects that variable to
+/// `~/snap/code/<REVISION>/.local/share` — with the snap REVISION NUMBER in the
+/// path. So every VSCode update silently handed the Companion a brand-new empty
+/// database, and a Companion launched outside the IDE saw a third one. Measured
+/// on this machine before the fix: snap 257 held schema 4 with 23 messages,
+/// snap 258 held schema 17 with 523, and mimir could only ever read whichever
+/// file happened to be freshest. `$HOME` itself is NOT redirected, which is why
+/// anchoring to it is the fix.
+///
+/// `~/.semantix/` is where the rest of Semantix already keeps its global state
+/// (`conversations.db`, `analytics.db`, `USER/`, `trig/`) for exactly this
+/// reason — see semantix-server's `global_data::paths`, and `semantix-trig`,
+/// which was moved off `dirs::data_dir()` after the same snap bug bit it. The
+/// Companion now joins them.
+fn resolve_database_path(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let directory = app.path().home_dir()?.join(".semantix").join("companion");
+    fs::create_dir_all(&directory)?;
+    let path = directory.join("companion.db");
+    // One-shot, first-launch-only: carry whatever the old XDG-derived location
+    // holds. Once the fixed path exists it is the only one that is ever read,
+    // so a later VSCode update cannot resurrect an empty database.
+    if !path.exists() {
+        if let Ok(legacy_dir) = app.path().app_local_data_dir() {
+            adopt_legacy_database(&legacy_dir.join("companion.db"), &path)?;
+        }
+    }
+    Ok(path)
+}
+
+/// Move a pre-`~/.semantix` database into its new home, sidecars and all.
+///
+/// The `-wal` is the half that must not be left behind: the app may have been
+/// closed without a checkpoint, and every write since the last one lives only
+/// there. `-shm` is regenerable but travels too, so no stale shared index is
+/// left pointing at a file that has moved.
+fn adopt_legacy_database(from: &Path, to: &Path) -> std::io::Result<()> {
+    if !from.exists() {
+        return Ok(());
+    }
+    move_file(from, to)?;
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = with_suffix(from, suffix);
+        if sidecar.exists() {
+            move_file(&sidecar, &with_suffix(to, suffix))?;
+        }
+    }
+    Ok(())
+}
+
+/// `rename` cannot cross a filesystem boundary, and snap's redirected data dir
+/// is not guaranteed to sit on the same mount as `~/.semantix`. Fall back to a
+/// copy so the migration does not depend on the layout of the machine.
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::copy(from, to)?;
+    fs::remove_file(from)
+}
+
+/// `foo.db` + `-wal` → `foo.db-wal`. Appends to the path itself rather than
+/// touching the extension, which is what SQLite actually names its sidecars.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut raw = path.as_os_str().to_owned();
+    raw.push(suffix);
+    PathBuf::from(raw)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -37,9 +111,7 @@ pub fn run() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 inference::set_bundled_sidecar_dir(resource_dir.join("sidecar"));
             }
-            let app_data_dir = app.path().app_local_data_dir()?;
-            fs::create_dir_all(&app_data_dir)?;
-            let database_path = app_data_dir.join("companion.db");
+            let database_path = resolve_database_path(app)?;
             database::initialise(&database_path)?;
             let credential_state = CredentialState::open(&database_path)?;
             let model_state = ModelState::open(&database_path)?;

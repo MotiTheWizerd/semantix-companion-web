@@ -4,19 +4,20 @@
 # Test-loop tool: a call is capped at 5 messages and a companion at 5 calls a
 # day, so a few test rings exhaust the allowance. This resets the board.
 #
-# ⚑ THE DATABASE LIVES WHEREVER XDG_DATA_HOME POINTS WHEN THE APP LAUNCHES.
-# Started from VS Code's terminal, that is inside VS Code's snap sandbox, NOT
-# ~/.local/share — so the app has a DIFFERENT database depending on where it
-# was launched from. This resolves it the same way Tauri does rather than
-# guessing, which is the only way to be sure you cleared the one in use.
+# The database is at ONE fixed path, anchored to the real $HOME.
+#
+# It used to follow XDG_DATA_HOME, which VS Code's snap redirects to
+# ~/snap/code/<REVISION>/.local/share — so the app had a DIFFERENT database
+# depending on where it was launched from AND on which VS Code update was
+# installed. Now it lives beside the rest of Semantix's global state; see
+# resolve_database_path in src/lib.rs.
 set -euo pipefail
 
-data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-db="$data_home/com.semantix.companion/companion.db"
+db="${COMPANION_DB:-$HOME/.semantix/companion/companion.db}"
 
 if [ ! -f "$db" ]; then
   echo "no companion database at $db" >&2
-  echo "(launched from a different shell? XDG_DATA_HOME is ${XDG_DATA_HOME:-<unset>})" >&2
+  echo "(has the app been launched since the ~/.semantix move? it migrates on first start)" >&2
   exit 1
 fi
 
