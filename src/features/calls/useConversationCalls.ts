@@ -29,18 +29,25 @@ export function useConversationCalls(
   const [threads, setThreads] = useState<CallThread[]>([]);
   const [error, setError] = useState<string | null>(null);
   const wasBusy = useRef(turnInProgress);
+  const knownCallIds = useRef(new Map<string, Set<string>>());
 
   const load = useCallback(
     async (id: string, alive: () => boolean) => {
       try {
         const found = await listConversationCalls(id);
         if (!alive()) return;
+        const previousIds = knownCallIds.current.get(id);
+        const nextIds = new Set(found.map((thread) => thread.call.id));
+        const hasNewCall = previousIds
+          ? found.some((thread) => !previousIds.has(thread.call.id))
+          : false;
+        knownCallIds.current.set(id, nextIds);
         setThreads(found);
         setError(null);
-        // The card renders at the tail of the thread — follow it down the
-        // same way a tool chip or an assistant token does, or a call placed
-        // mid-turn appears below the fold with nothing telling the user.
-        requestConversationScrollToEnd(id);
+        // A newly opened call is a new transcript row, so follow it just like
+        // a new message. Later call turns update that row in place and must not
+        // yank the viewport to the end of a conversation that continued below.
+        if (hasNewCall) requestConversationScrollToEnd(id);
       } catch (cause) {
         if (!alive()) return;
         // A failed read is shown, never swallowed — a silently empty call

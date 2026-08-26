@@ -1,22 +1,16 @@
-/* ── ☎ Conversation calls — exchanges your companion had with other agents ──
-   Owned by features/calls. Scoped under .calls so the block travels with the
-   module if it is ever mounted somewhere other than the chat thread. */
+/* ── ☎ Conversation calls — first-class rows in the chat transcript ── */
+
+.chat-message--call {
+  width: min(620px, 88%);
+  margin-right: auto;
+}
 
 .calls {
-  margin: 14px 0 4px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
   color: var(--text-faint);
-}
-
-.calls__heading {
-  margin: 0;
-  font-size: 11px;
-  letter-spacing: 0.02em;
-  text-transform: lowercase;
-  opacity: 0.8;
 }
 
 .calls__error {

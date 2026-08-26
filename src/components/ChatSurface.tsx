@@ -1,6 +1,7 @@
 import {
   Fragment,
   useEffect,
+  useMemo,
   useRef,
   type ClipboardEvent,
   type FormEvent,
@@ -22,7 +23,12 @@ import type { Companion } from "../features/companions/types";
 import type { MemoryRecallChipData } from "../features/memory";
 import { EmptyState } from "./EmptyState";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import { ConversationCalls } from "../features/calls";
+import {
+  CallTranscriptError,
+  CallTranscriptItem,
+  useConversationCalls,
+  type CallThread,
+} from "../features/calls";
 import { MemoryRecallChip } from "./MemoryRecallChip";
 import { ToolCallChip } from "./ToolCallChip";
 
@@ -66,6 +72,40 @@ interface ChatSurfaceProps {
   onRemoveAttachment: (attachmentId: string) => void;
 }
 
+interface CallPlacements {
+  beforeFirstMessage: CallThread[];
+  afterMessageId: Map<string, CallThread[]>;
+}
+
+/** Keep chat sequence authoritative and place each call after the latest
+ * message that already existed when the call opened. The call's createdAt is
+ * immutable, so later call turns update the same slot instead of moving it. */
+function placeCalls(messages: ChatMessage[], threads: CallThread[]): CallPlacements {
+  const beforeFirstMessage: CallThread[] = [];
+  const afterMessageId = new Map<string, CallThread[]>();
+  const oldestFirst = [...threads].sort(
+    (left, right) =>
+      left.call.createdAt - right.call.createdAt || left.call.id.localeCompare(right.call.id),
+  );
+
+  for (const thread of oldestFirst) {
+    let anchorId: string | null = null;
+    for (const message of messages) {
+      if (message.createdAt <= thread.call.createdAt) anchorId = message.id;
+    }
+
+    if (!anchorId) {
+      beforeFirstMessage.push(thread);
+      continue;
+    }
+    const anchored = afterMessageId.get(anchorId) ?? [];
+    anchored.push(thread);
+    afterMessageId.set(anchorId, anchored);
+  }
+
+  return { beforeFirstMessage, afterMessageId };
+}
+
 export function ChatSurface({
   activeConversationId,
   messages,
@@ -90,6 +130,14 @@ export function ChatSurface({
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
   const hasMessages = messages.length > 0;
+  const { threads: callThreads, error: callsError } = useConversationCalls(
+    activeConversationId,
+    isSending,
+  );
+  const callPlacements = useMemo(
+    () => placeCalls(messages, callThreads),
+    [messages, callThreads],
+  );
 
   useEffect(() => {
     let frameId: number | null = null;
@@ -167,9 +215,13 @@ export function ChatSurface({
           aria-label="Conversation messages"
           aria-live="polite"
         >
+          {callPlacements.beforeFirstMessage.map((thread) => (
+            <CallTranscriptItem key={thread.call.id} thread={thread} />
+          ))}
           {messages.map((message) => {
             const recall = recallByMessageId[message.id];
             const toolCalls = toolCallsByMessageId[message.id];
+            const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
             const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
             // The first tool call opens its own row, like a message of its
             // own; later calls in the same turn join that row. The turn's
@@ -214,17 +266,13 @@ export function ChatSurface({
                     {recall ? <MemoryRecallChip data={recall} /> : null}
                   </article>
                 ) : null}
+                {callsAfterMessage.map((thread) => (
+                  <CallTranscriptItem key={thread.call.id} thread={thread} />
+                ))}
               </Fragment>
             );
           })}
-          {/* The calls module's one and only mount point. It reads its own
-              data and renders nothing when this thread placed no calls —
-              chat knows nothing about calls beyond these two props, so
-              moving this line moves the feature. */}
-          <ConversationCalls
-            conversationId={activeConversationId}
-            turnInProgress={isSending}
-          />
+          {callsError ? <CallTranscriptError error={callsError} /> : null}
         </section>
       ) : (
         <EmptyState />
