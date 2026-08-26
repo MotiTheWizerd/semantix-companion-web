@@ -1974,6 +1974,12 @@ a {
   user-select: none;
 }
 
+/* Its own row in the thread — the first tool call in a turn opens it, later
+   calls in the same turn join it, the next text reply gets a row after it. */
+.chat-message--tool-activity .tool-chip {
+  margin-top: 0;
+}
+
 .tool-chip__call {
   display: inline-flex;
   align-items: center;

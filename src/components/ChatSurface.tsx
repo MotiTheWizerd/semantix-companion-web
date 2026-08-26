@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useRef,
   type ClipboardEvent,
@@ -169,33 +170,51 @@ export function ChatSurface({
           {messages.map((message) => {
             const recall = recallByMessageId[message.id];
             const toolCalls = toolCallsByMessageId[message.id];
+            const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
+            // The first tool call opens its own row, like a message of its
+            // own; later calls in the same turn join that row. The turn's
+            // real reply only gets a row once it actually has something to
+            // show — otherwise it's a redundant empty bubble under the chip.
+            const showTextRow =
+              !hasToolRow ||
+              message.attachments.length > 0 ||
+              Boolean(message.content) ||
+              Boolean(message.errorMessage) ||
+              Boolean(recall);
             return (
-              <article
-                className={`chat-message chat-message--${message.role}`}
-                key={message.id}
-              >
-                {message.attachments.length > 0 ? (
-                  <div className="chat-message__images">
-                    {message.attachments.map((attachment) => (
-                      <img
-                        key={attachment.id}
-                        src={`data:${attachment.mediaType};base64,${attachment.data}`}
-                        alt="Attached image"
-                      />
-                    ))}
-                  </div>
+              <Fragment key={message.id}>
+                {toolCalls && toolCalls.length > 0 ? (
+                  <article className="chat-message chat-message--assistant chat-message--tool-activity">
+                    <ToolCallChip calls={toolCalls} />
+                  </article>
                 ) : null}
-                {message.role === "assistant" && message.content ? (
-                  <MarkdownRenderer content={message.content} />
-                ) : (
-                  <p>{message.content || (message.status === "streaming" ? "Thinking…" : "")}</p>
-                )}
-                {message.errorMessage ? (
-                  <span className="chat-message__error">{message.errorMessage}</span>
+                {showTextRow ? (
+                  <article className={`chat-message chat-message--${message.role}`}>
+                    {message.attachments.length > 0 ? (
+                      <div className="chat-message__images">
+                        {message.attachments.map((attachment) => (
+                          <img
+                            key={attachment.id}
+                            src={`data:${attachment.mediaType};base64,${attachment.data}`}
+                            alt="Attached image"
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    {message.role === "assistant" && message.content ? (
+                      <MarkdownRenderer content={message.content} />
+                    ) : (
+                      <p>
+                        {message.content || (message.status === "streaming" ? "Thinking…" : "")}
+                      </p>
+                    )}
+                    {message.errorMessage ? (
+                      <span className="chat-message__error">{message.errorMessage}</span>
+                    ) : null}
+                    {recall ? <MemoryRecallChip data={recall} /> : null}
+                  </article>
                 ) : null}
-                {recall ? <MemoryRecallChip data={recall} /> : null}
-                {toolCalls ? <ToolCallChip calls={toolCalls} /> : null}
-              </article>
+              </Fragment>
             );
           })}
           {/* The calls module's one and only mount point. It reads its own

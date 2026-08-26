@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { requestConversationScrollToEnd } from "../chat/chatScrollEvents";
 import { listConversationCalls, onCallsChanged } from "./callService";
 import type { CallThread } from "./types";
 
@@ -36,6 +37,10 @@ export function useConversationCalls(
         if (!alive()) return;
         setThreads(found);
         setError(null);
+        // The card renders at the tail of the thread — follow it down the
+        // same way a tool chip or an assistant token does, or a call placed
+        // mid-turn appears below the fold with nothing telling the user.
+        requestConversationScrollToEnd(id);
       } catch (cause) {
         if (!alive()) return;
         // A failed read is shown, never swallowed — a silently empty call

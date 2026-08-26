@@ -196,7 +196,7 @@ function acceptedEvent(accepted: AcceptedMessage): ChatEvent {
 function requestScrollForChatEvent(event: ChatEvent): void {
   if (event.kind === "accepted") {
     requestConversationScrollToEnd(event.conversation.id);
-  } else if (event.kind === "assistantDelta") {
+  } else if (event.kind === "assistantDelta" || event.kind === "toolCall") {
     requestConversationScrollToEnd(event.conversationId);
   } else if (event.kind === "assistantStarted" || event.kind === "assistantCompleted") {
     requestConversationScrollToEnd(event.message.conversationId);
