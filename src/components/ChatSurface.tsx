@@ -19,7 +19,7 @@ import type {
   ToolCallChipItem,
 } from "../features/chat/types";
 import { CompanionSelect } from "../features/companions/CompanionSelect";
-import type { Companion } from "../features/companions/types";
+import { companionLabel, type Companion } from "../features/companions/types";
 import type { MemoryRecallChipData } from "../features/memory";
 import { EmptyState } from "./EmptyState";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -139,6 +139,10 @@ export function ChatSurface({
     () => placeCalls(messages, callThreads),
     [messages, callThreads],
   );
+  const callAgentNames = useMemo(
+    () => new Map(companions.map((companion) => [companion.id, companionLabel(companion)])),
+    [companions],
+  );
 
   useEffect(() => {
     let frameId: number | null = null;
@@ -220,6 +224,7 @@ export function ChatSurface({
             <CallTranscriptItem
               key={thread.call.id}
               thread={thread}
+              agentNames={callAgentNames}
               streamingMessages={streamingCallMessages.filter(
                 (message) => message.callId === thread.call.id,
               )}
@@ -277,6 +282,7 @@ export function ChatSurface({
                   <CallTranscriptItem
                     key={thread.call.id}
                     thread={thread}
+                    agentNames={callAgentNames}
                     streamingMessages={streamingCallMessages.filter(
                       (streaming) => streaming.callId === thread.call.id,
                     )}
