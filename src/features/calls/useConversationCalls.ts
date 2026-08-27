@@ -7,6 +7,9 @@ import type { CallThread, StreamingCallMessage } from "./types";
 interface ConversationCallsState {
   threads: CallThread[];
   streamingMessages: StreamingCallMessage[];
+  /** True only while this conversation's first authoritative call read is
+   * pending. Refreshes do not blank or re-block the already rendered thread. */
+  isInitialLoading: boolean;
   error: string | null;
 }
 
@@ -30,6 +33,7 @@ export function useConversationCalls(
   const [threads, setThreads] = useState<CallThread[]>([]);
   const [streamingMessages, setStreamingMessages] = useState<StreamingCallMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const wasBusy = useRef(turnInProgress);
   const knownCallIds = useRef(new Map<string, Set<string>>());
 
@@ -82,10 +86,13 @@ export function useConversationCalls(
     setStreamingMessages([]);
     setError(null);
     if (!conversationId) {
+      setLoadedConversationId(null);
       return;
     }
     let active = true;
-    void load(conversationId, () => active);
+    void load(conversationId, () => active).finally(() => {
+      if (active) setLoadedConversationId(conversationId);
+    });
     return () => {
       active = false;
     };
@@ -167,5 +174,11 @@ export function useConversationCalls(
     };
   }, [conversationId, load]);
 
-  return { threads, streamingMessages, error };
+  return {
+    threads,
+    streamingMessages,
+    isInitialLoading:
+      conversationId !== null && loadedConversationId !== conversationId,
+    error,
+  };
 }

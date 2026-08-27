@@ -73,10 +73,9 @@ pub(crate) struct ToolContext {
     /// SerpApi key — ground of the web_search tool. Comes from the
     /// machine's environment; absent → the model never sees the tool.
     pub(crate) serpapi_api_key: Option<String>,
-    /// The companion's workspace folder, CANONICAL — ground of the five file
-    /// tools. No workspace → no file tools, and there is no fallback
-    /// directory, ever.
-    pub(crate) workspace_dir: Option<PathBuf>,
+    /// The companion's named, CANONICAL workspace grants — ground of the five
+    /// file tools. Empty → no file tools, and there is no fallback directory.
+    pub(crate) workspaces: Vec<ToolWorkspace>,
     /// WHO IS SPEAKING — the companion this turn belongs to, and the return
     /// address on everything it sends. Ground of the mail tools.
     ///
@@ -84,6 +83,12 @@ pub(crate) struct ToolContext {
     /// arguments, so a companion cannot write a letter over another's name.
     /// The `from` on a message is a fact about the turn, not a parameter.
     pub(crate) companion_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ToolWorkspace {
+    pub(crate) label: String,
+    pub(crate) root: PathBuf,
 }
 
 pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
@@ -183,48 +188,64 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             }),
         });
     }
-    if context.workspace_dir.is_some() {
+    if !context.workspaces.is_empty() {
+        let workspace_labels: Vec<&str> = context
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.label.as_str())
+            .collect();
         let path_parameter = |description: &str| {
             serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "enum": workspace_labels,
+                        "description": "Named workspace to use. Choose one of the allowed names exactly."
+                    },
                     "path": { "type": "string", "description": description }
                 },
-                "required": ["path"]
+                "required": ["workspace", "path"]
             })
         };
         tools.push(ToolDeclaration {
             name: files::LIST_FILES.to_owned(),
             description: concat!(
-                "List what a folder in your workspace holds — folders first, ",
-                "then files with their sizes. All paths are relative to your ",
-                "workspace folder; omit \"path\" to list the workspace root.",
+                "List what a folder in one of your named workspaces holds — ",
+                "folders first, then files with their sizes. Every path is ",
+                "relative to the selected workspace; omit \"path\" for its root.",
             )
             .to_owned(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "enum": workspace_labels,
+                        "description": "Named workspace to list. Choose one of the allowed names exactly."
+                    },
                     "path": {
                         "type": "string",
-                        "description": "Folder to list, relative to the workspace, e.g. \"notes\". Omit for the root."
+                        "description": "Folder to list, relative to the selected workspace, e.g. \"notes\". Omit for the root."
                     }
-                }
+                },
+                "required": ["workspace"]
             }),
         });
         tools.push(ToolDeclaration {
             name: files::READ_FILE.to_owned(),
             description: concat!(
-                "Read one text file from your workspace and get its full ",
+                "Read one text file from a named workspace and get its full ",
                 "content. Use it before editing a file, or whenever the user ",
                 "refers to something written there.",
             )
             .to_owned(),
-            parameters: path_parameter("File to read, relative to the workspace, e.g. \"notes/today.md\"."),
+            parameters: path_parameter("File to read, relative to the selected workspace, e.g. \"notes/today.md\"."),
         });
         tools.push(ToolDeclaration {
             name: files::WRITE_FILE.to_owned(),
             description: concat!(
-                "Write one file in your workspace: creates it (and any ",
+                "Write one file in a named workspace: creates it (and any ",
                 "folders on the way) or overwrites it whole. For a small ",
                 "change to an existing file, prefer edit_file — it keeps ",
                 "the rest of the file intact.",
@@ -233,22 +254,27 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "enum": workspace_labels,
+                        "description": "Named workspace to use. Choose one of the allowed names exactly."
+                    },
                     "path": {
                         "type": "string",
-                        "description": "File to write, relative to the workspace, e.g. \"notes/today.md\"."
+                        "description": "File to write, relative to the selected workspace, e.g. \"notes/today.md\"."
                     },
                     "content": {
                         "type": "string",
                         "description": "The file's entire new content."
                     }
                 },
-                "required": ["path", "content"]
+                "required": ["workspace", "path", "content"]
             }),
         });
         tools.push(ToolDeclaration {
             name: files::EDIT_FILE.to_owned(),
             description: concat!(
-                "Replace one exact stretch of text in a workspace file. ",
+                "Replace one exact stretch of text in a named workspace file. ",
                 "old_text must match the file exactly once — read the file ",
                 "first and copy it verbatim, adding surrounding lines if it ",
                 "appears more than once.",
@@ -257,9 +283,14 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "enum": workspace_labels,
+                        "description": "Named workspace to use. Choose one of the allowed names exactly."
+                    },
                     "path": {
                         "type": "string",
-                        "description": "File to edit, relative to the workspace."
+                        "description": "File to edit, relative to the selected workspace."
                     },
                     "old_text": {
                         "type": "string",
@@ -270,18 +301,18 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                         "description": "What to put in its place."
                     }
                 },
-                "required": ["path", "old_text", "new_text"]
+                "required": ["workspace", "path", "old_text", "new_text"]
             }),
         });
         tools.push(ToolDeclaration {
             name: files::DELETE_FILE.to_owned(),
             description: concat!(
-                "Delete one file (or one EMPTY folder) from your workspace. ",
+                "Delete one file (or one EMPTY folder) from a named workspace. ",
                 "This is permanent — be sure, and when in doubt ask the user ",
                 "before deleting something they wrote.",
             )
             .to_owned(),
-            parameters: path_parameter("File or empty folder to delete, relative to the workspace."),
+            parameters: path_parameter("File or empty folder to delete, relative to the selected workspace."),
         });
     }
     if context.serpapi_api_key.is_some() {
@@ -534,6 +565,23 @@ fn memory_target(context: &ToolContext) -> Result<memory::MemoryTarget, String> 
         .ok_or_else(|| "memory is not connected for this conversation".to_owned())
 }
 
+fn workspace_for_call(arguments: &str, context: &ToolContext) -> Result<ToolWorkspace, String> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|error| format!("arguments were not valid JSON: {error}"))?;
+    let label = parsed
+        .get("workspace")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "a non-empty \"workspace\" argument is required".to_owned())?;
+    context
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.label == label)
+        .cloned()
+        .ok_or_else(|| format!("\"{label}\" is not an available workspace for this companion"))
+}
+
 pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<String, String> {
     match call.name.as_str() {
         RECALL_MEMORY => {
@@ -625,10 +673,8 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
             .map_err(|error| format!("the call task failed: {error}"))?
         }
         name if files::FILE_TOOL_NAMES.contains(&name) => {
-            let root = context
-                .workspace_dir
-                .clone()
-                .ok_or_else(|| "no workspace folder is connected for this companion".to_owned())?;
+            let workspace = workspace_for_call(&call.arguments, context)?;
+            let root = workspace.root;
             let name = call.name.clone();
             let arguments = call.arguments.clone();
             tauri::async_runtime::spawn_blocking(move || files::execute(&name, &arguments, &root))
@@ -1227,14 +1273,15 @@ fn render_memory(memory: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        declarations, fts_match_expression, parse_carve_arguments, parse_name_argument,
+        declarations, execute, fts_match_expression, parse_carve_arguments, parse_name_argument,
         parse_search_arguments, parse_url_argument, parse_web_search_arguments,
         render_archive_hits, render_carve_outcome, render_memory, render_web_page,
-        render_web_search, ToolContext,
+        render_web_search, workspace_for_call, ToolContext, ToolWorkspace,
     };
     use super::{execute_mail, LIST_AGENTS, MARK_MESSAGE_READ, READ_MESSAGES, SEND_MESSAGE};
     use super::{execute_call, LIST_CALLS, OPEN_CALL, READ_CALL, SEND_IN_CALL};
     use crate::chat::repository::ArchiveHit;
+    use crate::inference::ToolCall;
     use crate::raven_calls::{self, RavenCallRepository};
     use crate::web;
 
@@ -1777,9 +1824,12 @@ mod tests {
         assert_eq!(web_only[0].name, "web_search");
         assert_eq!(web_only[1].name, "web_fetch");
 
-        // The five file tools ride ONLY when a workspace folder is set.
+        // The five file tools ride ONLY when at least one named workspace is set.
         let workspace_only = declarations(&ToolContext {
-            workspace_dir: Some("/a/workspace".into()),
+            workspaces: vec![ToolWorkspace {
+                label: "Project".to_owned(),
+                root: "/a/workspace".into(),
+            }],
             ..ToolContext::default()
         });
         assert_eq!(workspace_only.len(), 6);
@@ -1793,6 +1843,35 @@ mod tests {
         ]) {
             assert_eq!(declaration.name, expected);
         }
+        assert_eq!(
+            workspace_only[0].parameters["properties"]["workspace"]["enum"],
+            serde_json::json!(["Project"])
+        );
+        assert_eq!(
+            workspace_only[1].parameters["required"],
+            serde_json::json!(["workspace", "path"])
+        );
+
+        let context = ToolContext {
+            workspaces: vec![
+                ToolWorkspace {
+                    label: "Project".to_owned(),
+                    root: "/a/workspace".into(),
+                },
+                ToolWorkspace {
+                    label: "Notes".to_owned(),
+                    root: "/a/notes".into(),
+                },
+            ],
+            ..ToolContext::default()
+        };
+        assert_eq!(
+            workspace_for_call(r#"{"workspace":"Notes","path":"today.md"}"#, &context)
+                .expect("a granted workspace should resolve")
+                .root,
+            std::path::PathBuf::from("/a/notes")
+        );
+        assert!(workspace_for_call(r#"{"workspace":"Unknown"}"#, &context).is_err());
 
         let everything = declarations(&ToolContext {
             memory_agent_id: Some("agent-1".to_owned()),
@@ -1800,7 +1879,10 @@ mod tests {
             database_path: Some("companion.db".into()),
             conversation_id: Some("conversation-1".to_owned()),
             serpapi_api_key: Some("a-key".to_owned()),
-            workspace_dir: Some("/a/workspace".into()),
+            workspaces: vec![ToolWorkspace {
+                label: "Project".to_owned(),
+                root: "/a/workspace".into(),
+            }],
             companion_id: Some("companion-1".to_owned()),
         });
         assert_eq!(
@@ -1808,6 +1890,55 @@ mod tests {
             18,
             "ten, plus the four mail tools and the four call tools"
         );
+    }
+
+    #[tokio::test]
+    async fn file_calls_are_routed_to_the_named_workspace_only() {
+        let base = std::env::temp_dir().join(format!(
+            "companion-tool-workspaces-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project = base.join("project");
+        let notes = base.join("notes");
+        std::fs::create_dir_all(&project).expect("the project workspace should exist");
+        std::fs::create_dir_all(&notes).expect("the notes workspace should exist");
+        std::fs::write(project.join("same.txt"), "project copy")
+            .expect("the project fixture should write");
+        std::fs::write(notes.join("same.txt"), "notes copy")
+            .expect("the notes fixture should write");
+
+        let context = ToolContext {
+            workspaces: vec![
+                ToolWorkspace {
+                    label: "Project".to_owned(),
+                    root: std::fs::canonicalize(&project).expect("project should canonicalise"),
+                },
+                ToolWorkspace {
+                    label: "Notes".to_owned(),
+                    root: std::fs::canonicalize(&notes).expect("notes should canonicalise"),
+                },
+            ],
+            ..ToolContext::default()
+        };
+        let call = ToolCall {
+            id: "call-1".to_owned(),
+            name: super::files::READ_FILE.to_owned(),
+            arguments: r#"{"workspace":"Notes","path":"same.txt"}"#.to_owned(),
+        };
+        assert_eq!(
+            execute(&call, &context)
+                .await
+                .expect("the named workspace should read"),
+            "notes copy"
+        );
+
+        let unknown = ToolCall {
+            arguments: r#"{"workspace":"Elsewhere","path":"same.txt"}"#.to_owned(),
+            ..call
+        };
+        assert!(execute(&unknown, &context).await.is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

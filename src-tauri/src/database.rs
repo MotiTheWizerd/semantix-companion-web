@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 17;
+const LATEST_SCHEMA_VERSION: i64 = 18;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -586,6 +586,52 @@ fn migration_sql(version: i64) -> &'static str {
             // your work is exactly the failure this prevents.
             "ALTER TABLE companions ADD COLUMN origin_agent_id TEXT;"
         }
+        18 => {
+            // NAMED WORKSPACES. A companion may hold several independent file
+            // capabilities now, so the old scalar on `companions` can no
+            // longer be the source of truth. Each grant has its own immutable
+            // id, human label, canonical directory and explicit display order.
+            //
+            // Existing installs lose nothing: the former folder becomes a
+            // workspace named "Workspace". The legacy column is cleared after
+            // backfill and intentionally left in the table for now; avoiding a
+            // third companions rebuild is safer than dropping one inert nullable
+            // column from a table referenced by conversations.
+            "CREATE TABLE companion_workspaces (
+                 id           TEXT    PRIMARY KEY,
+                 companion_id TEXT    NOT NULL
+                                      REFERENCES companions(id) ON DELETE CASCADE,
+                 label        TEXT    NOT NULL CHECK (length(trim(label)) > 0),
+                 directory    TEXT    NOT NULL CHECK (length(trim(directory)) > 0),
+                 position     INTEGER NOT NULL CHECK (position >= 0)
+             );
+
+             CREATE INDEX idx_companion_workspaces_companion
+                 ON companion_workspaces(companion_id, position);
+
+             CREATE UNIQUE INDEX idx_companion_workspaces_label
+                 ON companion_workspaces(companion_id, label COLLATE NOCASE);
+
+             CREATE UNIQUE INDEX idx_companion_workspaces_directory
+                 ON companion_workspaces(companion_id, directory);
+
+             INSERT INTO companion_workspaces (
+                 id, companion_id, label, directory, position
+             )
+             SELECT lower(
+                        hex(randomblob(4)) || '-' ||
+                        hex(randomblob(2)) || '-4' ||
+                        substr(hex(randomblob(2)), 2) || '-' ||
+                        substr('89ab', abs(random()) % 4 + 1, 1) ||
+                        substr(hex(randomblob(2)), 2) || '-' ||
+                        hex(randomblob(6))
+                    ),
+                    id, 'Workspace', workspace_dir, 0
+             FROM companions
+             WHERE workspace_dir IS NOT NULL;
+
+             UPDATE companions SET workspace_dir = NULL;"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -618,6 +664,7 @@ mod tests {
             "messages",
             "user_preferences",
             "companions",
+            "companion_workspaces",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -904,19 +951,26 @@ mod tests {
 
         migrate(&mut connection).expect("migration eleven should rebuild the table");
 
-        let (name, agent, mode, workspace): (Option<String>, String, String, Option<String>) =
-            connection
-                .query_row(
-                    "SELECT name, memory_agent_name, model_preference_mode, workspace_dir
-                     FROM companions WHERE id = 'companion-2'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .expect("the companion should survive its own rebuild");
+        let (name, agent, mode): (Option<String>, String, String) = connection
+            .query_row(
+                "SELECT name, memory_agent_name, model_preference_mode
+                 FROM companions WHERE id = 'companion-2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the companion should survive its own rebuild");
         assert_eq!(name.as_deref(), Some("Rook"));
         assert_eq!(agent, "agent-rook");
         assert_eq!(mode, "test");
-        assert_eq!(workspace.as_deref(), Some("/tmp/nest"));
+        let workspace: String = connection
+            .query_row(
+                "SELECT directory FROM companion_workspaces
+                 WHERE companion_id = 'companion-2'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the workspace should survive as a named grant");
+        assert_eq!(workspace, "/tmp/nest");
 
         let companion_id: Option<String> = connection
             .query_row(
@@ -1034,6 +1088,91 @@ mod tests {
             Some(id.as_str()),
             "a thread must not be orphaned by its companion's rename"
         );
+    }
+
+    #[test]
+    fn migration_eighteen_preserves_the_legacy_workspace_as_a_named_grant() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+
+        for version in 1..=17 {
+            connection
+                .execute_batch(migration_sql(version))
+                .unwrap_or_else(|error| panic!("migration {version} should apply: {error}"));
+        }
+        connection
+            .execute(
+                "INSERT INTO companions (
+                     id, name, memory_agent_name, model_preference_mode, model_id,
+                     is_built_in, created_at, updated_at, workspace_dir,
+                     is_origin, origin_agent_id
+                 ) VALUES (
+                     'companion-legacy-workspace', 'Rook', 'rook-memory',
+                     'inherit', NULL, 0, 1, 1, '/tmp/rook-workspace', 0, NULL
+                 )",
+                [],
+            )
+            .expect("a legacy companion workspace should seed");
+        connection
+            .pragma_update(None, "user_version", 17)
+            .expect("the legacy version should stamp");
+
+        migrate(&mut connection).expect("schema eighteen should upgrade");
+
+        let (label, directory, position): (String, String, i64) = connection
+            .query_row(
+                "SELECT label, directory, position
+                 FROM companion_workspaces
+                 WHERE companion_id = 'companion-legacy-workspace'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the legacy folder should become a named workspace");
+        assert_eq!(label, "Workspace");
+        assert_eq!(directory, "/tmp/rook-workspace");
+        assert_eq!(position, 0);
+
+        let retired: Option<String> = connection
+            .query_row(
+                "SELECT workspace_dir FROM companions
+                 WHERE id = 'companion-legacy-workspace'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the retired scalar should remain readable");
+        assert_eq!(retired, None, "only the child table remains authoritative");
+    }
+
+    #[test]
+    fn deleting_a_companion_revokes_all_of_its_workspace_grants() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+        migrate(&mut connection).expect("migrations should succeed");
+        connection
+            .execute_batch(
+                "INSERT INTO companions (
+                     id, name, memory_agent_name, is_built_in, created_at, updated_at
+                 ) VALUES ('companion-with-workspace', 'Rook', 'rook-workspace-memory', 0, 1, 1);
+                 INSERT INTO companion_workspaces (
+                     id, companion_id, label, directory, position
+                 ) VALUES (
+                     'workspace-1', 'companion-with-workspace', 'Code', '/tmp/code', 0
+                 );
+                 DELETE FROM companions WHERE id = 'companion-with-workspace';",
+            )
+            .expect("the companion and workspace should round-trip through deletion");
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM companion_workspaces WHERE id = 'workspace-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("workspace grants should remain queryable");
+        assert_eq!(remaining, 0, "no file capability may outlive its companion");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import {
   Fragment,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   type ClipboardEvent,
@@ -127,12 +128,14 @@ export function ChatSurface({
 }: ChatSurfaceProps) {
   const threadRef = useRef<HTMLElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const positionedConversationIdRef = useRef<string | null>(null);
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
   const hasMessages = messages.length > 0;
   const {
     threads: callThreads,
     streamingMessages: streamingCallMessages,
+    isInitialLoading: areCallsInitiallyLoading,
     error: callsError,
   } = useConversationCalls(activeConversationId, isSending);
   const callPlacements = useMemo(
@@ -144,6 +147,53 @@ export function ChatSurface({
     [companions],
   );
 
+  // Opening a conversation is a snap, not a tour through its history. Wait
+  // until BOTH independently loaded timelines (messages + calls) are in the
+  // DOM, then land at the true bottom before paint. Images that finish decoding
+  // a moment later get one corrective snap so they cannot shift it upward.
+  useLayoutEffect(() => {
+    if (!activeConversationId) {
+      positionedConversationIdRef.current = null;
+      return;
+    }
+    if (
+      isLoading ||
+      areCallsInitiallyLoading ||
+      positionedConversationIdRef.current === activeConversationId
+    ) {
+      return;
+    }
+
+    const thread = threadRef.current;
+    if (!thread) return;
+    const conversationId = activeConversationId;
+    const snapToEnd = () => {
+      if (
+        activeConversationIdRef.current === conversationId &&
+        threadRef.current === thread
+      ) {
+        thread.scrollTop = thread.scrollHeight;
+      }
+    };
+
+    positionedConversationIdRef.current = conversationId;
+    snapToEnd();
+
+    const pendingImages = Array.from(thread.querySelectorAll("img")).filter(
+      (image) => !image.complete,
+    );
+    pendingImages.forEach((image) => image.addEventListener("load", snapToEnd));
+    return () => {
+      pendingImages.forEach((image) => image.removeEventListener("load", snapToEnd));
+      // React's development StrictMode deliberately mounts effects twice.
+      // Release the marker with the listeners so the second setup remains
+      // complete rather than keeping the snap but losing image correction.
+      if (positionedConversationIdRef.current === conversationId) {
+        positionedConversationIdRef.current = null;
+      }
+    };
+  }, [activeConversationId, areCallsInitiallyLoading, isLoading]);
+
   useEffect(() => {
     let frameId: number | null = null;
     let requestedConversationId: string | null = null;
@@ -154,7 +204,14 @@ export function ChatSurface({
         frameId = null;
         if (requestedConversationId !== activeConversationIdRef.current) return;
         const thread = threadRef.current;
-        if (thread) thread.scrollTop = thread.scrollHeight;
+        if (thread) {
+          thread.scrollTo({
+            top: thread.scrollHeight,
+            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+              ? "auto"
+              : "smooth",
+          });
+        }
       });
     });
 

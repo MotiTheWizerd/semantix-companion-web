@@ -38,21 +38,10 @@
   gap: 7px;
 }
 
-.preference-store__field span {
+.preference-store__field > span {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 580;
-}
-
-.preference-store__field select {
-  width: 100%;
-  height: 38px;
-  padding: 0 10px;
-  outline: none;
-  background: #111;
-  border: 1px solid #2d2d2d;
-  border-radius: 8px;
-  color: var(--text-secondary);
 }
 
 .preference-store__field small {
@@ -221,31 +210,6 @@
 .credential-field select:focus {
   border-color: rgba(143, 182, 212, 0.5);
   box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.07);
-}
-
-.credential-field__workspace {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.credential-field__workspace > button {
-  flex-shrink: 0;
-}
-
-.credential-field__workspace code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl; /* a long path keeps its tail — the folder name — visible */
-  color: #9db4c4;
-  font-size: 11px;
-}
-
-.credential-field__workspace small {
-  margin-left: 0;
 }
 
 .credential-form__actions {

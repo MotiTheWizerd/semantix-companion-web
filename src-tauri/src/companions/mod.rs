@@ -15,7 +15,7 @@
 
 mod repository;
 
-use std::{path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 
 pub(crate) use repository::CompanionRepository;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,29 @@ use crate::{
 pub(crate) const COMPANIONS_CHANGED_EVENT: &str = "companions://changed";
 
 const MAX_NAME_LENGTH: usize = 80;
+const MAX_WORKSPACE_LABEL_LENGTH: usize = 80;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompanionWorkspace {
+    pub(crate) id: String,
+    /// The user's stable, human-facing name for this capability.
+    pub(crate) label: String,
+    /// Canonical absolute path. It is shown in Settings but never handed to a
+    /// model; file tools see only `label` plus a path relative to this root.
+    pub(crate) directory: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompanionWorkspaceInput {
+    /// Present for an existing row. Unknown ids are ignored and reminted so a
+    /// caller cannot move another companion's grant by guessing its id.
+    #[serde(default)]
+    id: Option<String>,
+    label: String,
+    directory: String,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,9 +71,9 @@ pub(crate) struct Companion {
     pub(crate) is_built_in: bool,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
-    /// The ONE folder this companion's file tools may touch, stored canonical.
-    /// `None` — the default — means no workspace and no file tools at all.
-    pub(crate) workspace_dir: Option<String>,
+    /// Named folders this companion's file tools may touch. Empty means the
+    /// file tools are never offered to the model.
+    pub(crate) workspaces: Vec<CompanionWorkspace>,
     /// WHICH Postgres holds this companion's memories — never what it is.
     /// `false` (the only value a public install ever has) is the Semantix
     /// organ; `true` is the machine-local canonical Muninn, unreachable from
@@ -78,7 +101,7 @@ pub(crate) struct CreateCompanionInput {
     name: Option<String>,
     model_preference: ModelPreference,
     #[serde(default)]
-    workspace_dir: Option<String>,
+    workspaces: Vec<CompanionWorkspaceInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,7 +111,7 @@ pub(crate) struct UpdateCompanionInput {
     name: Option<String>,
     model_preference: ModelPreference,
     #[serde(default)]
-    workspace_dir: Option<String>,
+    workspaces: Vec<CompanionWorkspaceInput>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -182,10 +205,10 @@ impl CompanionService {
         let CreateCompanionInput {
             name,
             model_preference,
-            workspace_dir,
+            workspaces,
         } = input;
         let name = normalise_name(name)?;
-        let workspace_dir = normalise_workspace(workspace_dir)?;
+        let workspaces = normalise_workspaces(workspaces, &[])?;
         self.preferences
             .validate_model_preference(&model_preference)?;
         let id = Uuid::new_v4().to_string();
@@ -198,7 +221,7 @@ impl CompanionService {
             is_built_in: false,
             created_at: timestamp,
             updated_at: timestamp,
-            workspace_dir,
+            workspaces,
             // A companion made through the app always speaks to the organ.
             // Pointing one at the canonical Muninn is a hand-edit, never a
             // thing the UI can do — see schema 16.
@@ -215,11 +238,11 @@ impl CompanionService {
             companion_id,
             name,
             model_preference,
-            workspace_dir,
+            workspaces,
         } = input;
         let current = self.require(companion_id.trim())?;
         let name = normalise_name(name)?;
-        let workspace_dir = normalise_workspace(workspace_dir)?;
+        let workspaces = normalise_workspaces(workspaces, &current.workspaces)?;
         self.preferences
             .validate_model_preference(&model_preference)?;
         let timestamp = unix_timestamp_ms()?;
@@ -227,14 +250,14 @@ impl CompanionService {
             &current.id,
             name.as_deref(),
             &model_preference,
-            workspace_dir.as_deref(),
+            &workspaces,
             timestamp,
         )?;
 
         Ok(Companion {
             name,
             model_preference,
-            workspace_dir,
+            workspaces,
             updated_at: timestamp,
             ..current
         })
@@ -257,28 +280,71 @@ impl CompanionService {
     }
 }
 
-/// Blank, whitespace, or absent all mean the same thing: no workspace. A real
-/// pick must be an existing directory, and it is stored CANONICAL — symlinks
-/// resolved here, once, so every containment check downstream compares against
-/// the folder's true location rather than a nickname for it.
-fn normalise_workspace(workspace_dir: Option<String>) -> Result<Option<String>, AppError> {
-    let Some(workspace_dir) = workspace_dir else {
-        return Ok(None);
-    };
-    let workspace_dir = workspace_dir.trim();
-    if workspace_dir.is_empty() {
-        return Ok(None);
+/// Validate and canonicalise the complete grant set before a transaction ever
+/// touches the database. Labels and roots are unique per companion so a tool
+/// call can name exactly one capability without ambiguity.
+fn normalise_workspaces(
+    inputs: Vec<CompanionWorkspaceInput>,
+    existing: &[CompanionWorkspace],
+) -> Result<Vec<CompanionWorkspace>, AppError> {
+    let existing_ids: HashSet<&str> = existing.iter().map(|item| item.id.as_str()).collect();
+    let mut used_ids = HashSet::new();
+    let mut labels = HashSet::new();
+    let mut directories = HashSet::new();
+    let mut workspaces = Vec::with_capacity(inputs.len());
+
+    for input in inputs {
+        let label = input.label.trim();
+        if label.is_empty() {
+            return Err(AppError::validation("Every workspace folder needs a name."));
+        }
+        if label.chars().count() > MAX_WORKSPACE_LABEL_LENGTH {
+            return Err(AppError::validation(format!(
+                "A workspace name must be {MAX_WORKSPACE_LABEL_LENGTH} characters or fewer."
+            )));
+        }
+        if !labels.insert(label.to_lowercase()) {
+            return Err(AppError::validation(
+                "Workspace folder names must be unique for this companion.",
+            ));
+        }
+
+        let directory = input.directory.trim();
+        if directory.is_empty() {
+            return Err(AppError::validation("Every workspace needs a folder."));
+        }
+        let canonical = std::fs::canonicalize(directory).map_err(|_| {
+            AppError::validation("A workspace folder could not be found on this machine.")
+        })?;
+        if !canonical.is_dir() {
+            return Err(AppError::validation(
+                "A workspace must be a folder, not a file.",
+            ));
+        }
+        let directory = canonical.into_os_string().into_string().map_err(|_| {
+            AppError::validation("A workspace folder's path is not valid UTF-8.")
+        })?;
+        if !directories.insert(directory.clone()) {
+            return Err(AppError::validation(
+                "The same folder cannot be added to one companion twice.",
+            ));
+        }
+
+        let requested_id = input.id.as_deref().map(str::trim).filter(|id| {
+            !id.is_empty() && existing_ids.contains(*id) && !used_ids.contains(*id)
+        });
+        let id = requested_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        used_ids.insert(id.clone());
+        workspaces.push(CompanionWorkspace {
+            id,
+            label: label.to_owned(),
+            directory,
+        });
     }
-    let canonical = std::fs::canonicalize(workspace_dir).map_err(|_| {
-        AppError::validation("The workspace folder could not be found on this machine.")
-    })?;
-    if !canonical.is_dir() {
-        return Err(AppError::validation("A workspace must be a folder, not a file."));
-    }
-    let canonical = canonical.into_os_string().into_string().map_err(|_| {
-        AppError::validation("The workspace folder's path is not valid UTF-8.")
-    })?;
-    Ok(Some(canonical))
+
+    Ok(workspaces)
 }
 
 /// Blank, whitespace, or absent all mean the same thing: unnamed.
@@ -374,13 +440,14 @@ pub(crate) async fn delete_companion(
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs, path::PathBuf};
+    use std::{env, fs, path::{Path, PathBuf}};
 
     use uuid::Uuid;
 
     use super::{
         normalise_name, Companion, CompanionChangedEvent, CompanionRepository, CompanionResolver,
-        CompanionService, CreateCompanionInput, UpdateCompanionInput, MAX_NAME_LENGTH,
+        CompanionService, CompanionWorkspace, CompanionWorkspaceInput, CreateCompanionInput,
+        UpdateCompanionInput, MAX_NAME_LENGTH,
     };
     use crate::{database, preferences::{ModelPreference, PreferenceRepository}};
 
@@ -440,7 +507,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Rook".to_owned()),
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("a companion should be creatable");
         assert!(!made.is_origin, "the app has no door that sets this");
@@ -479,7 +546,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Arc".to_owned()),
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("a companion should be creatable");
 
@@ -507,7 +574,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Studio".to_owned()),
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("a companion should be creatable");
         let connection =
@@ -543,7 +610,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Arc".to_owned()),
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("a companion should be creatable");
 
@@ -594,14 +661,14 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Ragnar".to_owned()),
                 model_preference: ModelPreference::Test,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("the first companion should be created");
         let second = service
             .create(CreateCompanionInput {
                 name: None,
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("an unnamed companion should be created");
 
@@ -623,7 +690,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: None,
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("the companion should be created");
 
@@ -632,7 +699,7 @@ mod tests {
                 companion_id: created.id.clone(),
                 name: Some("  Bjorn  ".to_owned()),
                 model_preference: ModelPreference::Test,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("the companion should rename");
         assert_eq!(renamed.name.as_deref(), Some("Bjorn"));
@@ -643,7 +710,7 @@ mod tests {
                 companion_id: created.id,
                 name: Some(String::new()),
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("the name should clear back to unnamed");
         assert_eq!(cleared.name, None);
@@ -658,7 +725,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: None,
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("the companion should be created");
 
@@ -700,7 +767,11 @@ mod tests {
     fn create_input_accepts_the_camel_case_ipc_contract() {
         let input: CreateCompanionInput = serde_json::from_value(serde_json::json!({
             "name": "Ragnar",
-            "modelPreference": { "mode": "configured", "modelId": "model-123" }
+            "modelPreference": { "mode": "configured", "modelId": "model-123" },
+            "workspaces": [{
+                "label": "Code",
+                "directory": "/tmp/code"
+            }]
         }))
         .expect("create input should deserialize");
         assert_eq!(input.name.as_deref(), Some("Ragnar"));
@@ -710,6 +781,9 @@ mod tests {
                 model_id: "model-123".to_owned()
             }
         );
+        assert_eq!(input.workspaces.len(), 1);
+        assert_eq!(input.workspaces[0].label, "Code");
+        assert!(input.workspaces[0].id.is_none());
 
         let unnamed: CreateCompanionInput = serde_json::from_value(serde_json::json!({
             "modelPreference": { "mode": "inherit" }
@@ -723,11 +797,17 @@ mod tests {
         let input: UpdateCompanionInput = serde_json::from_value(serde_json::json!({
             "companionId": "companion-built-in",
             "name": null,
-            "modelPreference": { "mode": "test" }
+            "modelPreference": { "mode": "test" },
+            "workspaces": [{
+                "id": "workspace-1",
+                "label": "Notes",
+                "directory": "/tmp/notes"
+            }]
         }))
         .expect("update input should deserialize");
         assert_eq!(input.companion_id, "companion-built-in");
         assert!(input.name.is_none());
+        assert_eq!(input.workspaces[0].id.as_deref(), Some("workspace-1"));
     }
 
     #[test]
@@ -741,7 +821,11 @@ mod tests {
                 is_built_in: false,
                 created_at: 1,
                 updated_at: 1,
-                workspace_dir: None,
+                workspaces: vec![CompanionWorkspace {
+                    id: "workspace-1".to_owned(),
+                    label: "Code".to_owned(),
+                    directory: "/tmp/code".to_owned(),
+                }],
                 is_origin: false,
                 origin_agent_id: None,
             },
@@ -751,6 +835,11 @@ mod tests {
         assert_eq!(created["companion"]["memoryAgentName"], "companion-1-memory");
         assert_eq!(created["companion"]["modelPreference"]["mode"], "inherit");
         assert_eq!(created["companion"]["isBuiltIn"], false);
+        assert_eq!(created["companion"]["workspaces"][0]["label"], "Code");
+        assert_eq!(
+            created["companion"]["workspaces"][0]["directory"],
+            "/tmp/code"
+        );
         assert!(created["companion"].get("memory_agent_name").is_none());
 
         let deleted = serde_json::to_value(CompanionChangedEvent::Deleted {
@@ -790,7 +879,7 @@ mod tests {
             .create(CreateCompanionInput {
                 name: Some("Bjorn".to_owned()),
                 model_preference: ModelPreference::Test,
-                workspace_dir: None,
+                workspaces: Vec::new(),
             })
             .expect("the companion should be created");
         let resolved = resolver
@@ -801,48 +890,86 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_is_stored_canonical_and_clears_back_to_none() {
+    fn named_workspaces_are_canonical_ordered_and_revocable() {
         let database = ScratchDatabase::new();
         let service = database.service();
-        let workspace = env::temp_dir().join(format!("companion-workspace-{}", Uuid::new_v4()));
-        fs::create_dir_all(&workspace).expect("the scratch workspace should be created");
+        let base = env::temp_dir().join(format!("companion-workspaces-{}", Uuid::new_v4()));
+        let notes = base.join("notes");
+        let code = base.join("code");
+        fs::create_dir_all(&notes).expect("the notes workspace should be created");
+        fs::create_dir_all(&code).expect("the code workspace should be created");
 
         let created = service
             .create(CreateCompanionInput {
                 name: Some("Bjorn".to_owned()),
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: Some(workspace.to_string_lossy().into_owned()),
+                workspaces: vec![
+                    CompanionWorkspaceInput {
+                        id: None,
+                        label: " Notes ".to_owned(),
+                        directory: notes.to_string_lossy().into_owned(),
+                    },
+                    CompanionWorkspaceInput {
+                        id: None,
+                        label: "Code".to_owned(),
+                        directory: code.to_string_lossy().into_owned(),
+                    },
+                ],
             })
-            .expect("a companion with a workspace should be created");
-        let stored = created.workspace_dir.expect("the workspace should be kept");
+            .expect("a companion with workspaces should be created");
+        assert_eq!(created.workspaces.len(), 2);
+        assert_eq!(created.workspaces[0].label, "Notes");
         assert_eq!(
-            stored,
-            fs::canonicalize(&workspace)
-                .expect("the workspace should canonicalise")
+            created.workspaces[0].directory,
+            fs::canonicalize(&notes)
+                .expect("the notes workspace should canonicalise")
                 .to_string_lossy(),
             "the stored path is the canonical one"
         );
 
-        // The workspace survives a round-trip through the database, and the
-        // resolver — chat's door — hands it back with the identity.
+        // Order and ids survive a round-trip through chat's resolver.
         let resolved = database
             .resolver()
             .resolve(Some(&created.id))
             .expect("the companion should resolve");
-        assert_eq!(resolved.workspace_dir.as_deref(), Some(stored.as_str()));
+        assert_eq!(resolved.workspaces[0].id, created.workspaces[0].id);
+        assert_eq!(resolved.workspaces[1].label, "Code");
 
-        // Blank means none — the workspace is revocable.
+        // Reordering and renaming keep the existing capability ids.
+        let reordered = service
+            .update(UpdateCompanionInput {
+                companion_id: created.id.clone(),
+                name: created.name.clone(),
+                model_preference: ModelPreference::Inherit,
+                workspaces: vec![
+                    CompanionWorkspaceInput {
+                        id: Some(created.workspaces[1].id.clone()),
+                        label: "Source".to_owned(),
+                        directory: code.to_string_lossy().into_owned(),
+                    },
+                    CompanionWorkspaceInput {
+                        id: Some(created.workspaces[0].id.clone()),
+                        label: "Notes".to_owned(),
+                        directory: notes.to_string_lossy().into_owned(),
+                    },
+                ],
+            })
+            .expect("the workspaces should reorder");
+        assert_eq!(reordered.workspaces[0].id, created.workspaces[1].id);
+        assert_eq!(reordered.workspaces[0].label, "Source");
+
+        // An empty collection revokes every file capability atomically.
         let cleared = service
             .update(UpdateCompanionInput {
-                companion_id: created.id,
+                companion_id: reordered.id,
                 name: None,
                 model_preference: ModelPreference::Inherit,
-                workspace_dir: Some("   ".to_owned()),
+                workspaces: Vec::new(),
             })
-            .expect("the workspace should clear");
-        assert_eq!(cleared.workspace_dir, None);
+            .expect("the workspaces should clear");
+        assert!(cleared.workspaces.is_empty());
 
-        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -854,10 +981,46 @@ mod tests {
                 .create(CreateCompanionInput {
                     name: None,
                     model_preference: ModelPreference::Inherit,
-                    workspace_dir: Some("/definitely/not/a/real/folder".to_owned()),
+                    workspaces: vec![CompanionWorkspaceInput {
+                        id: None,
+                        label: "Missing".to_owned(),
+                        directory: "/definitely/not/a/real/folder".to_owned(),
+                    }],
                 })
                 .is_err(),
             "a missing folder must be rejected, not stored"
         );
+    }
+
+    #[test]
+    fn workspace_names_and_directories_are_unique_per_companion() {
+        let database = ScratchDatabase::new();
+        let service = database.service();
+        let directory =
+            env::temp_dir().join(format!("companion-workspace-{}", Uuid::new_v4()));
+        let other = directory.join("other");
+        fs::create_dir_all(&other).expect("the scratch folders should be created");
+
+        let input = |label: &str, path: &Path| CompanionWorkspaceInput {
+            id: None,
+            label: label.to_owned(),
+            directory: path.to_string_lossy().into_owned(),
+        };
+        assert!(service
+            .create(CreateCompanionInput {
+                name: None,
+                model_preference: ModelPreference::Inherit,
+                workspaces: vec![input("Code", &directory), input("code", &other)],
+            })
+            .is_err());
+        assert!(service
+            .create(CreateCompanionInput {
+                name: None,
+                model_preference: ModelPreference::Inherit,
+                workspaces: vec![input("Code", &directory), input("Mirror", &directory)],
+            })
+            .is_err());
+
+        let _ = fs::remove_dir_all(&directory);
     }
 }

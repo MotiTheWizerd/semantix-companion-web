@@ -1,5 +1,4 @@
-/* Migrated from the studio's shared Dropdown, translated onto the companion's
-   own tokens (styles.css :root). */
+/* Shared dropdown shell. Callers provide content; this owns interaction chrome. */
 
 .dropdown {
   position: relative;
@@ -7,58 +6,106 @@
 }
 
 .trigger {
+  min-width: 108px;
+  min-height: 40px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 11px;
-  background: #111;
+  gap: 10px;
+  padding: 0 9px 0 11px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent),
+    #131313;
   border: 1px solid #2d2d2d;
-  border-radius: 8px;
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    0 8px 20px -18px rgba(0, 0, 0, 0.9);
   color: var(--text);
+  font: inherit;
   font-size: 12px;
-  cursor: pointer;
-  transition: border-color 140ms ease, box-shadow 140ms ease;
+  text-align: left;
   white-space: nowrap;
-  min-width: 84px;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    color 150ms ease;
 }
 
 .trigger:hover:not(:disabled) {
-  border-color: var(--border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent),
+    #161616;
+  border-color: #383838;
 }
 
-.trigger:focus {
+.trigger:focus-visible {
   outline: none;
-  border-color: rgba(143, 182, 212, 0.5);
-  box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.07);
+  border-color: rgba(143, 182, 212, 0.48);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    0 0 0 3px rgba(143, 182, 212, 0.075);
 }
 
 .trigger.open {
-  border-color: rgba(143, 182, 212, 0.5);
+  background:
+    linear-gradient(180deg, rgba(143, 182, 212, 0.04), transparent),
+    #161616;
+  border-color: rgba(143, 182, 212, 0.4);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    0 0 0 3px rgba(143, 182, 212, 0.055);
 }
 
 .trigger:disabled {
-  opacity: 0.5;
   cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.triggerContent {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
 }
 
 .triggerText {
+  min-width: 0;
   flex: 1;
-  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevronWrap {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--text-faint);
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.trigger:hover:not(:disabled) .chevronWrap,
+.trigger.open .chevronWrap {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
 }
 
 .chevron {
   flex-shrink: 0;
-  transition: transform 0.15s ease;
-  color: var(--text-muted);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .trigger.open .chevron {
   transform: rotate(180deg);
 }
 
-/* Rotate chevron up when the dropdown opens upward. */
+/* An upward-preferred trigger points at where its menu will appear. */
 .dropdown[data-direction="up"] .trigger.open .chevron {
   transform: rotate(0deg);
 }
@@ -68,151 +115,223 @@
 }
 
 .menu {
-  /* position/left/top/bottom/max-height are set INLINE by Dropdown.tsx — the
-     menu is portaled to <body> and placed in viewport coordinates so no
-     scrolling ancestor can clip it. */
-  min-width: 220px;
-  /* Column so the item list can SHRINK when the viewport clamps max-height. */
+  /* Placement, width and max-height are measured inline by Dropdown.tsx. */
+  min-width: 240px;
   display: flex;
   flex-direction: column;
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  max-height: 280px;
+  padding: 6px;
   overflow: hidden;
+  background:
+    linear-gradient(145deg, rgba(143, 182, 212, 0.035), transparent 38%),
+    rgba(24, 24, 24, 0.985);
+  border: 1px solid #323232;
+  border-radius: 14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 22px 60px -18px rgba(0, 0, 0, 0.88),
+    0 8px 18px -12px rgba(0, 0, 0, 0.78);
   z-index: 1000;
+  transform-origin: top center;
 }
 
 .menuDown {
-  animation: slideDown 0.12s ease;
+  animation: menu-in-down 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .menuUp {
-  animation: slideUp 0.12s ease;
+  transform-origin: bottom center;
+  animation: menu-in-up 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-@keyframes slideDown {
+@keyframes menu-in-down {
   from {
     opacity: 0;
-    transform: translateY(-4px);
+    transform: translateY(-5px) scale(0.985);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
-@keyframes slideUp {
+@keyframes menu-in-up {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(5px) scale(0.985);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
-}
-
-.menu::-webkit-scrollbar {
-  width: 6px;
-}
-
-.menu::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.menu::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
-}
-
-.menu::-webkit-scrollbar-thumb:hover {
-  background: var(--text-faint);
 }
 
 .searchContainer {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border-subtle);
+  position: relative;
+  flex: 0 0 auto;
+  padding: 5px 4px 9px;
+}
+
+.searchIcon {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  width: 15px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+  pointer-events: none;
+  transform: translateY(calc(-50% - 2px));
+}
+
+.searchIcon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
 }
 
 .searchInput {
   width: 100%;
-  padding: 5px 8px;
-  background: var(--surface-input);
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 12px;
+  height: 34px;
+  padding: 0 11px 0 34px;
   outline: none;
-  transition: border-color 0.15s ease;
+  background: rgba(10, 10, 10, 0.64);
+  border: 1px solid #2c2c2c;
+  border-radius: 9px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .searchInput::placeholder {
-  color: var(--text-muted);
+  color: #575757;
 }
 
 .searchInput:focus {
-  border-color: var(--border);
+  background: rgba(12, 12, 12, 0.84);
+  border-color: rgba(143, 182, 212, 0.34);
+  box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.05);
 }
 
 .itemsContainer {
-  max-height: 200px;
-  overflow-y: auto;
-  /* min-height:0 is what actually lets a flex child shrink below its content. */
-  flex: 1 1 auto;
   min-height: 0;
+  flex: 1 1 auto;
+  padding: 2px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #353535 transparent;
 }
 
-/* The header and search bar keep their size; only the list gives ground. */
-.searchContainer,
+.itemsContainer::-webkit-scrollbar {
+  width: 7px;
+}
+
+.itemsContainer::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.itemsContainer::-webkit-scrollbar-thumb {
+  background: #353535;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.itemsContainer::-webkit-scrollbar-thumb:hover {
+  background: #494949;
+  background-clip: padding-box;
+}
+
+/* Header and search keep their size; only the option list yields to clamping. */
 .menu > :not(.itemsContainer) {
   flex: 0 0 auto;
 }
 
 .item {
+  width: 100%;
+  min-height: 42px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  width: 100%;
-  padding: 7px 10px;
+  gap: 10px;
+  padding: 8px 9px;
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: 9px;
   color: var(--text);
+  font: inherit;
   font-size: 12px;
   text-align: left;
   cursor: pointer;
-  transition: background 0.1s ease;
+  transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
+}
+
+.item + .item {
+  margin-top: 2px;
 }
 
 .item:hover,
 .item.highlighted {
-  background: var(--surface-hover);
+  background: rgba(255, 255, 255, 0.038);
+  border-color: rgba(255, 255, 255, 0.035);
 }
 
 .item.selected {
-  background: var(--surface-active);
-  color: var(--accent);
+  background: rgba(143, 182, 212, 0.075);
+  border-color: rgba(143, 182, 212, 0.12);
 }
 
 .item.selected.highlighted {
-  background: var(--surface-active);
+  background: rgba(143, 182, 212, 0.1);
+  border-color: rgba(143, 182, 212, 0.16);
 }
 
 .checkmark {
-  margin-left: 6px;
-  color: var(--accent);
-  font-size: 10px;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  border: 1px solid rgba(143, 182, 212, 0.16);
+  border-radius: 7px;
+  color: var(--accent-hover);
+}
+
+.checkmark svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .empty {
-  padding: 10px;
-  text-align: center;
+  min-height: 82px;
+  display: grid;
+  place-items: center;
+  padding: 16px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
+  text-align: center;
 }
 
 .disabled {
-  opacity: 0.5;
+  opacity: 0.58;
   pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menuDown,
+  .menuUp,
+  .chevron {
+    animation: none;
+    transition: none;
+  }
 }

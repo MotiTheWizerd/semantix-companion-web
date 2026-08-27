@@ -20,10 +20,13 @@ interface ModelRow {
   key: string;
   name: string;
   subtitle?: string;
+  kind: ModelKind;
   preference: ModelPreference;
 }
 
-interface ModelSelectorProps {
+type ModelKind = "api" | "claude" | "test";
+
+export interface ModelSelectorProps {
   value: ModelPreference;
   configuredModels: ConfiguredModel[];
   /** Needed only to name what "Default" currently resolves to. */
@@ -31,6 +34,10 @@ interface ModelSelectorProps {
   /** The user default itself cannot inherit — it is what gets inherited. */
   allowInherit?: boolean;
   disabled?: boolean;
+  id?: string;
+  ariaLabel?: string;
+  className?: string;
+  direction?: "up" | "down";
   onChange: (preference: ModelPreference) => void;
 }
 
@@ -72,12 +79,74 @@ function triggerLabel(
   }
 }
 
+function modelKind(
+  preference: ModelPreference,
+  userPreferences: UserPreferences | undefined,
+): ModelKind {
+  if (preference.mode === "inherit") {
+    return userPreferences?.defaultModel.mode === "claude_code"
+      ? "claude"
+      : "api";
+  }
+  if (preference.mode === "claude_code") return "claude";
+  if (preference.mode === "test") return "test";
+  return "api";
+}
+
+function triggerDetail(
+  value: ModelPreference,
+  configuredModels: ConfiguredModel[],
+): string {
+  if (value.mode === "inherit") return "Inherited default";
+  if (value.mode === "claude_code") return "Claude Code";
+  if (value.mode === "test") return "Development fallback";
+  return (
+    configuredModels.find((model) => model.id === value.modelId)?.providerId ??
+    "Configured API"
+  );
+}
+
+function ModelMark({
+  kind,
+  className = "",
+}: {
+  kind: ModelKind;
+  className?: string;
+}) {
+  if (kind === "test") {
+    return (
+      <span
+        className={`${styles.modelMark} ${styles.modelMarkTest} ${className}`}
+      >
+        T
+      </span>
+    );
+  }
+  return (
+    <span className={`${styles.modelMark} ${className}`}>
+      <img
+        src={
+          kind === "claude"
+            ? "/ai-providers-icons/claude-code.svg"
+            : "/semantix-icon.svg"
+        }
+        alt=""
+        draggable={false}
+      />
+    </span>
+  );
+}
+
 export function ModelSelector({
   value,
   configuredModels,
   userPreferences,
   allowInherit = false,
   disabled = false,
+  id,
+  ariaLabel = "Model",
+  className = "",
+  direction = "down",
   onChange,
 }: ModelSelectorProps) {
   // Which brand tab is active in the open menu. Null = follow the current
@@ -99,6 +168,8 @@ export function ModelSelector({
           {
             key: "inherit",
             name: `Default · ${inheritedLabel(configuredModels, userPreferences)}`,
+            subtitle: "Inherited default",
+            kind: modelKind({ mode: "inherit" }, userPreferences),
             preference: { mode: "inherit" } as ModelPreference,
           },
         ]
@@ -108,6 +179,8 @@ export function ModelSelector({
           {
             key: "test",
             name: "Test stream",
+            subtitle: "Development fallback",
+            kind: "test" as const,
             preference: { mode: "test" } as ModelPreference,
           },
         ]
@@ -118,6 +191,7 @@ export function ModelSelector({
     key: `configured:${model.id}`,
     name: model.displayName,
     subtitle: model.providerId,
+    kind: "api",
     preference: { mode: "configured", modelId: model.id },
   }));
   // A stored pick whose model is gone still gets a row — the picker stops
@@ -129,6 +203,8 @@ export function ModelSelector({
     semantixRows.push({
       key: `configured:${value.modelId}`,
       name: "Unavailable model",
+      subtitle: "Configured API",
+      kind: "api",
       preference: value,
     });
   }
@@ -137,6 +213,7 @@ export function ModelSelector({
     key: `claude_code:${model.id}`,
     name: model.label,
     subtitle: model.description,
+    kind: "claude",
     preference: { mode: "claude_code", modelId: model.id },
   }));
   if (
@@ -146,6 +223,8 @@ export function ModelSelector({
     claudeRows.push({
       key: `claude_code:${value.modelId}`,
       name: value.modelId,
+      subtitle: "Claude Code",
+      kind: "claude",
       preference: value,
     });
   }
@@ -157,6 +236,7 @@ export function ModelSelector({
   const valueKey = modelPreferenceValue(value);
   const listValue = listItems.find((row) => row.key === valueKey) ?? null;
   const label = triggerLabel(value, configuredModels, userPreferences);
+  const selectedKind = modelKind(value, userPreferences);
 
   return (
     <Dropdown
@@ -166,76 +246,81 @@ export function ModelSelector({
       getItemKey={(row) => row.key}
       renderItem={(row) => (
         <div className={styles.modelItem}>
-          <span className={styles.modelName}>{row.name}</span>
-          {row.subtitle && (
-            <span className={styles.modelProvider}>{row.subtitle}</span>
-          )}
+          <ModelMark kind={row.kind} />
+          <span className={styles.modelCopy}>
+            <span className={styles.modelName}>{row.name}</span>
+            {row.subtitle && (
+              <span className={styles.modelProvider}>{row.subtitle}</span>
+            )}
+          </span>
         </div>
       )}
       renderTrigger={() => (
-        <>
-          <span className={styles.selectedName}>{label}</span>
-          <svg
-            className={styles.chevron}
-            viewBox="0 0 24 24"
-            width={11}
-            height={11}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-        </>
+        <span className={styles.selectedModel}>
+          <ModelMark kind={selectedKind} className={styles.selectedMark} />
+          <span className={styles.selectedCopy}>
+            <span className={styles.selectedName}>{label}</span>
+            <span className={styles.selectedProvider}>
+              {triggerDetail(value, configuredModels)}
+            </span>
+          </span>
+        </span>
       )}
       placeholder="Select model"
       disabled={disabled}
-      className={styles.dropdown}
+      id={id}
+      ariaLabel={ariaLabel}
+      menuLabel="Available response models"
+      className={`${styles.dropdown} ${className}`}
       triggerClassName={styles.formTrigger}
       menuClassName={styles.menu}
-      direction="down"
+      direction={direction}
       searchable
       searchPlaceholder="Search models..."
+      emptyMessage={
+        activeFilter === "claude_code"
+          ? "No Claude Code models available"
+          : "No API models configured yet"
+      }
       getSearchText={(row) => `${row.name} ${row.subtitle ?? ""}`}
       menuHeader={
-        <div className={styles.brandRow}>
-          <button
-            type="button"
-            className={`${styles.brandBtn} ${activeFilter === "semantix" ? styles.brandBtnActive : ""}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              setFilterOverride("semantix");
-            }}
-            title="Your models"
-            aria-pressed={activeFilter === "semantix"}
+        <div className={styles.menuHeader}>
+          <div className={styles.menuHeading}>
+            <span>Response model</span>
+            <strong>Choose a model</strong>
+          </div>
+          <div
+            className={styles.brandRow}
+            role="group"
+            aria-label="Model sources"
           >
-            <img
-              className={`${styles.brandIcon} ${styles.brandIconSemantix}`}
-              src="/semantix-icon.svg"
-              alt="Semantix"
-              draggable={false}
-            />
-          </button>
-          <button
-            type="button"
-            className={`${styles.brandBtn} ${activeFilter === "claude_code" ? styles.brandBtnActive : ""}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              setFilterOverride("claude_code");
-            }}
-            title="Claude Code"
-            aria-pressed={activeFilter === "claude_code"}
-          >
-            <img
-              className={`${styles.brandIcon} ${styles.brandIconClaude}`}
-              src="/ai-providers-icons/claude-code.svg"
-              alt="Claude Code"
-              draggable={false}
-            />
-          </button>
+            <button
+              type="button"
+              className={`${styles.brandBtn} ${activeFilter === "semantix" ? styles.brandBtnActive : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                setFilterOverride("semantix");
+              }}
+              aria-pressed={activeFilter === "semantix"}
+            >
+              <ModelMark kind="api" className={styles.brandMark} />
+              <span>API models</span>
+              <small>{configuredModels.length}</small>
+            </button>
+            <button
+              type="button"
+              className={`${styles.brandBtn} ${activeFilter === "claude_code" ? styles.brandBtnActive : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                setFilterOverride("claude_code");
+              }}
+              aria-pressed={activeFilter === "claude_code"}
+            >
+              <ModelMark kind="claude" className={styles.brandMark} />
+              <span>Claude Code</span>
+              <small>{CLAUDE_MODELS.length}</small>
+            </button>
+          </div>
         </div>
       }
     />

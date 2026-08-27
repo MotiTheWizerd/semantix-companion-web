@@ -1,7 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 
+import { ModelSelector } from "../models/ModelSelector";
 import { useCompanionStore } from "../workspace/companionStore";
-import { ModelPreferenceSelect } from "./ModelPreferenceSelect";
 
 export function UserPreferenceStore() {
   const { configuredModels, userPreferences, preferenceError, setUserDefaultModel } =
@@ -23,17 +23,19 @@ export function UserPreferenceStore() {
           Companions inherit this model until one is given a model of its own.
         </p>
       </div>
-      <label className="preference-store__field">
+      <div className="preference-store__field">
         <span>Default response model</span>
-        <ModelPreferenceSelect
+        <ModelSelector
           value={userPreferences.defaultModel}
           configuredModels={configuredModels}
+          userPreferences={userPreferences}
+          ariaLabel="Default response model"
           onChange={(preference) => {
             if (preference.mode !== "inherit") void setUserDefaultModel(preference);
           }}
         />
         {preferenceError ? <small>{preferenceError}</small> : null}
-      </label>
+      </div>
     </section>
   );
 }

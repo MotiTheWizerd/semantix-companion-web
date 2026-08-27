@@ -1,10 +1,10 @@
-// The companion's file tools — five hands on ONE folder. The workspace root
-// arrives already canonical (companions::normalise_workspace stores it that
-// way, chat re-canonicalises at submission), and every call re-proves
-// containment before touching the disk: paths are relative-only, ".." never
-// passes, and symlinks are resolved and checked so a link inside the folder
-// cannot smuggle an operation out of it. No workspace = these tools are never
-// declared; there is no fallback directory, ever.
+// The companion's file tools — five hands on ONE explicitly selected named
+// folder per call. Every allowed root arrives canonical (the companion service
+// stores it that way, chat re-canonicalises at submission), and every call
+// re-proves containment before touching the disk: paths are relative-only,
+// ".." never passes, and symlinks are resolved and checked so a link inside a
+// folder cannot smuggle an operation out of it. No workspace grants = these
+// tools are never declared; there is no fallback directory, ever.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};

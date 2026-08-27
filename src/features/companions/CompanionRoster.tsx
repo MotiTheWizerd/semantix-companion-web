@@ -1,6 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 
 import { ConfirmDeleteButton } from "../../components/ConfirmDeleteButton";
 import { EditButton } from "../../components/EditButton";
@@ -19,6 +18,11 @@ import {
   updateCompanion,
 } from "./companionService";
 import { companionLabel, type Companion } from "./types";
+import {
+  WorkspaceFolderEditor,
+  workspaceDraftError,
+  type WorkspaceFolderDraft,
+} from "./WorkspaceFolderEditor";
 
 const NAME_MAX_LENGTH = 80;
 
@@ -41,10 +45,12 @@ function companionInitial(companion: Companion): string {
   return companion.name?.trim().charAt(0).toUpperCase() || "◦";
 }
 
-/** The folder's own name — the full path lives in the edit form. */
-function folderBasename(path: string): string {
-  const parts = path.split(/[/\\]/).filter(Boolean);
-  return parts[parts.length - 1] ?? path;
+function workspaceSummary(companion: Companion): string {
+  if (companion.workspaces.length === 0) return "Private memory";
+  const labels = companion.workspaces.map((workspace) => workspace.label);
+  const visible = labels.slice(0, 2).join(" · ");
+  const remaining = labels.length - 2;
+  return `Private memory · 📁 ${visible}${remaining > 0 ? ` · +${remaining}` : ""}`;
 }
 
 /** The voice named for the row, resolved the way a send would resolve it. */
@@ -83,10 +89,11 @@ export function CompanionRoster() {
   const [modelPreference, setModelPreference] = useState<ModelPreference>(
     DEFAULT_MODEL_PREFERENCE,
   );
-  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null);
+  const [workspaces, setWorkspaces] = useState<WorkspaceFolderDraft[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const isEditing = editingId !== null;
+  const workspaceValidationError = workspaceDraftError(workspaces);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,7 +133,7 @@ export function CompanionRoster() {
   const closeForm = () => {
     setName("");
     setModelPreference(DEFAULT_MODEL_PREFERENCE);
-    setWorkspaceDir(null);
+    setWorkspaces([]);
     setError(null);
     setEditingId(null);
     setIsFormOpen(false);
@@ -135,7 +142,7 @@ export function CompanionRoster() {
   const openCreateForm = () => {
     setName("");
     setModelPreference(DEFAULT_MODEL_PREFERENCE);
-    setWorkspaceDir(null);
+    setWorkspaces([]);
     setError(null);
     setEditingId(null);
     setPendingDeleteId(null);
@@ -145,24 +152,18 @@ export function CompanionRoster() {
   const openEditForm = (companion: Companion) => {
     setName(companion.name ?? "");
     setModelPreference(companion.modelPreference);
-    setWorkspaceDir(companion.workspaceDir);
+    setWorkspaces(
+      companion.workspaces.map((workspace) => ({
+        key: workspace.id,
+        id: workspace.id,
+        label: workspace.label,
+        directory: workspace.directory,
+      })),
+    );
     setError(null);
     setEditingId(companion.id);
     setPendingDeleteId(null);
     setIsFormOpen(true);
-  };
-
-  const pickWorkspaceFolder = async () => {
-    try {
-      const picked = await openFolderDialog({
-        directory: true,
-        title: "Choose a workspace folder",
-        defaultPath: workspaceDir ?? undefined,
-      });
-      if (typeof picked === "string" && picked) setWorkspaceDir(picked);
-    } catch (pickError) {
-      setError(errorMessage(pickError));
-    }
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -170,6 +171,16 @@ export function CompanionRoster() {
 
     // A blank name is legal — Rust normalises it back to unnamed.
     const submitted = name.trim() ? name.trim() : null;
+    const workspaceError = workspaceDraftError(workspaces);
+    if (workspaceError) {
+      setError(workspaceError);
+      return;
+    }
+    const submittedWorkspaces = workspaces.map(({ id, label, directory }) => ({
+      id,
+      label: label.trim(),
+      directory,
+    }));
     setError(null);
     setIsSaving(true);
     try {
@@ -178,9 +189,13 @@ export function CompanionRoster() {
             companionId: editingId,
             name: submitted,
             modelPreference,
-            workspaceDir,
+            workspaces: submittedWorkspaces,
           })
-        : await createCompanion({ name: submitted, modelPreference, workspaceDir });
+        : await createCompanion({
+            name: submitted,
+            modelPreference,
+            workspaces: submittedWorkspaces,
+          });
       setCompanions((current) =>
         reconcileCompanionEvent(current, {
           kind: isEditing ? "updated" : "created",
@@ -279,41 +294,21 @@ export function CompanionRoster() {
                 configuredModels={configuredModels}
                 userPreferences={userPreferences}
                 allowInherit
+                ariaLabel="Companion model"
                 onChange={setModelPreference}
               />
             </div>
 
             <div className="credential-field credential-field--wide">
-              <span>
-                Workspace folder <small>Optional</small>
-              </span>
-              <div className="credential-field__workspace">
-                <button
-                  type="button"
-                  className="credential-button credential-button--quiet"
-                  onClick={() => void pickWorkspaceFolder()}
-                >
-                  {workspaceDir ? "Change folder…" : "Choose folder…"}
-                </button>
-                {workspaceDir ? (
-                  <>
-                    <code title={workspaceDir}>{workspaceDir}</code>
-                    <button
-                      type="button"
-                      className="credential-button credential-button--quiet"
-                      aria-label="Remove the workspace folder"
-                      onClick={() => setWorkspaceDir(null)}
-                    >
-                      Remove
-                    </button>
-                  </>
-                ) : (
-                  <small>
-                    With a workspace, this companion can list, read, write, edit
-                    and delete files — inside that one folder only.
-                  </small>
-                )}
-              </div>
+              <WorkspaceFolderEditor
+                value={workspaces}
+                disabled={isSaving}
+                onChange={(next) => {
+                  setWorkspaces(next);
+                  setError(null);
+                }}
+                onError={(pickerError) => setError(errorMessage(pickerError))}
+              />
             </div>
           </div>
 
@@ -334,7 +329,7 @@ export function CompanionRoster() {
             <button
               type="submit"
               className="credential-button credential-button--primary"
-              disabled={isSaving}
+              disabled={isSaving || workspaceValidationError !== null}
             >
               {isSaving ? "Saving…" : isEditing ? "Save changes" : "Add companion"}
             </button>
@@ -365,10 +360,8 @@ export function CompanionRoster() {
                     {companion.isBuiltIn ? " · Built-in" : ""}
                   </span>
                 </div>
-                <code>
-                  {companion.workspaceDir
-                    ? `Private memory · 📁 ${folderBasename(companion.workspaceDir)}`
-                    : "Private memory"}
+                <code title={companion.workspaces.map(({ label }) => label).join(", ")}>
+                  {workspaceSummary(companion)}
                 </code>
                 <div className="credential-list__actions">
                   <EditButton

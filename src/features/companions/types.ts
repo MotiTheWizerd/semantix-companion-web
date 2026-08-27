@@ -8,6 +8,21 @@
 
 import type { ModelPreference } from "../preferences/types";
 
+export interface CompanionWorkspace {
+  id: string;
+  /** Human-facing capability name; this is what the model selects. */
+  label: string;
+  /** Canonical absolute path, visible in Settings but never sent to the model. */
+  directory: string;
+}
+
+export interface CompanionWorkspaceInput {
+  /** Existing grants retain their identity; new grants omit it. */
+  id?: string;
+  label: string;
+  directory: string;
+}
+
 export interface Companion {
   id: string;
   /** `null` = unnamed. A blank name is a real, supported state, not an error. */
@@ -21,22 +36,21 @@ export interface Companion {
   isBuiltIn: boolean;
   createdAt: number;
   updatedAt: number;
-  /** The ONE folder its file tools may touch. `null` — the default — means
-   *  no workspace, and the file tools are never offered to the model. */
-  workspaceDir: string | null;
+  /** Named folders its file tools may touch. Empty means no file tools. */
+  workspaces: CompanionWorkspace[];
 }
 
 export interface CreateCompanionInput {
   name: string | null;
   modelPreference: ModelPreference;
-  workspaceDir: string | null;
+  workspaces: CompanionWorkspaceInput[];
 }
 
 export interface UpdateCompanionInput {
   companionId: string;
   name: string | null;
   modelPreference: ModelPreference;
-  workspaceDir: string | null;
+  workspaces: CompanionWorkspaceInput[];
 }
 
 export type CompanionChangedEvent =

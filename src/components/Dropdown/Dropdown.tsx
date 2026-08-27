@@ -3,11 +3,12 @@
 // not a dependency here, so the chevron is a local inline SVG.
 
 import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
   useState,
   useRef,
-  useEffect,
-  useLayoutEffect,
-  useCallback,
 } from "react";
 import { createPortal } from "react-dom";
 import { useDismiss } from "../../lib/useDismiss";
@@ -43,12 +44,30 @@ function Chevron({ className }: { className?: string }) {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="8.75" cy="8.75" r="4.75" />
+      <path d="m12.25 12.25 3.25 3.25" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="m3.25 8.25 3 3 6.5-6.5" />
+    </svg>
+  );
+}
+
 interface MenuCoords {
   left: number;
   /** Exactly one of top/bottom is a number; the other is 'auto'. */
   top: number | "auto";
   bottom: number | "auto";
   maxHeight: number;
+  width: number;
   up: boolean;
 }
 
@@ -60,11 +79,15 @@ export interface DropdownProps<T> {
   renderTrigger?: (isOpen: boolean, selectedItem: T | null) => React.ReactNode;
   placeholder?: string;
   disabled?: boolean;
+  id?: string;
+  ariaLabel?: string;
+  menuLabel?: string;
   className?: string;
   getItemKey: (item: T) => string;
   direction?: "up" | "down";
   searchable?: boolean;
   searchPlaceholder?: string;
+  emptyMessage?: string;
   getSearchText?: (item: T) => string;
   /** Optional content pinned to the top of the open menu, above the search
    *  input (e.g. a brand/legend row). Renders as-given — the caller owns its
@@ -88,11 +111,15 @@ export function Dropdown<T>({
   renderTrigger,
   placeholder = "Select...",
   disabled = false,
+  id,
+  ariaLabel,
+  menuLabel = "Options",
   className = "",
   getItemKey,
   direction = "down",
   searchable = false,
   searchPlaceholder = "Search...",
+  emptyMessage,
   getSearchText,
   menuHeader,
   menuSubheader,
@@ -103,6 +130,9 @@ export function Dropdown<T>({
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const [coords, setCoords] = useState<MenuCoords | null>(null);
+  const generatedId = useId();
+  const popupId = `${generatedId}-popup`;
+  const listboxId = `${generatedId}-listbox`;
   const dropdownRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -135,13 +165,20 @@ export function Dropdown<T>({
     (item: T) => {
       onChange(item);
       setIsOpen(false);
+      requestAnimationFrame(() => triggerRef.current?.focus());
     },
     [onChange],
   );
 
   const toggleDropdown = () => {
-    if (!disabled) setIsOpen(!isOpen);
+    if (!disabled) setIsOpen((open) => !open);
   };
+
+  useEffect(() => {
+    if (isOpen) return;
+    setSearchQuery("");
+    setHighlightedIndex(-1);
+  }, [isOpen]);
 
   // Close on click outside / Escape. The menu is PORTALED to <body>, so it
   // lives outside dropdownRef — a plain contains() check would read a click on
@@ -163,10 +200,14 @@ export function Dropdown<T>({
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
 
+    const measuredWidth = menuRef.current?.offsetWidth ?? rect.width;
+    const width = Math.min(
+      Math.max(rect.width, measuredWidth),
+      window.innerWidth - VIEWPORT_PAD * 2,
+    );
     let left = rect.left;
-    const menuWidth = menuRef.current?.offsetWidth ?? 0;
-    if (menuWidth && left + menuWidth > window.innerWidth - VIEWPORT_PAD) {
-      left = window.innerWidth - menuWidth - VIEWPORT_PAD;
+    if (left + width > window.innerWidth - VIEWPORT_PAD) {
+      left = window.innerWidth - width - VIEWPORT_PAD;
     }
     if (left < VIEWPORT_PAD) left = VIEWPORT_PAD;
 
@@ -181,7 +222,8 @@ export function Dropdown<T>({
       left,
       top: up ? "auto" : rect.bottom + GAP,
       bottom: up ? window.innerHeight - rect.top + GAP : "auto",
-      maxHeight: Math.max(MENU_MIN_H, up ? spaceAbove : spaceBelow),
+      maxHeight: Math.max(0, up ? spaceAbove : spaceBelow),
+      width,
       up,
     });
   }, [direction]);
@@ -278,23 +320,33 @@ export function Dropdown<T>({
     >
       <button
         ref={triggerRef}
+        id={id}
         type="button"
         className={`${styles.trigger} ${isOpen ? styles.open : ""} ${triggerClassName}`}
         onClick={toggleDropdown}
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
+        aria-controls={isOpen ? listboxId : undefined}
+        aria-label={ariaLabel}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          if (!disabled) setIsOpen(true);
+        }}
       >
-        {renderTrigger ? (
-          renderTrigger(isOpen, value)
-        ) : (
-          <>
+        <span className={styles.triggerContent}>
+          {renderTrigger ? (
+            renderTrigger(isOpen, value)
+          ) : (
             <span className={styles.triggerText}>
               {value ? renderItem(value) : placeholder}
             </span>
-            <Chevron className={styles.chevron} />
-          </>
-        )}
+          )}
+        </span>
+        <span className={styles.chevronWrap} aria-hidden="true">
+          <Chevron className={styles.chevron} />
+        </span>
       </button>
 
       {isOpen &&
@@ -303,15 +355,17 @@ export function Dropdown<T>({
           // overflow-hidden ancestor can clip the menu.
           <div
             ref={menuRef}
+            id={popupId}
             data-dropdown-menu
             className={`${styles.menu} ${coords?.up ? styles.menuUp : styles.menuDown} ${menuClassName}`}
-            role="listbox"
             style={{
               position: "fixed",
               left: coords?.left ?? 0,
               top: coords?.top ?? 0,
               bottom: coords?.bottom ?? "auto",
               maxHeight: coords?.maxHeight,
+              width: coords?.width,
+              minWidth: coords ? 0 : undefined,
               // Pre-measurement frame: mounted so it can be measured,
               // invisible so it is never seen at the wrong place.
               visibility: coords ? "visible" : "hidden",
@@ -320,6 +374,9 @@ export function Dropdown<T>({
             {menuHeader}
             {searchable && (
               <div className={styles.searchContainer}>
+                <span className={styles.searchIcon}>
+                  <SearchIcon />
+                </span>
                 <input
                   ref={searchInputRef}
                   type="text"
@@ -327,15 +384,24 @@ export function Dropdown<T>({
                   onChange={(event) => setSearchQuery(event.target.value)}
                   placeholder={searchPlaceholder}
                   className={styles.searchInput}
+                  aria-label={searchPlaceholder}
                   onClick={(event) => event.stopPropagation()}
                 />
               </div>
             )}
             {menuSubheader}
-            <div className={styles.itemsContainer} ref={itemsContainerRef}>
+            <div
+              id={listboxId}
+              className={styles.itemsContainer}
+              ref={itemsContainerRef}
+              role="listbox"
+              aria-label={menuLabel}
+            >
               {filteredItems.length === 0 ? (
                 <div className={styles.empty}>
-                  {searchQuery ? "No matches found" : "No items available"}
+                  {searchQuery
+                    ? "No matches found"
+                    : (emptyMessage ?? "No items available")}
                 </div>
               ) : (
                 filteredItems.map((item, index) => {
@@ -354,7 +420,11 @@ export function Dropdown<T>({
                       aria-selected={isSelected}
                     >
                       {renderItem(item)}
-                      {isSelected && <span className={styles.checkmark}>✓</span>}
+                      {isSelected && (
+                        <span className={styles.checkmark} aria-hidden="true">
+                          <CheckIcon />
+                        </span>
+                      )}
                     </button>
                   );
                 })

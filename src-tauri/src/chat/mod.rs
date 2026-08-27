@@ -24,7 +24,7 @@ use crate::{
     models::ModelResolver,
     preferences::{PreferenceRepository, ResolvedVoice},
     streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
-    tools::{self, ToolContext},
+    tools::{self, ToolContext, ToolWorkspace},
 };
 
 /// Ceiling on execute-and-continue rounds per submission — a runaway model
@@ -471,14 +471,21 @@ impl ChatService {
                 .ok()
                 .map(|key| key.trim().to_owned())
                 .filter(|key| !key.is_empty()),
-            // Re-canonicalised at every submission: if the folder vanished or
-            // moved since it was picked, the file tools silently stand down
-            // rather than run against a stale path.
-            workspace_dir: companion
-                .workspace_dir
-                .as_deref()
-                .and_then(|path| std::fs::canonicalize(path).ok())
-                .filter(|path| path.is_dir()),
+            // Re-canonicalised at every submission: grants whose folders have
+            // vanished or moved silently stand down rather than run against a
+            // stale path. The remaining labels are the only roots the model
+            // can select during this turn.
+            workspaces: companion
+                .workspaces
+                .iter()
+                .filter_map(|workspace| {
+                    let root = std::fs::canonicalize(&workspace.directory).ok()?;
+                    root.is_dir().then(|| ToolWorkspace {
+                        label: workspace.label.clone(),
+                        root,
+                    })
+                })
+                .collect(),
             // From the RESOLVED companion, never from the model's arguments —
             // this is the return address on everything it sends, and a sender
             // it could choose would not be a sender at all.
@@ -1223,7 +1230,7 @@ mod tests {
             is_built_in: false,
             created_at: 1,
             updated_at: 1,
-            workspace_dir: None,
+            workspaces: Vec::new(),
             is_origin: false,
             origin_agent_id: None,
         };
@@ -1259,7 +1266,7 @@ mod tests {
             is_built_in: false,
             created_at: 1,
             updated_at: 1,
-            workspace_dir: None,
+            workspaces: Vec::new(),
             is_origin: true,
             origin_agent_id: None,
         };
