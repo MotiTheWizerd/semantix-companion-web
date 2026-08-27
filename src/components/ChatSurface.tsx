@@ -130,10 +130,11 @@ export function ChatSurface({
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
   const hasMessages = messages.length > 0;
-  const { threads: callThreads, error: callsError } = useConversationCalls(
-    activeConversationId,
-    isSending,
-  );
+  const {
+    threads: callThreads,
+    streamingMessages: streamingCallMessages,
+    error: callsError,
+  } = useConversationCalls(activeConversationId, isSending);
   const callPlacements = useMemo(
     () => placeCalls(messages, callThreads),
     [messages, callThreads],
@@ -216,7 +217,13 @@ export function ChatSurface({
           aria-live="polite"
         >
           {callPlacements.beforeFirstMessage.map((thread) => (
-            <CallTranscriptItem key={thread.call.id} thread={thread} />
+            <CallTranscriptItem
+              key={thread.call.id}
+              thread={thread}
+              streamingMessages={streamingCallMessages.filter(
+                (message) => message.callId === thread.call.id,
+              )}
+            />
           ))}
           {messages.map((message) => {
             const recall = recallByMessageId[message.id];
@@ -267,7 +274,13 @@ export function ChatSurface({
                   </article>
                 ) : null}
                 {callsAfterMessage.map((thread) => (
-                  <CallTranscriptItem key={thread.call.id} thread={thread} />
+                  <CallTranscriptItem
+                    key={thread.call.id}
+                    thread={thread}
+                    streamingMessages={streamingCallMessages.filter(
+                      (streaming) => streaming.callId === thread.call.id,
+                    )}
+                  />
                 ))}
               </Fragment>
             );

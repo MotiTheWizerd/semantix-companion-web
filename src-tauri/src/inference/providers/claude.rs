@@ -4,8 +4,8 @@
 //! the companion's own memory system stays the only one in the room.
 //!
 //! Protocol: one JSON object per line, requests down the child's stdin,
-//! events back up its stdout (`delta` / `toolCall` / `usage` / `done` /
-//! `error`), matched to callers by request id.
+//! events back up its stdout (`delta` / `toolCallDelta` / `toolCall` /
+//! `usage` / `done` / `error`), matched to callers by request id.
 //!
 //! Finding the sidecar, in order: the `COMPANION_SIDECAR_DIR` env var, then
 //! the bundled resource dir registered at startup by `lib.rs`, then — dev
@@ -33,6 +33,7 @@ use crate::{
         capabilities::ProviderCapabilities,
         provider::{InferenceProvider, ProviderCredential, ToolRunner},
         ContentPart, FinishReason, InferenceDelta, InferenceRequest, Role, TokenUsage, ToolCall,
+        ToolCallDelta,
     },
     streaming::{DeltaSink, StreamError},
 };
@@ -113,6 +114,14 @@ struct SidecarToolResult<'a> {
 enum SidecarEvent {
     Delta {
         text: String,
+    },
+    /// Claude's native partial-input event, normalized by the sidecar before
+    /// it crosses into the provider-independent inference stream.
+    #[serde(rename_all = "camelCase")]
+    ToolCallDelta {
+        call_id: String,
+        name: String,
+        arguments_delta: String,
     },
     /// Claude asked for one of OUR tools; Rust runs it and answers.
     #[serde(rename_all = "camelCase")]
@@ -424,6 +433,17 @@ impl InferenceProvider for ClaudeProvider {
                     SidecarEvent::Delta { text } => {
                         sink.emit_delta(InferenceDelta::Text { text })?;
                     }
+                    SidecarEvent::ToolCallDelta {
+                        call_id,
+                        name,
+                        arguments_delta,
+                    } => {
+                        sink.emit_delta(InferenceDelta::ToolCallDelta(ToolCallDelta {
+                            id: call_id,
+                            name,
+                            arguments_delta,
+                        }))?;
+                    }
                     // Claude runs the tool inside its own turn, so we execute
                     // now and answer mid-stream rather than surfacing the call
                     // for the chat loop's between-rounds pass.
@@ -489,7 +509,7 @@ impl InferenceProvider for ClaudeProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::build_query;
+    use super::{build_query, SidecarEvent, SidecarLine};
     use crate::inference::{InferenceMessage, InferenceRequest, ModelTarget, Role};
 
     fn request(messages: Vec<InferenceMessage>) -> InferenceRequest {
@@ -583,5 +603,26 @@ mod tests {
             "system only",
         )]))
         .is_err());
+    }
+
+    #[test]
+    fn sidecar_tool_fragments_decode_into_the_camel_case_wire_contract() {
+        let line: SidecarLine = serde_json::from_str(
+            r#"{"id":"req-1","event":"toolCallDelta","callId":"tool-7","name":"send_in_call","argumentsDelta":"{\"body\":\"Hi"}"#,
+        )
+        .expect("the sidecar fragment should decode");
+        assert_eq!(line.id, "req-1");
+        match line.event {
+            SidecarEvent::ToolCallDelta {
+                call_id,
+                name,
+                arguments_delta,
+            } => {
+                assert_eq!(call_id, "tool-7");
+                assert_eq!(name, "send_in_call");
+                assert_eq!(arguments_delta, r#"{"body":"Hi"#);
+            }
+            event => panic!("expected a tool fragment, got {event:?}"),
+        }
     }
 }

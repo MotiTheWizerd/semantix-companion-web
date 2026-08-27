@@ -1,4 +1,5 @@
 pub(crate) mod repository;
+mod tool_streaming;
 
 use std::{
     path::{Path, PathBuf},
@@ -9,6 +10,8 @@ use repository::{ChatRepository, CommitUserMessage};
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, AppHandle, Emitter, State};
 use uuid::Uuid;
+
+use tool_streaming::{completed_call_speech, CallSpeechProjector};
 
 use crate::{
     app_error::AppError,
@@ -169,6 +172,27 @@ pub(crate) enum ChatEvent {
         status: &'static str,
         detail: Option<String>,
     },
+    /// A transient, provider-independent piece of one companion's call line.
+    /// It is never persisted; the completed tool execution remains the truth.
+    CallSpeechDelta {
+        #[serde(rename = "streamId")]
+        stream_id: String,
+        #[serde(rename = "callId")]
+        call_id: String,
+        #[serde(rename = "fromAgentId")]
+        from_agent_id: String,
+        delta: String,
+    },
+    /// The authoritative tool execution finished. The UI re-reads SQLite and
+    /// replaces its transient line only after a successful write.
+    CallSpeechFinished {
+        #[serde(rename = "callId")]
+        call_id: String,
+        #[serde(rename = "fromAgentId")]
+        from_agent_id: String,
+        body: String,
+        succeeded: bool,
+    },
 }
 
 /// Where a turn's events go.
@@ -187,6 +211,34 @@ pub(crate) trait ChatEventSink: Send + Sync {
 impl ChatEventSink for Channel<ChatEvent> {
     fn send(&self, event: ChatEvent) {
         let _ = Channel::send(self, event);
+    }
+}
+
+/// The human lane still uses its command channel for ordinary chat events,
+/// while call-speech events also need the app-wide bus consumed by the call
+/// card. Keeping that fan-out here avoids provider or feature special cases
+/// in the turn engine.
+struct WindowEventSink {
+    channel: Channel<ChatEvent>,
+    app: AppHandle,
+}
+
+impl WindowEventSink {
+    fn new(channel: Channel<ChatEvent>, app: AppHandle) -> Self {
+        Self { channel, app }
+    }
+}
+
+impl ChatEventSink for WindowEventSink {
+    fn send(&self, event: ChatEvent) {
+        if matches!(
+            event,
+            ChatEvent::CallSpeechDelta { .. } | ChatEvent::CallSpeechFinished { .. }
+        ) {
+            let _ = self.app.emit(CHAT_EVENT, event);
+        } else {
+            let _ = self.channel.send(event);
+        }
     }
 }
 
@@ -617,6 +669,17 @@ impl ToolRunner for ChatToolRunner {
             status: if result.is_ok() { "ok" } else { "error" },
             detail: result.as_ref().err().cloned(),
         });
+        if let (Some((call_id, body)), Some(from_agent_id)) = (
+            completed_call_speech(call),
+            self.context.companion_id.clone(),
+        ) {
+            self.on_event.send(ChatEvent::CallSpeechFinished {
+                call_id,
+                from_agent_id,
+                body,
+                succeeded: result.is_ok(),
+            });
+        }
         result
     }
 }
@@ -630,10 +693,16 @@ struct ChatStreamAdapter {
     /// Tool calls the model requested in the round currently streaming;
     /// drained by the chat loop between rounds.
     tool_calls: Mutex<Vec<ToolCall>>,
+    from_agent_id: Option<String>,
+    call_speech: Mutex<CallSpeechProjector>,
 }
 
 impl ChatStreamAdapter {
-    fn new(assistant: Message, on_event: Arc<dyn ChatEventSink>) -> Self {
+    fn new(
+        assistant: Message,
+        from_agent_id: Option<String>,
+        on_event: Arc<dyn ChatEventSink>,
+    ) -> Self {
         Self {
             conversation_id: assistant.conversation_id.clone(),
             message_id: assistant.id.clone(),
@@ -641,6 +710,8 @@ impl ChatStreamAdapter {
             on_event,
             content: Mutex::new(String::new()),
             tool_calls: Mutex::new(Vec::new()),
+            from_agent_id,
+            call_speech: Mutex::new(CallSpeechProjector::default()),
         }
     }
 
@@ -711,6 +782,21 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
                         .map_err(|_| StreamError::new("the tool call buffer was poisoned"))?
                         .push(call);
                 }
+                InferenceDelta::ToolCallDelta(fragment) => {
+                    let chunk = self
+                        .call_speech
+                        .lock()
+                        .map_err(|_| StreamError::new("the call speech projector was poisoned"))?
+                        .absorb(&fragment);
+                    if let (Some(chunk), Some(from_agent_id)) = (chunk, &self.from_agent_id) {
+                        self.on_event.send(ChatEvent::CallSpeechDelta {
+                            stream_id: chunk.stream_id,
+                            call_id: chunk.call_id,
+                            from_agent_id: from_agent_id.clone(),
+                            delta: chunk.delta,
+                        });
+                    }
+                }
                 InferenceDelta::Reasoning { .. }
                 | InferenceDelta::Usage(_)
                 | InferenceDelta::Finish(_) => {}
@@ -759,6 +845,7 @@ pub(crate) async fn update_conversation_companion(
 #[tauri::command]
 pub(crate) async fn submit_message(
     state: State<'_, ChatState>,
+    app: AppHandle,
     input: SubmitMessageInput,
     on_event: Channel<ChatEvent>,
 ) -> Result<AcceptedMessage, String> {
@@ -768,7 +855,12 @@ pub(crate) async fn submit_message(
         .await
         .map_err(|error| format!("Message task failed: {error}"))?
         .map_err(String::from)?;
-    drive_turn(service, prepared, Arc::new(on_event)).await
+    drive_turn(
+        service,
+        prepared,
+        Arc::new(WindowEventSink::new(on_event, app)),
+    )
+    .await
 }
 
 /// One turn, start to finish, for whoever asked for it.
@@ -818,7 +910,11 @@ pub(crate) async fn drive_turn(
         }
     };
 
-    let adapter = ChatStreamAdapter::new(assistant.clone(), Arc::clone(&on_event));
+    let adapter = ChatStreamAdapter::new(
+        assistant.clone(),
+        tool_context.companion_id.clone(),
+        Arc::clone(&on_event),
+    );
 
     // One executor, both lanes: the chat loop calls it between rounds, and a
     // provider that owns its own agentic loop (Claude Code) calls it
@@ -1204,6 +1300,19 @@ mod tests {
         assert_eq!(event["sequence"], 7);
         assert!(event.get("conversation_id").is_none());
         assert!(event.get("message_id").is_none());
+
+        let call_event = serde_json::to_value(ChatEvent::CallSpeechDelta {
+            stream_id: "provider-tool-1".to_owned(),
+            call_id: "raven-call-1".to_owned(),
+            from_agent_id: "agent-1".to_owned(),
+            delta: "hello".to_owned(),
+        })
+        .expect("call speech event should serialize");
+        assert_eq!(call_event["kind"], "callSpeechDelta");
+        assert_eq!(call_event["streamId"], "provider-tool-1");
+        assert_eq!(call_event["callId"], "raven-call-1");
+        assert_eq!(call_event["fromAgentId"], "agent-1");
+        assert!(call_event.get("stream_id").is_none());
     }
 
     #[test]

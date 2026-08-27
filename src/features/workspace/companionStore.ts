@@ -604,6 +604,9 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
 
     let wasAccepted = false;
     const handleChatEvent = (event: ChatEvent) => {
+      // Call cards own their transient speech through the app-wide event bus;
+      // keep this boundary explicit if another sink forwards those variants.
+      if (event.kind === "callSpeechDelta" || event.kind === "callSpeechFinished") return;
       if (event.kind === "accepted") wasAccepted = true;
       set((state) => {
         if (event.kind === "accepted") {
@@ -922,5 +925,3 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     }
   },
 }));
-
-

@@ -37,6 +37,20 @@ pub(crate) struct ToolCall {
     pub(crate) arguments: String,
 }
 
+/// One provider-normalized fragment of a tool call's JSON arguments.
+///
+/// Providers own wire assembly: by the time a fragment crosses this seam it
+/// has a stable call id and canonical tool name. A provider that cannot expose
+/// partial arguments simply omits these deltas and still emits the completed
+/// `ToolCall`, so streaming is progressive enhancement rather than a new
+/// requirement every future adapter must satisfy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ToolCallDelta {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) arguments_delta: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InferenceMessage {
     pub(crate) role: Role,
@@ -125,6 +139,9 @@ pub(crate) enum ContentPart {
 pub(crate) enum InferenceDelta {
     Text { text: String },
     Reasoning { text: String },
+    /// A provider-normalized fragment; downstream features may project it into
+    /// live UI, but tool execution still waits for the completed `ToolCall`.
+    ToolCallDelta(ToolCallDelta),
     /// A fully assembled tool call — providers accumulate the streamed
     /// fragments and emit one of these per call, before the Finish delta.
     ToolCall(ToolCall),

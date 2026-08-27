@@ -21,6 +21,7 @@
 //       userText, tools?, images? }
 //   → { id, type: "toolResult", callId, content?, error? }
 //   ← { id, event: "delta", text }
+//   ← { id, event: "toolCallDelta", callId, name, argumentsDelta }
 //   ← { id, event: "toolCall", callId, name, arguments }
 //   ← { id, event: "usage", inputTokens, outputTokens }
 //   ← { id, event: "done" }
@@ -247,6 +248,10 @@ async function handleQuery(request) {
   if (request.systemPrompt) options.systemPrompt = request.systemPrompt;
 
   let sawText = false;
+  // SDK content-block ids are stable for the life of a streamed tool call.
+  // Keep that provider-native bookkeeping here; Rust only sees the canonical
+  // call id, tool name and JSON-argument fragment.
+  const streamingTools = new Map();
   for await (const message of query({ prompt, options })) {
     if (message.type === "system" && message.subtype === "init") {
       sessions.set(request.conversationId, message.session_id);
@@ -254,6 +259,39 @@ async function handleQuery(request) {
     }
     if (message.type === "stream_event") {
       const event = message.event;
+      if (
+        event?.type === "content_block_start" &&
+        ["tool_use", "mcp_tool_use", "server_tool_use"].includes(event.content_block?.type) &&
+        event.content_block?.id &&
+        event.content_block?.name
+      ) {
+        streamingTools.set(event.index, {
+          callId: event.content_block.id,
+          name: event.content_block.name.replace(`mcp__${SERVER_NAME}__`, ""),
+        });
+        continue;
+      }
+      if (
+        event?.type === "content_block_delta" &&
+        event.delta?.type === "input_json_delta" &&
+        event.delta.partial_json
+      ) {
+        const streamingTool = streamingTools.get(event.index);
+        if (streamingTool) {
+          send({
+            id: request.id,
+            event: "toolCallDelta",
+            callId: streamingTool.callId,
+            name: streamingTool.name,
+            argumentsDelta: event.delta.partial_json,
+          });
+        }
+        continue;
+      }
+      if (event?.type === "content_block_stop") {
+        streamingTools.delete(event.index);
+        continue;
+      }
       if (
         event?.type === "content_block_delta" &&
         event.delta?.type === "text_delta" &&

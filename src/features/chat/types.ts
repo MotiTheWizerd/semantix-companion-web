@@ -89,6 +89,25 @@ export interface ToolCallEvent {
   detail: string | null;
 }
 
+/** Transient call speech rides the app event bus. It is deliberately part of
+ * the canonical chat event vocabulary even though the call feature, not the
+ * conversation store, owns its UI state. */
+export type CallSpeechEvent =
+  | {
+      kind: "callSpeechDelta";
+      streamId: string;
+      callId: string;
+      fromAgentId: string;
+      delta: string;
+    }
+  | {
+      kind: "callSpeechFinished";
+      callId: string;
+      fromAgentId: string;
+      body: string;
+      succeeded: boolean;
+    };
+
 export interface UpdateConversationCompanionInput {
   conversationId: string;
   companionId: string;
@@ -111,4 +130,5 @@ export type ChatEvent =
       messageId: string | null;
       message: string;
     }
-  | ToolCallEvent;
+  | ToolCallEvent
+  | CallSpeechEvent;

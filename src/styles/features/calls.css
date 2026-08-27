@@ -93,6 +93,26 @@
   overflow-wrap: anywhere;
 }
 
+.calls__body--streaming::after {
+  content: "\258d";
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--accent, currentColor);
+  animation: calls-caret 0.8s steps(1, end) infinite;
+}
+
+@keyframes calls-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .calls__body--streaming::after {
+    animation: none;
+  }
+}
+
 .calls__empty {
   margin: 0;
   opacity: 0.7;

@@ -8,6 +8,7 @@ use crate::{
         capabilities::ProviderCapabilities,
         provider::{InferenceProvider, ProviderCredential, ToolRunner},
         ContentPart, FinishReason, InferenceDelta, InferenceRequest, Role, TokenUsage, ToolCall,
+        ToolCallDelta,
     },
     streaming::{DeltaSink, StreamError},
 };
@@ -317,22 +318,35 @@ struct TogetherFunctionDelta {
 
 /// Accumulates streamed tool-call fragments; `flush` emits each completed
 /// call exactly once, ahead of the Finish delta the same chunk carries.
+struct AssembledToolCall {
+    call: ToolCall,
+    emitted_arguments: usize,
+}
+
 #[derive(Default)]
 struct ToolCallAssembler {
-    calls: Vec<ToolCall>,
+    calls: Vec<AssembledToolCall>,
     flushed: bool,
 }
 
 impl ToolCallAssembler {
-    fn absorb(&mut self, fragment: TogetherToolCallDelta) {
+    fn absorb(
+        &mut self,
+        fragment: TogetherToolCallDelta,
+        sink: &dyn DeltaSink<InferenceDelta>,
+    ) -> Result<(), StreamError> {
         while self.calls.len() <= fragment.index {
-            self.calls.push(ToolCall {
-                id: String::new(),
-                name: String::new(),
-                arguments: String::new(),
+            self.calls.push(AssembledToolCall {
+                call: ToolCall {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments: String::new(),
+                },
+                emitted_arguments: 0,
             });
         }
-        let call = &mut self.calls[fragment.index];
+        let assembled = &mut self.calls[fragment.index];
+        let call = &mut assembled.call;
         if let Some(id) = fragment.id.filter(|id| !id.is_empty()) {
             call.id = id;
         }
@@ -344,6 +358,22 @@ impl ToolCallAssembler {
                 call.arguments.push_str(&arguments);
             }
         }
+        // The provider boundary guarantees identity before a fragment becomes
+        // canonical. If arguments arrived unusually early, they stay buffered
+        // and are emitted once a later fragment supplies id + name.
+        if !call.id.is_empty()
+            && !call.name.is_empty()
+            && call.arguments.len() > assembled.emitted_arguments
+        {
+            let arguments_delta = call.arguments[assembled.emitted_arguments..].to_owned();
+            assembled.emitted_arguments = call.arguments.len();
+            sink.emit_delta(InferenceDelta::ToolCallDelta(ToolCallDelta {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments_delta,
+            }))?;
+        }
+        Ok(())
     }
 
     fn flush(&mut self, sink: &dyn DeltaSink<InferenceDelta>) -> Result<(), StreamError> {
@@ -351,11 +381,11 @@ impl ToolCallAssembler {
             return Ok(());
         }
         self.flushed = true;
-        for call in self.calls.drain(..) {
-            if call.name.is_empty() {
+        for assembled in self.calls.drain(..) {
+            if assembled.call.name.is_empty() {
                 continue;
             }
-            sink.emit_delta(InferenceDelta::ToolCall(call))?;
+            sink.emit_delta(InferenceDelta::ToolCall(assembled.call))?;
         }
         Ok(())
     }
@@ -390,7 +420,7 @@ fn emit_chunk(
             sink.emit_delta(InferenceDelta::Reasoning { text })?;
         }
         for fragment in choice.delta.tool_calls.into_iter().flatten() {
-            assembler.absorb(fragment);
+            assembler.absorb(fragment, sink)?;
         }
         if let Some(reason) = choice.finish_reason {
             // Assembled calls must land before Finish — the chat loop reads
@@ -636,6 +666,22 @@ mod tests {
         let events = collector.0.lock().expect("collector should lock");
         assert_eq!(
             events[0],
+            InferenceDelta::ToolCallDelta(crate::inference::ToolCallDelta {
+                id: "call-9".to_owned(),
+                name: "recall_memory".to_owned(),
+                arguments_delta: r#"{"na"#.to_owned(),
+            })
+        );
+        assert_eq!(
+            events[1],
+            InferenceDelta::ToolCallDelta(crate::inference::ToolCallDelta {
+                id: "call-9".to_owned(),
+                name: "recall_memory".to_owned(),
+                arguments_delta: r#"me":"x"}"#.to_owned(),
+            })
+        );
+        assert_eq!(
+            events[2],
             InferenceDelta::ToolCall(ToolCall {
                 id: "call-9".to_owned(),
                 name: "recall_memory".to_owned(),
@@ -643,7 +689,7 @@ mod tests {
             })
         );
         assert_eq!(
-            events[1],
+            events[3],
             InferenceDelta::Finish(FinishReason::ToolCalls)
         );
     }

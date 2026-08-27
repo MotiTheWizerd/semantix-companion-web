@@ -4,9 +4,13 @@
 // A call is a first-class row in the conversation timeline. The host decides
 // where it belongs; this component only knows how one call looks and expands.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { MAX_MESSAGES_PER_CALL, type CallThread } from "./types";
+import {
+  MAX_MESSAGES_PER_CALL,
+  type CallThread,
+  type StreamingCallMessage,
+} from "./types";
 
 function shortId(id: string): string {
   return id.slice(0, 8);
@@ -16,7 +20,13 @@ function speakerLabel(agentId: string, initiatorAgentId: string): string {
   return agentId === initiatorAgentId ? "your companion" : `agent ${shortId(agentId)}`;
 }
 
-export function CallTranscriptItem({ thread }: { thread: CallThread }) {
+export function CallTranscriptItem({
+  thread,
+  streamingMessages = [],
+}: {
+  thread: CallThread;
+  streamingMessages?: StreamingCallMessage[];
+}) {
   const [expanded, setExpanded] = useState(false);
   const { call, messages } = thread;
   const used = call.messageCount;
@@ -24,6 +34,12 @@ export function CallTranscriptItem({ thread }: { thread: CallThread }) {
     messages.find((message) => message.fromAgentId !== call.initiatorAgentId)?.fromAgentId ??
     messages[0]?.toAgentId ??
     null;
+
+  // Speech arriving into a collapsed call must be visible without making the
+  // user notice a changing meter and manually open it mid-sentence.
+  useEffect(() => {
+    if (streamingMessages.length > 0) setExpanded(true);
+  }, [streamingMessages.length]);
 
   return (
     <article className="chat-message chat-message--call">
@@ -47,17 +63,27 @@ export function CallTranscriptItem({ thread }: { thread: CallThread }) {
 
           {expanded && (
             <div className="calls__turns">
-              {messages.length === 0 ? (
+              {messages.length === 0 && streamingMessages.length === 0 ? (
                 <p className="calls__empty">Nothing was said in this call.</p>
               ) : (
-                messages.map((message) => (
-                  <div key={message.id} className="calls__turn">
-                    <span className="calls__speaker">
-                      {speakerLabel(message.fromAgentId, call.initiatorAgentId)}
-                    </span>
-                    <p className="calls__body">{message.body}</p>
-                  </div>
-                ))
+                <>
+                  {messages.map((message) => (
+                    <div key={message.id} className="calls__turn">
+                      <span className="calls__speaker">
+                        {speakerLabel(message.fromAgentId, call.initiatorAgentId)}
+                      </span>
+                      <p className="calls__body">{message.body}</p>
+                    </div>
+                  ))}
+                  {streamingMessages.map((message) => (
+                    <div key={message.streamId} className="calls__turn calls__turn--streaming">
+                      <span className="calls__speaker">
+                        {speakerLabel(message.fromAgentId, call.initiatorAgentId)}
+                      </span>
+                      <p className="calls__body calls__body--streaming">{message.body}</p>
+                    </div>
+                  ))}
+                </>
               )}
             </div>
           )}

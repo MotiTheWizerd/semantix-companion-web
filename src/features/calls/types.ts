@@ -23,6 +23,15 @@ export interface RavenCallMessage {
   createdAt: number;
 }
 
+/** One not-yet-persisted call line while a provider is still producing the
+ * `send_in_call` JSON arguments. SQLite replaces it after tool execution. */
+export interface StreamingCallMessage {
+  streamId: string;
+  callId: string;
+  fromAgentId: string;
+  body: string;
+}
+
 /** A call and its turns, as Rust hands them over in one trip. */
 export interface CallThread {
   call: RavenCall;
