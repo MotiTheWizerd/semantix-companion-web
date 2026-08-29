@@ -44,6 +44,31 @@ pub(crate) struct ArchiveHit {
     pub(crate) role: String,
     pub(crate) day: String,
     pub(crate) content: String,
+    /// Where the conversation came from: None = born in this app,
+    /// Some("claude"/"chatgpt") = imported history.
+    pub(crate) source: Option<String>,
+}
+
+/// One turn of an imported conversation, borrowed from the parsed export —
+/// an import is ~100MB of text, so nothing here is cloned to be stored.
+pub(crate) struct ArchivedImportTurn<'a> {
+    pub(crate) role: &'a str,
+    pub(crate) text: &'a str,
+}
+
+/// An imported conversation on its way into the archive as a REAL
+/// conversation row: hidden from every list (`archived_at` set), fully
+/// drillable by search, stamped with its ORIGINAL times so hits date true.
+pub(crate) struct ArchivedImportConversation<'a> {
+    /// Deterministic — "import:<source>:<source_id>" — so re-drops upsert
+    /// instead of duplicating.
+    pub(crate) id: String,
+    pub(crate) title: &'a str,
+    pub(crate) companion_id: &'a str,
+    pub(crate) source: &'a str,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+    pub(crate) turns: Vec<ArchivedImportTurn<'a>>,
 }
 
 impl ChatRepository {
@@ -67,7 +92,7 @@ impl ChatRepository {
             .prepare(
                 "SELECT c.title, m.role,
                         date(m.created_at / 1000, 'unixepoch') AS day,
-                        m.content
+                        m.content, c.source
                  FROM messages_fts
                  JOIN messages m ON m.rowid = messages_fts.rowid
                  JOIN conversations c ON c.id = m.conversation_id
@@ -87,12 +112,101 @@ impl ChatRepository {
                     role: row.get(1)?,
                     day: row.get(2)?,
                     content: row.get(3)?,
+                    source: row.get(4)?,
                 })
             })
             .map_err(AppError::database)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::database)?;
         Ok(hits)
+    }
+
+    /// File imported conversations into the archive as real rows — hidden
+    /// from every list (`archived_at` = the import moment), indexed by the
+    /// FTS triggers on insert, dated by their ORIGINAL stamps.
+    ///
+    /// Idempotent by deterministic id: an already-archived conversation is
+    /// skipped unless the incoming `updated_at` is newer, in which case it is
+    /// replaced whole (a newer export can carry more turns). Every message is
+    /// born `slept_at`-stamped — the distiller meets these conversations
+    /// through the import queue, never through the live sleep rail.
+    ///
+    /// Returns (added, refreshed).
+    pub(crate) fn archive_imported_conversations(
+        &self,
+        records: &[ArchivedImportConversation<'_>],
+        archived_at: i64,
+    ) -> Result<(usize, usize), AppError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction().map_err(AppError::database)?;
+        let mut added = 0usize;
+        let mut refreshed = 0usize;
+        for record in records {
+            let stored: Option<i64> = transaction
+                .query_row(
+                    "SELECT updated_at FROM conversations WHERE id = ?1",
+                    [&record.id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(AppError::database)?;
+            match stored {
+                Some(stored) if stored >= record.updated_at => continue,
+                Some(_) => {
+                    // Explicit even though the FK cascades: the FTS delete
+                    // trigger must see every message row go.
+                    transaction
+                        .execute(
+                            "DELETE FROM messages WHERE conversation_id = ?1",
+                            [&record.id],
+                        )
+                        .map_err(AppError::database)?;
+                    transaction
+                        .execute("DELETE FROM conversations WHERE id = ?1", [&record.id])
+                        .map_err(AppError::database)?;
+                    refreshed += 1;
+                }
+                None => added += 1,
+            }
+            transaction
+                .execute(
+                    "INSERT INTO conversations (
+                        id, title, companion_id, created_at, updated_at, archived_at, source
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        record.id,
+                        record.title,
+                        record.companion_id,
+                        record.created_at,
+                        record.updated_at,
+                        archived_at,
+                        record.source,
+                    ],
+                )
+                .map_err(AppError::database)?;
+            for (sequence, turn) in record.turns.iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO messages (
+                            id, conversation_id, sequence, role, status, content,
+                            provider_id, model_id, error_message,
+                            created_at, updated_at, completed_at, slept_at
+                         ) VALUES (?1, ?2, ?3, ?4, 'completed', ?5,
+                                   NULL, NULL, NULL, ?6, ?6, ?6, ?6)",
+                        params![
+                            format!("{}#{sequence}", record.id),
+                            record.id,
+                            sequence as i64,
+                            turn.role,
+                            turn.text,
+                            record.created_at,
+                        ],
+                    )
+                    .map_err(AppError::database)?;
+            }
+        }
+        transaction.commit().map_err(AppError::database)?;
+        Ok((added, refreshed))
     }
 
     /// Where a woken companion should speak: the live thread it was last used
@@ -696,6 +810,85 @@ mod tests {
             .search_messages("\"serpent\"", None, 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 3, "both conversations, completed messages only");
+
+        drop(repository);
+        let _ = fs::remove_file(path);
+    }
+
+    /// The import archive pass: filed conversations are hidden from every
+    /// list, fully drillable with their origin and ORIGINAL dates, and a
+    /// re-drop upserts — same export skips, a newer one replaces whole.
+    #[test]
+    fn imported_history_is_hidden_searchable_and_upserts_by_id() {
+        let (repository, path) = open_repository("import-archive");
+        let companion_id = built_in_id(&path);
+        let created = 1_730_764_800_000; // 2024-11-05
+        let record = |updated: i64, turns: &'static [(&'static str, &'static str)]| {
+            super::ArchivedImportConversation {
+                id: "import:claude:conv-1".to_owned(),
+                title: "Discussing DMT Responsibly",
+                companion_id: &companion_id,
+                source: "claude",
+                created_at: created,
+                updated_at: updated,
+                turns: turns
+                    .iter()
+                    .map(|(role, text)| super::ArchivedImportTurn { role, text })
+                    .collect(),
+            }
+        };
+        const ORIGINAL: [(&str, &str); 2] = [
+            ("user", "Is DMT a shift of frequency to another layer?"),
+            ("assistant", "Casually put: DMT research says the mind does it."),
+        ];
+
+        let filed = repository
+            .archive_imported_conversations(&[record(created, &ORIGINAL)], 1_756_500_000_000)
+            .expect("the archive pass should succeed");
+        assert_eq!(filed, (1, 0));
+        assert!(
+            repository
+                .list_conversations()
+                .expect("listing should succeed")
+                .iter()
+                .all(|conversation| conversation.id != "import:claude:conv-1"),
+            "an imported conversation never appears in the sidebar"
+        );
+
+        let hits = repository
+            .search_messages("\"dmt\"", None, 10)
+            .expect("search should succeed");
+        assert_eq!(hits.len(), 2, "both imported turns are drillable");
+        assert!(hits.iter().all(|hit| hit.source.as_deref() == Some("claude")));
+        assert_eq!(hits[0].day, "2024-11-05", "hits date by the ORIGINAL stamp");
+
+        // The same export again: nothing added, nothing duplicated.
+        let filed = repository
+            .archive_imported_conversations(&[record(created, &ORIGINAL)], 1_756_500_001_000)
+            .expect("the re-drop should succeed");
+        assert_eq!(filed, (0, 0));
+        let hits = repository
+            .search_messages("\"dmt\"", None, 10)
+            .expect("search should succeed");
+        assert_eq!(hits.len(), 2, "a re-drop never duplicates messages");
+
+        // A NEWER export of the same conversation replaces it whole.
+        const GROWN: [(&str, &str); 3] = [
+            ("user", "Is DMT a shift of frequency to another layer?"),
+            ("assistant", "Casually put: DMT research says the mind does it."),
+            ("user", "One more DMT question then."),
+        ];
+        let filed = repository
+            .archive_imported_conversations(
+                &[record(created + 60_000, &GROWN)],
+                1_756_500_002_000,
+            )
+            .expect("the newer drop should succeed");
+        assert_eq!(filed, (0, 1));
+        let hits = repository
+            .search_messages("\"dmt\"", None, 10)
+            .expect("search should succeed");
+        assert_eq!(hits.len(), 3, "the refreshed conversation carries its new turn");
 
         drop(repository);
         let _ = fs::remove_file(path);

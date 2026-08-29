@@ -184,6 +184,22 @@ impl ImportRepository {
         Ok(())
     }
 
+    /// Every conversation this job covers, whatever its status — `skipped`
+    /// included, because a re-drop still archives what an earlier job already
+    /// distilled. This is the archive pass's scope.
+    pub(crate) fn item_source_ids(&self, job_id: &str) -> Result<Vec<String>, AppError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT source_id FROM import_items WHERE job_id = ?1")
+            .map_err(AppError::database)?;
+        let ids = statement
+            .query_map([job_id], |row| row.get(0))
+            .map_err(AppError::database)?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(AppError::database)?;
+        Ok(ids)
+    }
+
     /// Oldest conversation first — eras accrue forward, matching the order the
     /// export is fed to the distiller.
     pub(crate) fn next_pending(&self, job_id: &str) -> Result<Option<PendingItem>, AppError> {

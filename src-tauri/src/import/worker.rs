@@ -15,7 +15,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU8, Ordering},
         Arc, Mutex,
@@ -27,6 +27,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::{
     app_error::AppError,
+    chat::repository::{ArchivedImportConversation, ArchivedImportTurn, ChatRepository},
     memory::{
         fetch_existing_index, load_account_token, sleep_via_post, MemoryService, MemoryTarget,
         SleepCustomModel, SleepExistingMemory, SleepImportContext, SleepRequest, SleepTurn,
@@ -88,6 +89,7 @@ impl ImportState {
             service: Arc::new(ImportService {
                 repository,
                 memory,
+                database_path: database_path.to_owned(),
                 controls: Mutex::new(HashMap::new()),
             }),
         })
@@ -97,6 +99,8 @@ impl ImportState {
 pub(crate) struct ImportService {
     repository: ImportRepository,
     memory: Arc<MemoryService>,
+    /// The app database — the archive pass opens its own ChatRepository on it.
+    database_path: PathBuf,
     controls: Mutex<HashMap<String, Arc<AtomicU8>>>,
 }
 
@@ -373,10 +377,38 @@ async fn run_job(
             .await
             .map_err(|error| format!("The import could not prepare: {error}"))??
     };
+    let prepared = Arc::new(prepared);
     service
         .repository
         .set_job_status(job_id, JobStatus::Running, None, now_ms())
         .map_err(String::from)?;
+
+    // THE ARCHIVE PASS — every conversation this job covers lands in the chat
+    // database as a real (archived, hidden) conversation BEFORE the first
+    // distillation call: word-for-word search works seconds after the drop,
+    // while memories trickle in behind it for hours. Runs on every (re)start
+    // of the job and upserts by deterministic id, so a resume — including one
+    // of a job that predates this pass — backfills what is missing and skips
+    // what is already filed. Fail-open: a dead archive pass is logged and the
+    // distiller still runs; the next resume gets another try.
+    {
+        emit_progress(app, service, job_id, Some("Filing your conversations…".to_owned()));
+        let service = Arc::clone(service);
+        let prepared = Arc::clone(&prepared);
+        let job_id = job_id.to_owned();
+        let filed = tauri::async_runtime::spawn_blocking(move || {
+            archive_job_conversations(&service, &prepared, &job_id)
+        })
+        .await
+        .map_err(|error| format!("The archive pass could not run: {error}"))?;
+        match filed {
+            Ok((added, refreshed)) if added + refreshed > 0 => {
+                println!("[import] archived {added} new + {refreshed} refreshed conversation(s)");
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("[import] archive pass failed (distilling anyway): {error}"),
+        }
+    }
 
     let mut existing: Vec<SleepExistingMemory> = Vec::new();
     let mut distilled_since_refresh = REFRESH_EXISTING_EVERY;
@@ -433,6 +465,46 @@ async fn run_job(
         .set_job_status(job_id, parked_as, None, now_ms())
         .map_err(String::from)?;
     Ok(())
+}
+
+/// File this job's conversations into the chat archive as real rows. Scope is
+/// the job's LEDGER items (skipped ones included — already-distilled is not
+/// already-archived), joined back to the re-parsed export by source_id; the
+/// synthetic memories.json item has no conversation and is left out.
+fn archive_job_conversations(
+    service: &ImportService,
+    prepared: &PreparedRun,
+    job_id: &str,
+) -> Result<(usize, usize), String> {
+    let source_ids = service.repository.item_source_ids(job_id).map_err(String::from)?;
+    let source = prepared.job.source.as_str();
+    let records: Vec<ArchivedImportConversation<'_>> = source_ids
+        .iter()
+        .filter(|source_id| source_id.as_str() != CLAUDE_MEMORIES_ITEM)
+        .filter_map(|source_id| prepared.conversations.get(source_id))
+        .map(|conversation| ArchivedImportConversation {
+            id: format!("import:{source}:{}", conversation.source_id),
+            title: &conversation.title,
+            companion_id: &prepared.job.companion_id,
+            source,
+            created_at: conversation.created_at_ms,
+            updated_at: conversation.updated_at_ms.max(conversation.created_at_ms),
+            turns: conversation
+                .turns
+                .iter()
+                .map(|turn| ArchivedImportTurn {
+                    role: match turn.role {
+                        TurnRole::User => "user",
+                        TurnRole::Assistant => "assistant",
+                    },
+                    text: &turn.text,
+                })
+                .collect(),
+        })
+        .collect();
+    let chat = ChatRepository::open(&service.database_path).map_err(String::from)?;
+    chat.archive_imported_conversations(&records, now_ms())
+        .map_err(String::from)
 }
 
 fn prepare_run(service: &ImportService, job_id: &str) -> Result<PreparedRun, String> {

@@ -164,12 +164,15 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             description: concat!(
                 "Search the full text of your past conversations with this ",
                 "user — your raw, word-for-word memory of everything said ",
-                "here, distinct from your distilled long-term memories. Use ",
-                "it when the user refers to something from another ",
-                "conversation, or when a recalled memory lacks the exact ",
-                "detail. Each result is the WHOLE message the match sits ",
-                "in, best matches first. This is your own memory of your shared ",
-                "history: weave it in naturally, don't narrate the search.",
+                "here, distinct from your distilled long-term memories. This ",
+                "includes conversations imported from the user's Claude or ",
+                "ChatGPT history (marked with their origin), once an import ",
+                "has filed them. Use it when the user refers to something ",
+                "from another conversation, or when a recalled memory lacks ",
+                "the exact detail. Each result is the WHOLE message the match ",
+                "sits in, best matches first. This is your own memory of your ",
+                "shared history: weave it in naturally, don't narrate the ",
+                "search.",
             )
             .to_owned(),
             parameters: serde_json::json!({
@@ -1101,13 +1104,22 @@ fn render_archive_hits(query: &str, hits: &[ArchiveHit]) -> String {
     let mut blocks: Vec<String> = Vec::new();
     let mut spent = 0usize;
     for hit in hits {
-        let who = match hit.role.as_str() {
-            "user" => "the user said",
-            _ => "you said",
+        // An imported conversation happened between the user and ANOTHER
+        // assistant — its origin is named and its assistant turns are never
+        // rendered as "you said".
+        let who = match (hit.role.as_str(), hit.source.is_some()) {
+            ("user", _) => "the user said",
+            (_, true) => "the assistant said",
+            (_, false) => "you said",
+        };
+        let origin = match hit.source.as_deref() {
+            Some("claude") => " · from their imported Claude history",
+            Some("chatgpt") => " · from their imported ChatGPT history",
+            _ => "",
         };
         let block = format!(
-            "[{} · {} · {}]\n{}",
-            hit.day, hit.conversation_title, who, hit.content
+            "[{} · {}{} · {}]\n{}",
+            hit.day, hit.conversation_title, origin, who, hit.content
         );
         if !blocks.is_empty() && spent + block.len() > SEARCH_RENDER_BUDGET_CHARS {
             break;
@@ -2032,6 +2044,7 @@ mod tests {
                 role: "user".to_owned(),
                 day: "2026-08-22".to_owned(),
                 content: "My favorite ship is the Long Serpent.\nA whole message, every line of it.".to_owned(),
+                source: None,
             }],
         );
         assert_eq!(
@@ -2042,6 +2055,26 @@ mod tests {
         );
     }
 
+    /// An imported hit names its origin, and its assistant turns are never
+    /// voiced as "you said" — that conversation happened with ANOTHER model.
+    #[test]
+    fn archive_render_attributes_imported_history_honestly() {
+        let rendered = render_archive_hits(
+            "dmt",
+            &[ArchiveHit {
+                conversation_title: "Discussing DMT Responsibly".to_owned(),
+                role: "assistant".to_owned(),
+                day: "2024-11-05".to_owned(),
+                content: "Casually put: the research says the mind does it.".to_owned(),
+                source: Some("claude".to_owned()),
+            }],
+        );
+        assert!(rendered.contains(
+            "[2024-11-05 · Discussing DMT Responsibly · from their imported Claude history · the assistant said]"
+        ));
+        assert!(!rendered.contains("you said"));
+    }
+
     #[test]
     fn archive_render_withholds_trailing_messages_but_never_truncates_one() {
         let huge = |tag: &str| ArchiveHit {
@@ -2049,6 +2082,7 @@ mod tests {
             role: "assistant".to_owned(),
             day: "2026-08-22".to_owned(),
             content: format!("{tag} ").repeat(5_000),
+            source: None,
         };
         let hits = vec![huge("alpha"), huge("beta"), huge("gamma")];
         let rendered = render_archive_hits("saga", &hits);

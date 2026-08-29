@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 19;
+const LATEST_SCHEMA_VERSION: i64 = 20;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -688,6 +688,19 @@ fn migration_sql(version: i64) -> &'static str {
 
              CREATE INDEX idx_import_items_source
                  ON import_items(source_id);"
+        }
+        20 => {
+            // Imported history joins the archive as REAL conversations.
+            // Version 19 deliberately kept conversation text out of this
+            // database; the first live import run reversed that call — the
+            // raw-memory drill claimed "your past conversations" while the
+            // imported ones existed only as distilled memories, and the model
+            // honestly promised users text that was never coming. So imported
+            // conversations now land in `conversations`/`messages` like any
+            // other, `archived_at` set (hidden from every list) with `source`
+            // naming where they came from ('claude'/'chatgpt', NULL = born
+            // here). The FTS triggers index them on insert for free.
+            "ALTER TABLE conversations ADD COLUMN source TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

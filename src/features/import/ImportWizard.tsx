@@ -333,10 +333,11 @@ export function ImportWizard({ companion, onClose }: ImportWizardProps) {
           </div>
 
           <p className="import-wizard__fineprint">
-            A big archive takes a while — hours, for years of chats. It runs in
-            the background on your own model key, you can keep using the app,
-            and you can pause and resume any time. Importing the same export
-            twice only processes what changed.
+            Your conversations become searchable word-for-word within moments
+            of starting. Distilling them into memories takes a while — hours,
+            for years of chats. It runs in the background on your own model
+            key, you can keep using the app, and you can pause and resume any
+            time. Importing the same export twice only processes what changed.
           </p>
 
           <div className="credential-form__actions">
