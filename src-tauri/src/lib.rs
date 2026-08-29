@@ -119,8 +119,13 @@ pub fn run() {
             let preference_state = PreferenceState::open(&database_path)?;
             let chat_state = ChatState::open(&database_path)?;
             let memory_state = MemoryState::open(&database_path)?;
+            // The import worker distills through the memory seam, so it opens
+            // on the same service — and parks any job a dead process left
+            // `running`, so the UI offers resume instead of a phantom run.
+            let import_state = import::worker::ImportState::open(&database_path, memory_state.service())?;
             let companion_state = CompanionState::open(&database_path)?;
             let raven_call_state = RavenCallState::open(&database_path)?;
+            app.manage(import_state);
             app.manage(companion_state);
             app.manage(credential_state);
             app.manage(model_state);
@@ -165,6 +170,12 @@ pub fn run() {
             memory::recall_memories,
             memory::sleep_conversation,
             import::inspect_import_source,
+            import::worker::start_import,
+            import::worker::pause_import,
+            import::worker::resume_import,
+            import::worker::cancel_import,
+            import::worker::retry_failed_import,
+            import::worker::list_import_jobs,
             raven_calls::list_conversation_calls,
         ])
         .run(tauri::generate_context!())

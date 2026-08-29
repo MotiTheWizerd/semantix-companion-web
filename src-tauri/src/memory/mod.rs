@@ -111,9 +111,15 @@ impl MemoryState {
             }),
         })
     }
+
+    /// The service behind the commands — the import worker distills through
+    /// the same seam, never around it.
+    pub(crate) fn service(&self) -> Arc<MemoryService> {
+        Arc::clone(&self.service)
+    }
 }
 
-struct MemoryService {
+pub(crate) struct MemoryService {
     chats: ChatRepository,
     preferences: PreferenceRepository,
     models: ModelResolver,
@@ -121,34 +127,46 @@ struct MemoryService {
 }
 
 #[derive(Serialize)]
-struct SleepTurn {
-    role: &'static str,
-    text: String,
+pub(crate) struct SleepTurn {
+    pub(crate) role: &'static str,
+    pub(crate) text: String,
     /// Already-slept tail sent for the distiller's footing — never carved from.
-    context: bool,
+    pub(crate) context: bool,
 }
 
 #[derive(Serialize)]
-struct SleepCustomModel {
-    base_url: String,
-    api_key: String,
-    model_id: String,
+pub(crate) struct SleepCustomModel {
+    pub(crate) base_url: String,
+    pub(crate) api_key: String,
+    pub(crate) model_id: String,
 }
 
 /// One line of the agent's index, sent so a re-extracted fact reuses its exact
 /// name (a clean update) instead of minting a near-duplicate slug.
-#[derive(Serialize, Deserialize)]
-struct SleepExistingMemory {
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SleepExistingMemory {
     name: String,
     description: String,
 }
 
+/// Where an imported conversation came from — sent alongside the turns so the
+/// organ's import-mode prompt can era-stamp what it carves. An organ without
+/// that prompt simply ignores the field (pydantic drops unknown keys).
 #[derive(Serialize)]
-struct SleepRequest {
-    turns: Vec<SleepTurn>,
-    custom_model: SleepCustomModel,
-    project_tag: Option<String>,
-    existing: Vec<SleepExistingMemory>,
+pub(crate) struct SleepImportContext {
+    pub(crate) source: String,
+    pub(crate) title: String,
+    pub(crate) date: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SleepRequest {
+    pub(crate) turns: Vec<SleepTurn>,
+    pub(crate) custom_model: SleepCustomModel,
+    pub(crate) project_tag: Option<String>,
+    pub(crate) existing: Vec<SleepExistingMemory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) import_context: Option<SleepImportContext>,
 }
 
 #[derive(Deserialize)]
@@ -159,18 +177,18 @@ struct SleepMemoryName {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SleepOutcome {
-    created: u32,
-    updated: u32,
-    dropped: u32,
+    pub(crate) created: u32,
+    pub(crate) updated: u32,
+    pub(crate) dropped: u32,
     #[serde(deserialize_with = "memory_names", rename = "memories")]
-    memories: Vec<String>,
+    pub(crate) memories: Vec<String>,
     /// True when the ledger left nothing to distill — no organ call was made.
     #[serde(default)]
-    nothing_new: bool,
+    pub(crate) nothing_new: bool,
     /// Whose hand wrote these memories, when it wasn't the companion's own
     /// model. The organ never sends this — Companion fills it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    scribe_note: Option<String>,
+    pub(crate) scribe_note: Option<String>,
 }
 
 fn memory_names<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -251,16 +269,40 @@ impl MemoryService {
 
         // The distiller speaks with the companion's voice, the same one that
         // answered in the thread — so /sleep and chat can never diverge.
-        let companion = self
-            .companions
-            .resolve(thread.conversation.companion_id.as_deref())?;
-        // WHICH BRAIN never changes — the memory lands in this companion's own
-        // agent either way. Only the SCRIBE can differ: the organ distills on
-        // an OpenAI-compatible base_url + key, and a Claude Code companion
-        // authenticates with a local login that cannot travel to the server.
-        // So a Claude companion borrows the user's default model to write, and
-        // the outcome says whose hand held the pen — a silent substitution
-        // would be the dishonest part, not the substitution itself.
+        let (custom_model, scribe_note) =
+            self.resolve_scribe(thread.conversation.companion_id.as_deref())?;
+
+        Ok(Some(PreparedSleep {
+            body: SleepRequest {
+                turns,
+                custom_model,
+                project_tag: Some("companion".to_owned()),
+                existing: Vec::new(),
+                import_context: None,
+            },
+            bearer,
+            agent_id: agent_id.to_owned(),
+            fresh_message_ids,
+            scribe_note,
+        }))
+    }
+
+    /// WHICH MODEL holds the distiller's pen for this companion — the voice
+    /// resolution /sleep and the history import share, so the two rails can
+    /// never diverge. Sync (rusqlite + keyring): call inside spawn_blocking.
+    ///
+    /// WHICH BRAIN never changes — the memory lands in this companion's own
+    /// agent either way. Only the SCRIBE can differ: the organ distills on
+    /// an OpenAI-compatible base_url + key, and a Claude Code companion
+    /// authenticates with a local login that cannot travel to the server.
+    /// So a Claude companion borrows the user's default model to write, and
+    /// the outcome says whose hand held the pen — a silent substitution
+    /// would be the dishonest part, not the substitution itself.
+    pub(crate) fn resolve_scribe(
+        &self,
+        companion_id: Option<&str>,
+    ) -> Result<(SleepCustomModel, Option<String>), AppError> {
+        let companion = self.companions.resolve(companion_id)?;
         let (configured_model_id, scribe_note) = match self
             .preferences
             .resolve_voice(&companion.model_preference)?
@@ -308,27 +350,25 @@ impl MemoryService {
         };
         let model = self.models.resolve(&configured_model_id)?;
         let base_url = provider_base_url(&model.provider_id)?;
-
-        Ok(Some(PreparedSleep {
-            body: SleepRequest {
-                turns,
-                custom_model: SleepCustomModel {
-                    base_url: base_url.to_owned(),
-                    api_key: model.api_key.to_string(),
-                    model_id: model.model_id,
-                },
-                project_tag: Some("companion".to_owned()),
-                existing: Vec::new(),
+        Ok((
+            SleepCustomModel {
+                base_url: base_url.to_owned(),
+                api_key: model.api_key.to_string(),
+                model_id: model.model_id,
             },
-            bearer,
-            agent_id: agent_id.to_owned(),
-            fresh_message_ids,
             scribe_note,
-        }))
+        ))
+    }
+
+    /// Which brain an `agent_ref` names — the import worker asks so it can
+    /// refuse Muninn targets politely instead of 404ing against a route the
+    /// canonical brain does not have.
+    pub(crate) fn memory_target(&self, agent_ref: &str) -> Result<MemoryTarget, String> {
+        MemoryTarget::resolve(&self.companions, agent_ref)
     }
 }
 
-fn load_account_token() -> Result<Option<String>, AppError> {
+pub(crate) fn load_account_token() -> Result<Option<String>, AppError> {
     Ok(SecretVault::try_get(ACCOUNT_TOKEN_REF)?.map(|secret| secret.to_string()))
 }
 
@@ -672,7 +712,7 @@ pub(crate) async fn fetch_memory(
 /// The agent's index (names + descriptions, recent-first, non-archived,
 /// capped) for the distiller's name-reuse leash. Fail-open: a dead fetch
 /// mutes the leash, never blocks the sleep.
-async fn fetch_existing_index(bearer: &str, agent_id: &str) -> Vec<SleepExistingMemory> {
+pub(crate) async fn fetch_existing_index(bearer: &str, agent_id: &str) -> Vec<SleepExistingMemory> {
     const CAP: usize = 200;
     #[derive(Deserialize)]
     struct IndexItem {
@@ -774,13 +814,18 @@ async fn sleep_via_stream(
         .ok_or_else(|| "The sleep stream ended without a result.".to_owned())
 }
 
-/// The plain POST — the pre-stream door, kept as the fallback for an organ
-/// without /sleep/stream.
-async fn sleep_via_post(prepared: &PreparedSleep) -> Result<SleepOutcome, String> {
+/// The plain POST — the pre-stream door, the fallback for an organ without
+/// /sleep/stream, and the import worker's whole rail (a thousands-of-calls
+/// run wants one result per conversation, not a stream per conversation).
+pub(crate) async fn sleep_via_post(
+    bearer: &str,
+    agent_id: &str,
+    body: &SleepRequest,
+) -> Result<SleepOutcome, String> {
     let response = reqwest::Client::new()
-        .post(format!("{MEMORY_ORGAN_BASE}/agents/{}/sleep", prepared.agent_id))
-        .bearer_auth(&prepared.bearer)
-        .json(&prepared.body)
+        .post(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/sleep"))
+        .bearer_auth(bearer)
+        .json(body)
         .timeout(std::time::Duration::from_secs(300))
         .send()
         .await
@@ -849,7 +894,7 @@ pub(crate) async fn sleep_conversation(
 
     let mut outcome = match sleep_via_stream(&prepared, &on_progress).await? {
         Some(outcome) => outcome,
-        None => sleep_via_post(&prepared).await?,
+        None => sleep_via_post(&prepared.bearer, &prepared.agent_id, &prepared.body).await?,
     };
     // Whose hand wrote them, when it wasn't the companion's own model.
     outcome.scribe_note = prepared.scribe_note.take();
