@@ -3,6 +3,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { ConfirmDeleteButton } from "../../components/ConfirmDeleteButton";
 import { EditButton } from "../../components/EditButton";
+import { ImportWizard } from "../import/ImportWizard";
 import { claudeModelLabel } from "../models/claudeCatalog";
 import { listConfiguredModels } from "../models/configuredModels/modelService";
 import type { ConfiguredModel } from "../models/configuredModels/types";
@@ -91,9 +92,12 @@ export function CompanionRoster() {
   );
   const [workspaces, setWorkspaces] = useState<WorkspaceFolderDraft[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [importingId, setImportingId] = useState<string | null>(null);
 
   const isEditing = editingId !== null;
   const workspaceValidationError = workspaceDraftError(workspaces);
+  const importingCompanion =
+    companions.find((companion) => companion.id === importingId) ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -146,10 +150,18 @@ export function CompanionRoster() {
     setError(null);
     setEditingId(null);
     setPendingDeleteId(null);
+    setImportingId(null);
     setIsFormOpen(true);
   };
 
+  const openImportWizard = (companion: Companion) => {
+    closeForm();
+    setPendingDeleteId(null);
+    setImportingId(companion.id);
+  };
+
   const openEditForm = (companion: Companion) => {
+    setImportingId(null);
     setName(companion.name ?? "");
     setModelPreference(companion.modelPreference);
     setWorkspaces(
@@ -337,6 +349,13 @@ export function CompanionRoster() {
         </form>
       ) : null}
 
+      {importingCompanion ? (
+        <ImportWizard
+          companion={importingCompanion}
+          onClose={() => setImportingId(null)}
+        />
+      ) : null}
+
       {!isFormOpen && error ? (
         <p className="credential-store__error" role="alert">
           {error}
@@ -364,6 +383,18 @@ export function CompanionRoster() {
                   {workspaceSummary(companion)}
                 </code>
                 <div className="credential-list__actions">
+                  <button
+                    className="credential-list__edit"
+                    type="button"
+                    title="Bring your history — import old Claude or ChatGPT chats"
+                    aria-label={`Import history into ${companionLabel(companion)}`}
+                    onClick={() => openImportWizard(companion)}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 4v10m0 0 4-4m-4 4-4-4" />
+                      <path d="M5 18h14" />
+                    </svg>
+                  </button>
                   <EditButton
                     label={companionLabel(companion)}
                     onClick={() => openEditForm(companion)}

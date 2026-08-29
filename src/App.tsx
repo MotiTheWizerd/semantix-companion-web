@@ -7,6 +7,7 @@ import { ChatSurface } from "./components/ChatSurface";
 import { NotificationStack } from "./components/NotificationStack";
 import { ConversationTabs } from "./components/ConversationTabs";
 import { SettingsScreen } from "./components/SettingsScreen";
+import { bindImportNotifications } from "./features/import/importNotifications";
 import { useCompanionStore } from "./features/workspace/companionStore";
 
 export function App() {
@@ -53,6 +54,21 @@ export function App() {
   useEffect(() => {
     void initialise();
   }, [initialise]);
+
+  // A history import narrates itself through the notification stack for the
+  // life of the app, wherever the user wanders — bound once, at the shell.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void bindImportNotifications().then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   const isSettings = activeView === "settings";
   const activeTab = activeTabId ? tabsById[activeTabId] : null;
