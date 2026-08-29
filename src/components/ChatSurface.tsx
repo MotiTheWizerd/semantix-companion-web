@@ -32,6 +32,8 @@ import {
 } from "../features/calls";
 import { MemoryRecallChip } from "./MemoryRecallChip";
 import { ToolCallChip } from "./ToolCallChip";
+import { EmojiPicker } from "./EmojiPicker/EmojiPicker";
+import { ReasoningDisclosure } from "./ReasoningDisclosure";
 
 function AttachIcon() {
   return (
@@ -60,6 +62,8 @@ interface ChatSurfaceProps {
   recallByMessageId: Record<string, MemoryRecallChipData>;
   /** 📖 tool chips per assistant message — live-session only. */
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
+  /** Provider-supplied reasoning per assistant message — live-session only. */
+  reasoningByMessageId: Record<string, string>;
   content: string;
   /** Composer images awaiting send. */
   pendingAttachments: PendingAttachment[];
@@ -116,6 +120,7 @@ export function ChatSurface({
   notice,
   recallByMessageId,
   toolCallsByMessageId,
+  reasoningByMessageId,
   content,
   pendingAttachments,
   companions,
@@ -128,6 +133,7 @@ export function ChatSurface({
 }: ChatSurfaceProps) {
   const threadRef = useRef<HTMLElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const positionedConversationIdRef = useRef<string | null>(null);
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
@@ -235,6 +241,20 @@ export function ChatSurface({
     }
   };
 
+  const handleEmojiSelect = (emoji: string) => {
+    const input = messageInputRef.current;
+    const selectionStart = input?.selectionStart ?? content.length;
+    const selectionEnd = input?.selectionEnd ?? selectionStart;
+    onContentChange(
+      `${content.slice(0, selectionStart)}${emoji}${content.slice(selectionEnd)}`,
+    );
+    const caret = selectionStart + emoji.length;
+    requestAnimationFrame(() => {
+      input?.focus();
+      input?.setSelectionRange(caret, caret);
+    });
+  };
+
   // A pasted screenshot is an attachment, not a wall of nothing. WebKitGTK
   // hands pasted images through `items` rather than `files` — and for a
   // copied screenshot it often hands an EMPTY DataTransfer, so when both
@@ -290,8 +310,12 @@ export function ChatSurface({
           {messages.map((message) => {
             const recall = recallByMessageId[message.id];
             const toolCalls = toolCallsByMessageId[message.id];
+            const reasoning = reasoningByMessageId[message.id] ?? "";
             const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
             const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
+            const showReasoning =
+              message.role === "assistant" &&
+              (Boolean(reasoning) || (message.status === "streaming" && !message.content));
             // The first tool call opens its own row, like a message of its
             // own; later calls in the same turn join that row. The turn's
             // real reply only gets a row once it actually has something to
@@ -301,7 +325,8 @@ export function ChatSurface({
               message.attachments.length > 0 ||
               Boolean(message.content) ||
               Boolean(message.errorMessage) ||
-              Boolean(recall);
+              Boolean(recall) ||
+              showReasoning;
             return (
               <Fragment key={message.id}>
                 {toolCalls && toolCalls.length > 0 ? (
@@ -322,13 +347,17 @@ export function ChatSurface({
                         ))}
                       </div>
                     ) : null}
+                    {showReasoning ? (
+                      <ReasoningDisclosure
+                        reasoning={reasoning}
+                        isStreaming={message.status === "streaming"}
+                      />
+                    ) : null}
                     {message.role === "assistant" && message.content ? (
                       <MarkdownRenderer content={message.content} />
-                    ) : (
-                      <p>
-                        {message.content || (message.status === "streaming" ? "Thinking…" : "")}
-                      </p>
-                    )}
+                    ) : message.content ? (
+                      <p>{message.content}</p>
+                    ) : null}
                     {message.errorMessage ? (
                       <span className="chat-message__error">{message.errorMessage}</span>
                     ) : null}
@@ -378,6 +407,7 @@ export function ChatSurface({
           </div>
         ) : null}
         <textarea
+          ref={messageInputRef}
           id="companion-message"
           name="message"
           rows={1}
@@ -413,6 +443,12 @@ export function ChatSurface({
           >
             <AttachIcon />
           </button>
+          <EmojiPicker
+            triggerClassName="composer-button"
+            disabled={isLoading || isSending}
+            returnFocus={false}
+            onSelect={handleEmojiSelect}
+          />
           <label className="sr-only" htmlFor="companion-picker">
             Companion
           </label>

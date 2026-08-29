@@ -1,3 +1,8 @@
+//! Shared OpenAI Chat Completions adapter.
+//!
+//! Provider identity, endpoints, headers, and capabilities are data in the
+//! catalog; canonical request/stream translation lives here exactly once.
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::{header, Client, StatusCode};
@@ -6,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     inference::{
         capabilities::ProviderCapabilities,
+        catalog::ApiProviderSpec,
         provider::{InferenceProvider, ProviderCredential, ToolRunner},
         ContentPart, FinishReason, InferenceDelta, InferenceRequest, Role, TokenUsage, ToolCall,
         ToolCallDelta,
@@ -13,31 +19,28 @@ use crate::{
     streaming::{DeltaSink, StreamError},
 };
 
-const CHAT_COMPLETIONS_URL: &str = "https://api.together.ai/v1/chat/completions";
-
-pub(crate) struct TogetherProvider {
+pub(crate) struct OpenAiCompatibleProvider {
     client: Client,
+    spec: &'static ApiProviderSpec,
 }
 
-impl TogetherProvider {
-    pub(crate) fn new() -> Self {
+impl OpenAiCompatibleProvider {
+    pub(crate) fn new(spec: &'static ApiProviderSpec) -> Self {
         Self {
             client: Client::new(),
+            spec,
         }
     }
 }
 
 #[async_trait]
-impl InferenceProvider for TogetherProvider {
+impl InferenceProvider for OpenAiCompatibleProvider {
     fn id(&self) -> &'static str {
-        "together"
+        self.spec.id
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            reasoning: true,
-            ..ProviderCapabilities::TEXT_STREAMING
-        }
+        self.spec.capabilities
     }
 
     async fn stream(
@@ -48,23 +51,32 @@ impl InferenceProvider for TogetherProvider {
         sink: &dyn DeltaSink<InferenceDelta>,
     ) -> Result<(), StreamError> {
         let api_key = credential.api_key().ok_or_else(|| {
-            StreamError::new("Together requires an API key for the selected model.")
+            StreamError::new(format!(
+                "{} requires an API key for the selected model.",
+                self.spec.name
+            ))
         })?;
-        let payload = TogetherRequest::from_canonical(request)?;
-        let response = self
+        let payload = OpenAiRequest::from_canonical(request, self.spec.name)?;
+        let mut request_builder = self
             .client
-            .post(CHAT_COMPLETIONS_URL)
+            .post(self.spec.chat_completions_url)
             .header(header::AUTHORIZATION, format!("Bearer {api_key}"))
-            .header(header::ACCEPT, "text/event-stream")
+            .header(header::ACCEPT, "text/event-stream");
+        for (name, value) in self.spec.default_headers {
+            request_builder = request_builder.header(*name, *value);
+        }
+        let response = request_builder
             .json(&payload)
             .send()
             .await
-            .map_err(|error| StreamError::new(format!("Could not reach Together: {error}")))?;
+            .map_err(|error| {
+                StreamError::new(format!("Could not reach {}: {error}", self.spec.name))
+            })?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(together_http_error(status, &body));
+            return Err(open_ai_http_error(self.spec.name, status, &body));
         }
 
         let mut decoder = SseDecoder::default();
@@ -72,20 +84,20 @@ impl InferenceProvider for TogetherProvider {
         let mut bytes = response.bytes_stream();
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|error| {
-                StreamError::new(format!("Together's stream ended early: {error}"))
+                StreamError::new(format!("{}'s stream ended early: {error}", self.spec.name))
             })?;
             for data in decoder.push(&chunk)? {
                 if data == "[DONE]" {
                     assembler.flush(sink)?;
                     return Ok(());
                 }
-                emit_chunk(&data, sink, &mut assembler)?;
+                emit_chunk(self.spec.name, &data, sink, &mut assembler)?;
             }
         }
 
         for data in decoder.finish()? {
             if data != "[DONE]" {
-                emit_chunk(&data, sink, &mut assembler)?;
+                emit_chunk(self.spec.name, &data, sink, &mut assembler)?;
             }
         }
         assembler.flush(sink)?;
@@ -94,20 +106,25 @@ impl InferenceProvider for TogetherProvider {
 }
 
 #[derive(Serialize)]
-struct TogetherRequest<'a> {
+struct OpenAiRequest<'a> {
     model: &'a str,
-    messages: Vec<TogetherMessage<'a>>,
+    messages: Vec<OpenAiMessage<'a>>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<TogetherToolDeclaration<'a>>>,
+    tools: Option<Vec<OpenAiToolDeclaration<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'static str>,
 }
 
-impl<'a> TogetherRequest<'a> {
-    fn from_canonical(request: &'a InferenceRequest) -> Result<Self, StreamError> {
+impl<'a> OpenAiRequest<'a> {
+    fn from_canonical(
+        request: &'a InferenceRequest,
+        provider_name: &str,
+    ) -> Result<Self, StreamError> {
         if request.messages.is_empty() {
-            return Err(StreamError::new("Together requires at least one message."));
+            return Err(StreamError::new(format!(
+                "{provider_name} requires at least one message."
+            )));
         }
         let messages = request
             .messages
@@ -127,17 +144,17 @@ impl<'a> TogetherRequest<'a> {
                     .iter()
                     .any(|part| matches!(part, ContentPart::Image { .. }));
                 let content = if has_images {
-                    TogetherContent::Parts(
+                    OpenAiContent::Parts(
                         message
                             .content
                             .iter()
                             .map(|part| match part {
-                                ContentPart::Text { text } => TogetherContentPart::Text {
-                                    text: text.clone(),
-                                },
+                                ContentPart::Text { text } => {
+                                    OpenAiContentPart::Text { text: text.clone() }
+                                }
                                 ContentPart::Image { media_type, data } => {
-                                    TogetherContentPart::ImageUrl {
-                                        image_url: TogetherImageUrl {
+                                    OpenAiContentPart::ImageUrl {
+                                        image_url: OpenAiImageUrl {
                                             url: format!("data:{media_type};base64,{data}"),
                                         },
                                     }
@@ -146,7 +163,7 @@ impl<'a> TogetherRequest<'a> {
                             .collect(),
                     )
                 } else {
-                    TogetherContent::Text(
+                    OpenAiContent::Text(
                         message
                             .content
                             .iter()
@@ -157,17 +174,17 @@ impl<'a> TogetherRequest<'a> {
                             .collect::<String>(),
                     )
                 };
-                TogetherMessage {
+                OpenAiMessage {
                     role,
                     content,
                     tool_calls: (!message.tool_calls.is_empty()).then(|| {
                         message
                             .tool_calls
                             .iter()
-                            .map(|call| TogetherToolCallOut {
+                            .map(|call| OpenAiToolCallOut {
                                 id: &call.id,
                                 kind: "function",
-                                function: TogetherFunctionOut {
+                                function: OpenAiFunctionOut {
                                     name: &call.name,
                                     arguments: &call.arguments,
                                 },
@@ -183,9 +200,9 @@ impl<'a> TogetherRequest<'a> {
             request
                 .tools
                 .iter()
-                .map(|tool| TogetherToolDeclaration {
+                .map(|tool| OpenAiToolDeclaration {
                     kind: "function",
-                    function: TogetherFunctionDeclaration {
+                    function: OpenAiFunctionDeclaration {
                         name: &tool.name,
                         description: &tool.description,
                         parameters: &tool.parameters,
@@ -205,11 +222,11 @@ impl<'a> TogetherRequest<'a> {
 }
 
 #[derive(Serialize)]
-struct TogetherMessage<'a> {
+struct OpenAiMessage<'a> {
     role: &'static str,
-    content: TogetherContent,
+    content: OpenAiContent,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<TogetherToolCallOut<'a>>>,
+    tool_calls: Option<Vec<OpenAiToolCallOut<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
 }
@@ -218,67 +235,67 @@ struct TogetherMessage<'a> {
 /// typed parts the moment images ride along.
 #[derive(Serialize)]
 #[serde(untagged)]
-enum TogetherContent {
+enum OpenAiContent {
     Text(String),
-    Parts(Vec<TogetherContentPart>),
+    Parts(Vec<OpenAiContentPart>),
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum TogetherContentPart {
+enum OpenAiContentPart {
     Text { text: String },
-    ImageUrl { image_url: TogetherImageUrl },
+    ImageUrl { image_url: OpenAiImageUrl },
 }
 
 #[derive(Serialize)]
-struct TogetherImageUrl {
+struct OpenAiImageUrl {
     url: String,
 }
 
 #[derive(Serialize)]
-struct TogetherToolDeclaration<'a> {
+struct OpenAiToolDeclaration<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
-    function: TogetherFunctionDeclaration<'a>,
+    function: OpenAiFunctionDeclaration<'a>,
 }
 
 #[derive(Serialize)]
-struct TogetherFunctionDeclaration<'a> {
+struct OpenAiFunctionDeclaration<'a> {
     name: &'a str,
     description: &'a str,
     parameters: &'a serde_json::Value,
 }
 
 #[derive(Serialize)]
-struct TogetherToolCallOut<'a> {
+struct OpenAiToolCallOut<'a> {
     id: &'a str,
     #[serde(rename = "type")]
     kind: &'static str,
-    function: TogetherFunctionOut<'a>,
+    function: OpenAiFunctionOut<'a>,
 }
 
 #[derive(Serialize)]
-struct TogetherFunctionOut<'a> {
+struct OpenAiFunctionOut<'a> {
     name: &'a str,
     arguments: &'a str,
 }
 
 #[derive(Deserialize)]
-struct TogetherChunk {
+struct OpenAiChunk {
     #[serde(default)]
-    choices: Vec<TogetherChoice>,
-    usage: Option<TogetherUsage>,
-    error: Option<TogetherStreamError>,
+    choices: Vec<OpenAiChoice>,
+    usage: Option<OpenAiUsage>,
+    error: Option<OpenAiStreamError>,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum TogetherStreamError {
+enum OpenAiStreamError {
     Message(String),
     Detail { message: String },
 }
 
-impl TogetherStreamError {
+impl OpenAiStreamError {
     fn message(self) -> String {
         match self {
             Self::Message(message) | Self::Detail { message } => message,
@@ -287,31 +304,31 @@ impl TogetherStreamError {
 }
 
 #[derive(Deserialize)]
-struct TogetherChoice {
-    delta: TogetherDelta,
+struct OpenAiChoice {
+    delta: OpenAiDelta,
     finish_reason: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
-struct TogetherDelta {
+struct OpenAiDelta {
     content: Option<String>,
     #[serde(alias = "reasoning_content")]
     reasoning: Option<String>,
-    tool_calls: Option<Vec<TogetherToolCallDelta>>,
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
 
 /// One streamed tool-call fragment. The first fragment for an `index`
 /// carries the id + name; later ones append `arguments` text.
 #[derive(Deserialize)]
-struct TogetherToolCallDelta {
+struct OpenAiToolCallDelta {
     #[serde(default)]
     index: usize,
     id: Option<String>,
-    function: Option<TogetherFunctionDelta>,
+    function: Option<OpenAiFunctionDelta>,
 }
 
 #[derive(Deserialize)]
-struct TogetherFunctionDelta {
+struct OpenAiFunctionDelta {
     name: Option<String>,
     arguments: Option<String>,
 }
@@ -332,7 +349,7 @@ struct ToolCallAssembler {
 impl ToolCallAssembler {
     fn absorb(
         &mut self,
-        fragment: TogetherToolCallDelta,
+        fragment: OpenAiToolCallDelta,
         sink: &dyn DeltaSink<InferenceDelta>,
     ) -> Result<(), StreamError> {
         while self.calls.len() <= fragment.index {
@@ -392,32 +409,38 @@ impl ToolCallAssembler {
 }
 
 #[derive(Deserialize)]
-struct TogetherUsage {
+struct OpenAiUsage {
+    #[serde(default)]
     prompt_tokens: u64,
+    #[serde(default)]
     completion_tokens: u64,
+    #[serde(default)]
     total_tokens: u64,
 }
 
 fn emit_chunk(
+    provider_name: &str,
     data: &str,
     sink: &dyn DeltaSink<InferenceDelta>,
     assembler: &mut ToolCallAssembler,
 ) -> Result<(), StreamError> {
-    let chunk: TogetherChunk = serde_json::from_str(data).map_err(|error| {
-        StreamError::new(format!("Together sent an invalid stream event: {error}"))
+    let chunk: OpenAiChunk = serde_json::from_str(data).map_err(|error| {
+        StreamError::new(format!(
+            "{provider_name} sent an invalid stream event: {error}"
+        ))
     })?;
     if let Some(error) = chunk.error {
         return Err(StreamError::new(format!(
-            "Together's stream failed: {}",
+            "{provider_name}'s stream failed: {}",
             error.message()
         )));
     }
     for choice in chunk.choices {
-        if let Some(text) = choice.delta.content.filter(|text| !text.is_empty()) {
-            sink.emit_delta(InferenceDelta::Text { text })?;
-        }
         if let Some(text) = choice.delta.reasoning.filter(|text| !text.is_empty()) {
             sink.emit_delta(InferenceDelta::Reasoning { text })?;
+        }
+        if let Some(text) = choice.delta.content.filter(|text| !text.is_empty()) {
+            sink.emit_delta(InferenceDelta::Text { text })?;
         }
         for fragment in choice.delta.tool_calls.into_iter().flatten() {
             assembler.absorb(fragment, sink)?;
@@ -439,7 +462,7 @@ fn emit_chunk(
     Ok(())
 }
 
-fn together_http_error(status: StatusCode, body: &str) -> StreamError {
+fn open_ai_http_error(provider_name: &str, status: StatusCode, body: &str) -> StreamError {
     #[derive(Deserialize)]
     struct ErrorEnvelope {
         error: Option<ErrorDetail>,
@@ -459,12 +482,12 @@ fn together_http_error(status: StatusCode, body: &str) -> StreamError {
                 .or(error.message)
         });
     let category = match status.as_u16() {
-        401 | 403 => "Together rejected the API key",
-        402 => "Together reports insufficient credits",
-        404 => "Together could not find the selected model",
-        429 => "Together's rate limit was reached",
-        500 | 503 | 504 => "Together is temporarily unavailable",
-        _ => "Together rejected the request",
+        401 | 403 => format!("{provider_name} rejected the API key"),
+        402 => format!("{provider_name} reports insufficient credits"),
+        404 => format!("{provider_name} could not find the selected model"),
+        429 => format!("{provider_name}'s rate limit was reached"),
+        500 | 503 | 504 => format!("{provider_name} is temporarily unavailable"),
+        _ => format!("{provider_name} rejected the request"),
     };
     StreamError::new(match detail {
         Some(detail) if !detail.trim().is_empty() => format!("{category}: {detail}"),
@@ -518,7 +541,7 @@ fn event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
 
 fn decode_frame(frame: &[u8]) -> Result<Option<String>, StreamError> {
     let frame = std::str::from_utf8(frame)
-        .map_err(|_| StreamError::new("Together sent non-UTF-8 stream data."))?;
+        .map_err(|_| StreamError::new("The provider sent non-UTF-8 stream data."))?;
     let data = frame
         .lines()
         .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
@@ -531,7 +554,7 @@ fn decode_frame(frame: &[u8]) -> Result<Option<String>, StreamError> {
 mod tests {
     use std::sync::Mutex;
 
-    use super::{emit_chunk, together_http_error, SseDecoder, TogetherRequest};
+    use super::{emit_chunk, open_ai_http_error, OpenAiRequest, SseDecoder};
     use crate::{
         inference::{
             FinishReason, InferenceDelta, InferenceMessage, InferenceRequest, ModelTarget, Role,
@@ -551,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_messages_map_to_together_without_provider_types_leaking_out() {
+    fn canonical_messages_map_without_provider_types_leaking_out() {
         let request = InferenceRequest {
             id: "request-1".to_owned(),
             target: ModelTarget {
@@ -562,7 +585,8 @@ mod tests {
             tools: Vec::new(),
             session_id: None,
         };
-        let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
+        let mapped =
+            OpenAiRequest::from_canonical(&request, "Together").expect("request should map");
         let value = serde_json::to_value(mapped).expect("request should serialize");
         assert_eq!(value["model"], "meta-llama/test");
         assert_eq!(value["messages"][0]["role"], "system");
@@ -590,7 +614,8 @@ mod tests {
             tools: Vec::new(),
             session_id: None,
         };
-        let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
+        let mapped =
+            OpenAiRequest::from_canonical(&request, "Together").expect("request should map");
         let value = serde_json::to_value(mapped).expect("request should serialize");
         // Text-only stays the plain string it has always been…
         assert_eq!(value["messages"][0]["content"], "Be concise.");
@@ -601,7 +626,10 @@ mod tests {
             "data:image/png;base64,aGk="
         );
         assert_eq!(value["messages"][1]["content"][1]["type"], "text");
-        assert_eq!(value["messages"][1]["content"][1]["text"], "What is in this picture?");
+        assert_eq!(
+            value["messages"][1]["content"][1]["text"],
+            "What is in this picture?"
+        );
     }
 
     #[test]
@@ -631,7 +659,8 @@ mod tests {
             }],
             session_id: None,
         };
-        let mapped = TogetherRequest::from_canonical(&request).expect("request should map");
+        let mapped =
+            OpenAiRequest::from_canonical(&request, "Together").expect("request should map");
         let value = serde_json::to_value(mapped).expect("request should serialize");
         assert_eq!(value["tool_choice"], "auto");
         assert_eq!(value["tools"][0]["type"], "function");
@@ -651,12 +680,14 @@ mod tests {
         let collector = Collector::default();
         let mut assembler = super::ToolCallAssembler::default();
         emit_chunk(
+            "Together",
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-9","function":{"name":"recall_memory","arguments":"{\"na"}}]},"finish_reason":null}]}"#,
             &collector,
             &mut assembler,
         )
         .expect("first fragment should absorb");
         emit_chunk(
+            "Together",
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"me\":\"x\"}"}}]},"finish_reason":"tool_calls"}]}"#,
             &collector,
             &mut assembler,
@@ -688,10 +719,7 @@ mod tests {
                 arguments: r#"{"name":"x"}"#.to_owned(),
             })
         );
-        assert_eq!(
-            events[3],
-            InferenceDelta::Finish(FinishReason::ToolCalls)
-        );
+        assert_eq!(events[3], InferenceDelta::Finish(FinishReason::ToolCalls));
     }
 
     #[test]
@@ -713,6 +741,7 @@ mod tests {
     fn chunk_normalizes_text_finish_and_usage() {
         let collector = Collector::default();
         emit_chunk(
+            "Together",
             r#"{"choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
             &collector,
             &mut super::ToolCallAssembler::default(),
@@ -730,14 +759,50 @@ mod tests {
     }
 
     #[test]
-    fn together_errors_are_safe_and_actionable() {
-        let error = together_http_error(
+    fn chunk_normalizes_reasoning_before_answer_text() {
+        let collector = Collector::default();
+        emit_chunk(
+            "Together",
+            r#"{"choices":[{"delta":{"reasoning_content":"Checking the constraints.","content":"Done."},"finish_reason":null}]}"#,
+            &collector,
+            &mut super::ToolCallAssembler::default(),
+        )
+        .expect("reasoning chunk should normalize");
+        let events = collector.0.lock().expect("collector should lock");
+        assert_eq!(
+            events[0],
+            InferenceDelta::Reasoning {
+                text: "Checking the constraints.".to_owned()
+            }
+        );
+        assert_eq!(
+            events[1],
+            InferenceDelta::Text {
+                text: "Done.".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn provider_errors_are_safe_actionable_and_branded() {
+        let error = open_ai_http_error(
+            "Together",
             reqwest::StatusCode::UNAUTHORIZED,
             r#"{"error":{"message":"invalid token"}}"#,
         );
         assert_eq!(
             error.to_string(),
             "Together rejected the API key: invalid token"
+        );
+
+        let error = open_ai_http_error(
+            "OpenRouter",
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":{"message":"unknown model"}}"#,
+        );
+        assert_eq!(
+            error.to_string(),
+            "OpenRouter could not find the selected model: unknown model"
         );
     }
 }

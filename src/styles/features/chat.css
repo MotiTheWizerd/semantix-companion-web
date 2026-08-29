@@ -175,27 +175,8 @@
 }
 
 .chat-composer__model {
+  min-width: 0;
   max-width: 260px;
-  padding: 4px 20px 4px 6px;
-  outline: none;
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: 10.5px;
-  font-weight: 550;
-}
-
-.chat-composer__model:hover,
-.chat-composer__model:focus-visible {
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--text-muted);
-}
-
-.chat-composer__model:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
 }
 
 .composer-send {

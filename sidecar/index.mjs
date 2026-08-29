@@ -21,6 +21,7 @@
 //       userText, tools?, images? }
 //   → { id, type: "toolResult", callId, content?, error? }
 //   ← { id, event: "delta", text }
+//   ← { id, event: "reasoning", text }
 //   ← { id, event: "toolCallDelta", callId, name, argumentsDelta }
 //   ← { id, event: "toolCall", callId, name, arguments }
 //   ← { id, event: "usage", inputTokens, outputTokens }
@@ -260,14 +261,33 @@ async function handleQuery(request) {
     if (message.type === "stream_event") {
       const event = message.event;
       if (
+        event?.type === "content_block_delta" &&
+        event.delta?.type === "thinking_delta" &&
+        event.delta.thinking
+      ) {
+        send({ id: request.id, event: "reasoning", text: event.delta.thinking });
+        continue;
+      }
+      if (
         event?.type === "content_block_start" &&
         ["tool_use", "mcp_tool_use", "server_tool_use"].includes(event.content_block?.type) &&
         event.content_block?.id &&
         event.content_block?.name
       ) {
-        streamingTools.set(event.index, {
+        const streamingTool = {
           callId: event.content_block.id,
           name: event.content_block.name.replace(`mcp__${SERVER_NAME}__`, ""),
+        };
+        streamingTools.set(event.index, streamingTool);
+        // An empty-argument tool has no input_json_delta. Emit the stable
+        // identity now so Rust still sees the boundary and can reclassify any
+        // progress narration before Claude executes the tool mid-stream.
+        send({
+          id: request.id,
+          event: "toolCallDelta",
+          callId: streamingTool.callId,
+          name: streamingTool.name,
+          argumentsDelta: "",
         });
         continue;
       }

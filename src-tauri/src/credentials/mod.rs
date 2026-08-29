@@ -12,22 +12,13 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{app_error::AppError, secret_vault::SecretVault};
+use crate::{
+    app_error::AppError,
+    inference::{api_provider_spec, API_PROVIDERS},
+    secret_vault::SecretVault,
+};
 
 pub(crate) const CREDENTIALS_CHANGED_EVENT: &str = "credentials://changed";
-
-const PROVIDERS: &[(&str, &str, &str)] = &[
-    ("openai", "OpenAI", "sk-proj-…"),
-    ("anthropic", "Anthropic", "sk-ant-…"),
-    ("google", "Google Gemini", "AIza…"),
-    ("openrouter", "OpenRouter", "sk-or-v1-…"),
-    ("groq", "Groq", "gsk_…"),
-    ("mistral", "Mistral AI", "Enter API key"),
-    ("together", "Together AI", "Enter API key"),
-    ("fireworks", "Fireworks AI", "Enter API key"),
-    ("deepseek", "DeepSeek", "sk-…"),
-    ("xai", "xAI", "xai-…"),
-];
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -246,12 +237,12 @@ impl CredentialService {
 
 #[tauri::command]
 pub(crate) fn list_known_model_providers() -> Vec<ProviderDefinition> {
-    PROVIDERS
+    API_PROVIDERS
         .iter()
-        .map(|(id, name, key_placeholder)| ProviderDefinition {
-            id: (*id).to_owned(),
-            name: (*name).to_owned(),
-            key_placeholder: (*key_placeholder).to_owned(),
+        .map(|provider| ProviderDefinition {
+            id: provider.id.to_owned(),
+            name: provider.name.to_owned(),
+            key_placeholder: provider.key_placeholder.to_owned(),
         })
         .collect()
 }
@@ -333,14 +324,11 @@ pub(crate) async fn delete_provider_credential(
 }
 
 pub(crate) fn provider_by_id(id: &str) -> Option<ProviderDefinition> {
-    PROVIDERS
-        .iter()
-        .find(|(provider_id, _, _)| *provider_id == id)
-        .map(|(provider_id, name, key_placeholder)| ProviderDefinition {
-            id: (*provider_id).to_owned(),
-            name: (*name).to_owned(),
-            key_placeholder: (*key_placeholder).to_owned(),
-        })
+    api_provider_spec(id).map(|provider| ProviderDefinition {
+        id: provider.id.to_owned(),
+        name: provider.name.to_owned(),
+        key_placeholder: provider.key_placeholder.to_owned(),
+    })
 }
 
 pub(crate) fn key_hint(api_key: &str) -> String {
@@ -366,8 +354,26 @@ pub(crate) fn unix_timestamp_ms() -> Result<i64, AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        key_hint, CredentialChangedEvent, CredentialMetadata, UpdateProviderCredentialInput,
+        key_hint, list_known_model_providers, provider_by_id, CredentialChangedEvent,
+        CredentialMetadata, UpdateProviderCredentialInput,
     };
+
+    #[test]
+    fn settings_only_offer_providers_the_runtime_can_execute() {
+        let providers = list_known_model_providers();
+        assert_eq!(
+            providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["together", "openrouter"]
+        );
+        assert_eq!(
+            provider_by_id("openrouter").map(|provider| provider.name),
+            Some("OpenRouter".to_owned())
+        );
+        assert!(provider_by_id("unconnected-provider").is_none());
+    }
 
     #[test]
     fn key_hint_only_exposes_the_last_four_characters() {

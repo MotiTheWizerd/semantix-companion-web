@@ -123,6 +123,19 @@ export type ChatEvent =
       sequence: number;
       delta: string;
     }
+  | {
+      kind: "assistantContentReplaced";
+      conversationId: string;
+      messageId: string;
+      content: string;
+    }
+  | {
+      kind: "assistantReasoningDelta";
+      conversationId: string;
+      messageId: string;
+      sequence: number;
+      delta: string;
+    }
   | { kind: "assistantCompleted"; message: ChatMessage }
   | {
       kind: "failed";

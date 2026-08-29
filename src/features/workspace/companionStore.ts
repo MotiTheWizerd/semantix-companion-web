@@ -69,6 +69,9 @@ interface ConversationRuntime {
   recallByMessageId: Record<string, MemoryRecallChipData>;
   /** 📖 tool chips per assistant message — same live-session contract. */
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
+  /** Provider-supplied thoughts + tool-round progress narration per assistant
+   *  message. Runtime-only so neither becomes later conversation context. */
+  reasoningByMessageId: Record<string, string>;
 }
 
 interface CompanionStore {
@@ -154,6 +157,7 @@ function emptyRuntime(isLoading = false): ConversationRuntime {
     error: null,
     recallByMessageId: {},
     toolCallsByMessageId: {},
+    reasoningByMessageId: {},
   };
 }
 
@@ -196,7 +200,12 @@ function acceptedEvent(accepted: AcceptedMessage): ChatEvent {
 function requestScrollForChatEvent(event: ChatEvent): void {
   if (event.kind === "accepted") {
     requestConversationScrollToEnd(event.conversation.id);
-  } else if (event.kind === "assistantDelta" || event.kind === "toolCall") {
+  } else if (
+    event.kind === "assistantDelta" ||
+    event.kind === "assistantContentReplaced" ||
+    event.kind === "assistantReasoningDelta" ||
+    event.kind === "toolCall"
+  ) {
     requestConversationScrollToEnd(event.conversationId);
   } else if (event.kind === "assistantStarted" || event.kind === "assistantCompleted") {
     requestConversationScrollToEnd(event.message.conversationId);
@@ -371,6 +380,8 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                 state.runtimeByConversationId[conversationId]?.recallByMessageId ?? {},
               toolCallsByMessageId:
                 state.runtimeByConversationId[conversationId]?.toolCallsByMessageId ?? {},
+              reasoningByMessageId:
+                state.runtimeByConversationId[conversationId]?.reasoningByMessageId ?? {},
             },
           },
         };
@@ -705,6 +716,43 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                       }
                     : item,
                 ),
+              },
+            },
+          };
+        }
+        if (event.kind === "assistantContentReplaced") {
+          return {
+            runtimeByConversationId: {
+              ...state.runtimeByConversationId,
+              [conversationId]: {
+                ...runtimeState,
+                isStreaming: true,
+                messages: runtimeState.messages.map((item) =>
+                  item.id === event.messageId
+                    ? {
+                        ...item,
+                        content: event.content,
+                        status: "streaming",
+                        updatedAt: Date.now(),
+                      }
+                    : item,
+                ),
+              },
+            },
+          };
+        }
+        if (event.kind === "assistantReasoningDelta") {
+          return {
+            runtimeByConversationId: {
+              ...state.runtimeByConversationId,
+              [conversationId]: {
+                ...runtimeState,
+                isStreaming: true,
+                reasoningByMessageId: {
+                  ...runtimeState.reasoningByMessageId,
+                  [event.messageId]:
+                    (runtimeState.reasoningByMessageId[event.messageId] ?? "") + event.delta,
+                },
               },
             },
           };

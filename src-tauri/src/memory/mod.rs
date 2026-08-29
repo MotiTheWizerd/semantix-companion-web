@@ -15,6 +15,7 @@ use crate::{
     app_error::AppError,
     chat::repository::ChatRepository,
     companions::CompanionResolver,
+    inference::api_provider_spec,
     models::ModelResolver,
     preferences::{ModelPreference, PreferenceRepository, ResolvedVoice},
     secret_vault::SecretVault,
@@ -81,15 +82,18 @@ impl MemoryTarget {
 /// Chat/completions bases per provider — the organ's sleep model speaks
 /// OpenAI-compat, so only providers with such an endpoint can distill.
 fn provider_base_url(provider_id: &str) -> Result<&'static str, AppError> {
-    match provider_id {
-        "together" => Ok("https://api.together.ai/v1"),
-        "test" => Err(AppError::validation(
+    if provider_id == "test" {
+        return Err(AppError::validation(
             "Pick a real model for this conversation before sleeping — the test stream cannot distill memories.",
-        )),
-        other => Err(AppError::validation(format!(
-            "Provider \"{other}\" has no known endpoint for the memory sleep pass.",
-        ))),
+        ));
     }
+    api_provider_spec(provider_id)
+        .map(|provider| provider.api_base_url)
+        .ok_or_else(|| {
+            AppError::validation(format!(
+                "Provider \"{provider_id}\" has no known endpoint for the memory sleep pass."
+            ))
+        })
 }
 
 pub(crate) struct MemoryState {
@@ -873,7 +877,21 @@ pub(crate) async fn sleep_conversation(
 
 #[cfg(test)]
 mod tests {
-    use super::{muninn_carve_body, muninn_recall_as_organ, MemoryTarget, MUNINN_BASE};
+    use super::{
+        muninn_carve_body, muninn_recall_as_organ, provider_base_url, MemoryTarget, MUNINN_BASE,
+    };
+
+    #[test]
+    fn every_connected_api_provider_can_power_the_memory_sleep_pass() {
+        assert_eq!(
+            provider_base_url("together").expect("Together should have a base URL"),
+            "https://api.together.ai/v1"
+        );
+        assert_eq!(
+            provider_base_url("openrouter").expect("OpenRouter should have a base URL"),
+            "https://openrouter.ai/api/v1"
+        );
+    }
 
     /// The frontend reads only the organ's shape. Muninn answering
     /// `{results: [...]}` reached the reflexes as `hits: undefined` and killed

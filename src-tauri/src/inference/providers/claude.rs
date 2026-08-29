@@ -115,6 +115,9 @@ enum SidecarEvent {
     Delta {
         text: String,
     },
+    Reasoning {
+        text: String,
+    },
     /// Claude's native partial-input event, normalized by the sidecar before
     /// it crosses into the provider-independent inference stream.
     #[serde(rename_all = "camelCase")]
@@ -396,6 +399,7 @@ impl InferenceProvider for ClaudeProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             tools: true,
+            reasoning: true,
             ..ProviderCapabilities::TEXT_STREAMING
         }
     }
@@ -432,6 +436,9 @@ impl InferenceProvider for ClaudeProvider {
                 match event {
                     SidecarEvent::Delta { text } => {
                         sink.emit_delta(InferenceDelta::Text { text })?;
+                    }
+                    SidecarEvent::Reasoning { text } => {
+                        sink.emit_delta(InferenceDelta::Reasoning { text })?;
                     }
                     SidecarEvent::ToolCallDelta {
                         call_id,
@@ -623,6 +630,21 @@ mod tests {
                 assert_eq!(arguments_delta, r#"{"body":"Hi"#);
             }
             event => panic!("expected a tool fragment, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn sidecar_reasoning_decodes_into_the_provider_neutral_stream() {
+        let line: SidecarLine = serde_json::from_str(
+            r#"{"id":"req-1","event":"reasoning","text":"Checking both workspaces."}"#,
+        )
+        .expect("the sidecar reasoning event should decode");
+        assert_eq!(line.id, "req-1");
+        match line.event {
+            SidecarEvent::Reasoning { text } => {
+                assert_eq!(text, "Checking both workspaces.");
+            }
+            event => panic!("expected reasoning, got {event:?}"),
         }
     }
 }

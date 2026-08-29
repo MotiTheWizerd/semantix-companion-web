@@ -4,8 +4,9 @@ use async_trait::async_trait;
 
 use super::{
     capabilities::ProviderCapabilities,
+    catalog::{ApiProviderProtocol, API_PROVIDERS},
     provider::{InferenceProvider, ProviderCredential, ToolRunner},
-    providers::{ClaudeProvider, TestProvider, TogetherProvider},
+    providers::{ClaudeProvider, OpenAiCompatibleProvider, TestProvider},
     InferenceDelta, InferenceRequest,
 };
 use crate::streaming::{DeltaSink, StreamError, StreamSource};
@@ -24,22 +25,32 @@ pub(crate) struct InferenceGateway {
 
 impl Default for InferenceGateway {
     fn default() -> Self {
-        Self::new([
+        let mut providers = vec![
             Arc::new(TestProvider::default()) as Arc<dyn InferenceProvider>,
-            Arc::new(TogetherProvider::new()),
             Arc::new(ClaudeProvider::default()),
-        ])
+        ];
+        providers.extend(API_PROVIDERS.iter().map(|spec| match spec.protocol {
+            ApiProviderProtocol::OpenAiChatCompletions => {
+                Arc::new(OpenAiCompatibleProvider::new(spec)) as Arc<dyn InferenceProvider>
+            }
+        }));
+        Self::new(providers)
     }
 }
 
 impl InferenceGateway {
-    fn new<const N: usize>(providers: [Arc<dyn InferenceProvider>; N]) -> Self {
+    fn new(providers: impl IntoIterator<Item = Arc<dyn InferenceProvider>>) -> Self {
         Self {
             providers: providers
                 .into_iter()
                 .map(|provider| (provider.id(), provider))
                 .collect(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(provider: Arc<dyn InferenceProvider>) -> Self {
+        Self::new([provider])
     }
 }
 
@@ -80,12 +91,15 @@ impl StreamSource for InferenceGateway {
 #[cfg(test)]
 mod tests {
     use super::InferenceGateway;
+    use crate::inference::API_PROVIDERS;
 
     #[test]
-    fn gateway_registers_the_test_together_and_claude_providers() {
+    fn gateway_registers_every_connected_provider() {
         let gateway = InferenceGateway::default();
         assert!(gateway.providers.contains_key("test"));
         assert!(gateway.providers.contains_key("together"));
+        assert!(gateway.providers.contains_key("openrouter"));
         assert!(gateway.providers.contains_key("claude_code"));
+        assert_eq!(gateway.providers.len(), API_PROVIDERS.len() + 2);
     }
 }
