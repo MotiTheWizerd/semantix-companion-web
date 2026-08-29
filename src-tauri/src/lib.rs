@@ -4,6 +4,7 @@ mod chat;
 mod companions;
 mod credentials;
 mod database;
+mod import;
 mod inference;
 mod memory;
 mod tools;
@@ -163,6 +164,7 @@ pub fn run() {
             memory::ensure_memory_agent,
             memory::recall_memories,
             memory::sleep_conversation,
+            import::inspect_import_source,
             raven_calls::list_conversation_calls,
         ])
         .run(tauri::generate_context!())
