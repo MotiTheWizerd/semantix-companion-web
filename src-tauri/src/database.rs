@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 18;
+const LATEST_SCHEMA_VERSION: i64 = 19;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -632,6 +632,63 @@ fn migration_sql(version: i64) -> &'static str {
 
              UPDATE companions SET workspace_dir = NULL;"
         }
+        19 => {
+            // THE IMPORT LEDGER. A history import is thousands of model calls
+            // over hours; the ledger is what lets it pause, survive an app
+            // restart, and skip what an earlier drop already distilled.
+            //
+            // Deliberately no conversation TEXT in either table: the words
+            // stay in the user's export file, re-read on resume. Duplicating
+            // a 100MB archive into the app database would be a copy nobody
+            // asked for of the most personal data the app ever touches.
+            //
+            // `source_updated` is the re-import key: drop next month's export
+            // and only conversations that changed since their last successful
+            // distillation run again. The dedupe scopes to the COMPANION
+            // (via the jobs join), never globally — importing the same
+            // history into a second companion is a feature, not a duplicate.
+            "CREATE TABLE import_jobs (
+                 id            TEXT    PRIMARY KEY,
+                 companion_id  TEXT    NOT NULL
+                                       REFERENCES companions(id) ON DELETE CASCADE,
+                 agent_ref     TEXT    NOT NULL,
+                 source        TEXT    NOT NULL CHECK (source IN ('claude', 'chatgpt')),
+                 source_path   TEXT    NOT NULL,
+                 status        TEXT    NOT NULL CHECK (
+                                    status IN ('running', 'paused', 'done', 'cancelled', 'failed')
+                                ),
+                 error         TEXT,
+                 include_claude_memories INTEGER NOT NULL DEFAULT 0,
+                 created_at    INTEGER NOT NULL,
+                 updated_at    INTEGER NOT NULL
+             );
+
+             CREATE INDEX idx_import_jobs_companion
+                 ON import_jobs(companion_id, created_at);
+
+             CREATE TABLE import_items (
+                 job_id           TEXT    NOT NULL
+                                          REFERENCES import_jobs(id) ON DELETE CASCADE,
+                 source_id        TEXT    NOT NULL,
+                 title            TEXT    NOT NULL,
+                 conversation_at  INTEGER NOT NULL,
+                 source_updated   INTEGER NOT NULL,
+                 status           TEXT    NOT NULL CHECK (
+                                      status IN ('pending', 'done', 'failed', 'skipped')
+                                  ),
+                 memories_created INTEGER NOT NULL DEFAULT 0,
+                 memories_updated INTEGER NOT NULL DEFAULT 0,
+                 error            TEXT,
+                 finished_at      INTEGER,
+                 PRIMARY KEY (job_id, source_id)
+             );
+
+             CREATE INDEX idx_import_items_queue
+                 ON import_items(job_id, status, conversation_at);
+
+             CREATE INDEX idx_import_items_source
+                 ON import_items(source_id);"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -665,6 +722,8 @@ mod tests {
             "user_preferences",
             "companions",
             "companion_workspaces",
+            "import_jobs",
+            "import_items",
         ] {
             let exists: bool = connection
                 .query_row(

@@ -14,6 +14,7 @@
 
 mod chatgpt;
 mod claude;
+pub(crate) mod repository;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
