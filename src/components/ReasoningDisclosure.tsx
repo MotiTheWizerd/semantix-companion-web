@@ -1,6 +1,11 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import styles from "./ReasoningDisclosure.module.css";
+
+/** How far from the panel's bottom still counts as "watching the newest
+ * thought". A couple of lines — enough that fractional-pixel drift never
+ * releases the pin, little enough that scrolling up to re-read does. */
+const PINNED_TO_END_SLACK_PX = 48;
 
 interface ReasoningDisclosureProps {
   reasoning: string;
@@ -32,8 +37,35 @@ export function ReasoningDisclosure({
 }: ReasoningDisclosureProps) {
   const [isOpen, setIsOpen] = useState(false);
   const panelId = useId();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const pinnedToEndRef = useRef(true);
   const hasReasoning = reasoning.length > 0;
   const label = isStreaming ? "Thinking…" : "Thought process";
+
+  // The panel is its own 220px scroller, so it needs its own bottom pin —
+  // the thread-level one cannot see inside it. Same contract as the thread:
+  // the reader's scrolling keeps the pin honest, scrolling up releases it,
+  // returning to the bottom re-arms it.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const measure = () => {
+      pinnedToEndRef.current =
+        content.scrollHeight - content.scrollTop - content.clientHeight <=
+        PINNED_TO_END_SLACK_PX;
+    };
+    content.addEventListener("scroll", measure, { passive: true });
+    return () => content.removeEventListener("scroll", measure);
+  }, [isOpen, hasReasoning]);
+
+  // Ride the newest thought while it streams. A finished thought opens at
+  // its top for reading; a live one opens at its edge and stays there.
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (content && isStreaming && pinnedToEndRef.current) {
+      content.scrollTop = content.scrollHeight;
+    }
+  }, [reasoning, isStreaming, isOpen]);
 
   return (
     <div className={`${styles.root} ${isOpen ? styles.open : ""}`}>
@@ -42,7 +74,11 @@ export function ReasoningDisclosure({
         className={styles.trigger}
         aria-expanded={isOpen}
         aria-controls={panelId}
-        onClick={() => setIsOpen((open) => !open)}
+        onClick={() => {
+          setIsOpen((open) => !open);
+          // Every fresh open belongs at the live edge.
+          pinnedToEndRef.current = true;
+        }}
       >
         <span className={styles.thinkingIcon}>
           <ThinkingIcon />
@@ -56,7 +92,9 @@ export function ReasoningDisclosure({
       {isOpen ? (
         <div id={panelId} className={styles.panel}>
           {hasReasoning ? (
-            <div className={styles.content}>{reasoning}</div>
+            <div ref={contentRef} className={styles.content}>
+              {reasoning}
+            </div>
           ) : (
             <div className={styles.waiting}>Waiting for provider-supplied thoughts…</div>
           )}
