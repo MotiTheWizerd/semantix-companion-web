@@ -604,6 +604,54 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
       },
     }));
 
+    // The optimistic echo: the message is on screen the moment Enter lands.
+    // The memory pass and the submit round-trip still run before the backend
+    // accepts — but the user should never watch that silence. The echo is
+    // replaced by the authoritative row on accept, and withdrawn (back into
+    // the composer, same as always) if the send fails. A brand-new
+    // conversation has no runtime to echo into until accept names it — that
+    // first send keeps the old timing.
+    const conversationId = tab.conversationId;
+    const optimisticId = conversationId ? `optimistic-${crypto.randomUUID()}` : null;
+    if (conversationId && optimisticId) {
+      set((state) => {
+        const runtimeState = state.runtimeByConversationId[conversationId];
+        if (!runtimeState) return state;
+        const now = Date.now();
+        return {
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [conversationId]: {
+              ...runtimeState,
+              messages: [
+                ...runtimeState.messages,
+                {
+                  id: optimisticId,
+                  conversationId,
+                  sequence:
+                    runtimeState.messages.reduce(
+                      (max, item) => Math.max(max, item.sequence),
+                      0,
+                    ) + 1,
+                  role: "user",
+                  status: "pending",
+                  content: message,
+                  providerId: null,
+                  modelId: null,
+                  errorMessage: null,
+                  createdAt: now,
+                  updatedAt: now,
+                  completedAt: null,
+                  attachments,
+                },
+              ],
+            },
+          },
+        };
+      });
+      requestConversationScrollToEnd(conversationId);
+    }
+
     // Memory rides ahead of the message — fail-open, never blocks the send.
     const memory = await runMemoryPreSend({
       conversationId: tab.conversationId,
@@ -641,7 +689,13 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
               ...state.runtimeByConversationId,
               [conversationId]: {
                 ...runtimeState,
-                messages: reconcileMessage(runtimeState.messages, event.message),
+                // The authoritative row takes the optimistic echo's place.
+                messages: reconcileMessage(
+                  optimisticId
+                    ? runtimeState.messages.filter((item) => item.id !== optimisticId)
+                    : runtimeState.messages,
+                  event.message,
+                ),
                 // The 🧠 chip pins to the accepted user message — the memory
                 // pass already ran for this send by the time we get an id.
                 recallByMessageId: memory
@@ -824,8 +878,27 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     } catch (error) {
       set((state) => {
         const currentTab = state.tabsById[tabId];
+        // A failed send goes back into the composer, so the optimistic echo
+        // must not stay behind as a ghost row. After accept the filter is a
+        // no-op — the echo is already gone.
+        const runtimeState = conversationId
+          ? state.runtimeByConversationId[conversationId]
+          : undefined;
+        const runtimeByConversationId =
+          conversationId && runtimeState && optimisticId
+            ? {
+                ...state.runtimeByConversationId,
+                [conversationId]: {
+                  ...runtimeState,
+                  messages: runtimeState.messages.filter(
+                    (item) => item.id !== optimisticId,
+                  ),
+                },
+              }
+            : state.runtimeByConversationId;
         return currentTab
           ? {
+              runtimeByConversationId,
               tabsById: {
                 ...state.tabsById,
                 [tabId]: {
@@ -836,7 +909,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                 },
               },
             }
-          : state;
+          : { runtimeByConversationId };
       });
     } finally {
       set((state) => {
