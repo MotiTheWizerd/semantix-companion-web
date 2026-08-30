@@ -114,8 +114,16 @@ function placeCalls(messages: ChatMessage[], threads: CallThread[]): CallPlaceme
   return { beforeFirstMessage, afterMessageId };
 }
 
+/** How far from the true bottom still counts as "at the bottom". Wide enough
+ * to absorb fractional-pixel layout drift, narrow enough that a deliberate
+ * scroll-away is respected. */
+const PINNED_TO_END_SLACK_PX = 48;
+
 interface ChatThreadProps {
   threadRef: RefObject<HTMLElement | null>;
+  /** True while the reader belongs at the bottom — armed by every explicit
+   * jump-to-end, released and re-armed by their own scrolling. */
+  pinnedToEndRef: RefObject<boolean>;
   messages: ChatMessage[];
   recallByMessageId: Record<string, MemoryRecallChipData>;
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
@@ -135,6 +143,7 @@ interface ChatThreadProps {
  * useConversationCalls. The wall holds only as long as that stays true. */
 const ChatThread = memo(function ChatThread({
   threadRef,
+  pinnedToEndRef,
   messages,
   recallByMessageId,
   toolCallsByMessageId,
@@ -152,6 +161,32 @@ const ChatThread = memo(function ChatThread({
     () => new Map(companions.map((companion) => [companion.id, companionLabel(companion)])),
     [companions],
   );
+
+  // The pin stays honest through the scroll events themselves: every scroll —
+  // the reader's wheel and our own snaps alike — re-measures whether the view
+  // sits at the bottom. Scrolling up releases it; coming back re-arms it.
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    const measure = () => {
+      pinnedToEndRef.current =
+        thread.scrollHeight - thread.scrollTop - thread.clientHeight <=
+        PINNED_TO_END_SLACK_PX;
+    };
+    thread.addEventListener("scroll", measure, { passive: true });
+    return () => thread.removeEventListener("scroll", measure);
+  }, [threadRef, pinnedToEndRef]);
+
+  // No dependency array on purpose: this component sits behind memo, so a
+  // commit here IS the transcript changing — a thinking row, streamed tokens,
+  // a call turn. While the reader is pinned, land on the new bottom before
+  // paint. Instant, never smooth: a per-token smooth scroll cancels its own
+  // last animation and spends the whole stream easing in from zero velocity —
+  // the crawl that kept the viewport parked up top while the companion thought.
+  useLayoutEffect(() => {
+    const thread = threadRef.current;
+    if (thread && pinnedToEndRef.current) thread.scrollTop = thread.scrollHeight;
+  });
 
   return (
     <section
@@ -266,6 +301,7 @@ export function ChatSurface({
   onRemoveAttachment,
 }: ChatSurfaceProps) {
   const threadRef = useRef<HTMLElement>(null);
+  const pinnedToEndRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const positionedConversationIdRef = useRef<string | null>(null);
@@ -303,6 +339,7 @@ export function ChatSurface({
         activeConversationIdRef.current === conversationId &&
         threadRef.current === thread
       ) {
+        pinnedToEndRef.current = true;
         thread.scrollTop = thread.scrollHeight;
       }
     };
@@ -336,12 +373,12 @@ export function ChatSurface({
         if (requestedConversationId !== activeConversationIdRef.current) return;
         const thread = threadRef.current;
         if (thread) {
-          thread.scrollTo({
-            top: thread.scrollHeight,
-            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-              ? "auto"
-              : "smooth",
-          });
+          // An explicit "take me to the end" arms the pin, so the follow in
+          // ChatThread keeps the view there as the turn grows. The jump is
+          // instant — a smooth glide races the transcript growing underneath
+          // it and lands short.
+          pinnedToEndRef.current = true;
+          thread.scrollTop = thread.scrollHeight;
         }
       });
     });
@@ -418,6 +455,7 @@ export function ChatSurface({
       {hasMessages ? (
         <ChatThread
           threadRef={threadRef}
+          pinnedToEndRef={pinnedToEndRef}
           messages={messages}
           recallByMessageId={recallByMessageId}
           toolCallsByMessageId={toolCallsByMessageId}

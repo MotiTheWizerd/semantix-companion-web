@@ -197,16 +197,15 @@ function acceptedEvent(accepted: AcceptedMessage): ChatEvent {
   return { kind: "accepted", ...accepted };
 }
 
+/** Discrete moments only — send accepted, turn started, turn finished. The
+ * continuous kinds (deltas, reasoning, tool chips) deliberately request
+ * nothing: following a growing transcript belongs to ChatThread's bottom
+ * pin. Requesting a scroll per delta made every animation cancel the last
+ * one, so during a long think the viewport crawled instead of arriving —
+ * and it also overrode a reader who had scrolled up on purpose. */
 function requestScrollForChatEvent(event: ChatEvent): void {
   if (event.kind === "accepted") {
     requestConversationScrollToEnd(event.conversation.id);
-  } else if (
-    event.kind === "assistantDelta" ||
-    event.kind === "assistantContentReplaced" ||
-    event.kind === "assistantReasoningDelta" ||
-    event.kind === "toolCall"
-  ) {
-    requestConversationScrollToEnd(event.conversationId);
   } else if (event.kind === "assistantStarted" || event.kind === "assistantCompleted") {
     requestConversationScrollToEnd(event.message.conversationId);
   }
