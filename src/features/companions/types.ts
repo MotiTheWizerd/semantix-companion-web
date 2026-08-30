@@ -38,12 +38,16 @@ export interface Companion {
   updatedAt: number;
   /** Named folders its file tools may touch. Empty means no file tools. */
   workspaces: CompanionWorkspace[];
+  /** The style this companion wears — a reference into the style library.
+   *  `null` speaks plainly. */
+  styleId: string | null;
 }
 
 export interface CreateCompanionInput {
   name: string | null;
   modelPreference: ModelPreference;
   workspaces: CompanionWorkspaceInput[];
+  styleId: string | null;
 }
 
 export interface UpdateCompanionInput {
@@ -51,6 +55,7 @@ export interface UpdateCompanionInput {
   name: string | null;
   modelPreference: ModelPreference;
   workspaces: CompanionWorkspaceInput[];
+  styleId: string | null;
 }
 
 export type CompanionChangedEvent =

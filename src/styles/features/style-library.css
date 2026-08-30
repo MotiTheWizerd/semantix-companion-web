@@ -1,0 +1,220 @@
+/* The Styles settings tab — the library of voices, and the harvest wizard
+   that mines an export for one. Rides the settings-form family; adds only
+   the exemplar list, the manual-pair editor, and the harvest's own moments. */
+
+.style-library__card-input {
+  font-family: inherit;
+  resize: vertical;
+}
+
+.style-library__exemplars {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+
+.style-library__exemplars-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.style-library__exemplars-header h4 {
+  margin: 0;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.style-library__exemplars-header h4 small {
+  margin-left: 8px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.style-library__pairs,
+.style-harvest__pairs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.style-library__pairs li,
+.style-harvest__pairs li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(22, 22, 22, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+}
+
+.style-library__pairs li details,
+.style-harvest__pairs li details {
+  flex: 1;
+  min-width: 0;
+}
+
+.style-library__pairs summary,
+.style-harvest__pairs summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.86rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.style-library__pair-user,
+.style-harvest__pair-user,
+.style-library__pair-voice,
+.style-harvest__pair-voice {
+  margin: 8px 0 0;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.style-library__pair-user,
+.style-harvest__pair-user {
+  color: var(--text-secondary);
+}
+
+.style-library__pair-user::before,
+.style-harvest__pair-user::before {
+  content: "They say · ";
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.style-library__pair-voice,
+.style-harvest__pair-voice {
+  color: var(--text);
+}
+
+.style-library__pair-voice::before,
+.style-harvest__pair-voice::before {
+  content: "The voice · ";
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.style-library__manual {
+  padding: 10px 14px;
+  background: rgba(22, 22, 22, 0.6);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+
+.style-library__manual summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.style-library__manual label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.style-library__manual textarea {
+  font-family: inherit;
+  resize: vertical;
+}
+
+.style-library__manual button {
+  margin-top: 10px;
+}
+
+/* --- The harvest wizard, nested inside the style form --- */
+
+.style-harvest {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  background: rgba(22, 22, 22, 0.8);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.style-harvest p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.87rem;
+  line-height: 1.5;
+}
+
+.style-harvest__pickers {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.style-harvest__choose,
+.style-harvest__preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.style-harvest__models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.style-harvest__models label {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.87rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.style-harvest__models strong {
+  color: var(--text);
+}
+
+.style-harvest__target {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.87rem;
+  color: var(--text-secondary);
+}
+
+.style-harvest__pair-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.style-harvest__pairs li {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.style-harvest__pairs li.is-struck details {
+  opacity: 0.4;
+  text-decoration: line-through;
+}

@@ -20,6 +20,7 @@ import "./styles/components/tool-call-chip.css";
 import "./styles/features/notifications.css";
 import "./styles/features/calls.css";
 import "./styles/features/import-wizard.css";
+import "./styles/features/style-library.css";
 import "./styles/markdown.css";
 import "./styles/syntax.css";
 

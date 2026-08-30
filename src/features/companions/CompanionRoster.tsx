@@ -10,6 +10,8 @@ import type { ConfiguredModel } from "../models/configuredModels/types";
 import { ModelSelector } from "../models/ModelSelector";
 import { getUserPreferences } from "../preferences/preferenceService";
 import type { ModelPreference, UserPreferences } from "../preferences/types";
+import { listStyles, onStylesChanged, reconcileStyleEvent } from "../styles/styleService";
+import type { Style } from "../styles/types";
 import {
   createCompanion,
   deleteCompanion,
@@ -91,6 +93,8 @@ export function CompanionRoster() {
     DEFAULT_MODEL_PREFERENCE,
   );
   const [workspaces, setWorkspaces] = useState<WorkspaceFolderDraft[]>([]);
+  const [availableStyles, setAvailableStyles] = useState<Style[]>([]);
+  const [styleId, setStyleId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importingId, setImportingId] = useState<string | null>(null);
 
@@ -103,6 +107,8 @@ export function CompanionRoster() {
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
 
+    let unlistenStyles: UnlistenFn | undefined;
+
     const initialise = async () => {
       try {
         unlisten = await onCompanionsChanged((event) => {
@@ -110,16 +116,23 @@ export function CompanionRoster() {
             setCompanions((current) => reconcileCompanionEvent(current, event));
           }
         });
+        unlistenStyles = await onStylesChanged((event) => {
+          if (!cancelled) {
+            setAvailableStyles((current) => reconcileStyleEvent(current, event));
+          }
+        });
 
-        const [roster, models, preferences] = await Promise.all([
+        const [roster, models, preferences, styleLibrary] = await Promise.all([
           listCompanions(),
           listConfiguredModels(),
           getUserPreferences(),
+          listStyles(),
         ]);
         if (cancelled) return;
         setCompanions(roster);
         setConfiguredModels(models);
         setUserPreferences(preferences);
+        setAvailableStyles(styleLibrary);
       } catch (initialisationError) {
         if (!cancelled) setError(errorMessage(initialisationError));
       } finally {
@@ -131,6 +144,7 @@ export function CompanionRoster() {
     return () => {
       cancelled = true;
       unlisten?.();
+      unlistenStyles?.();
     };
   }, []);
 
@@ -138,6 +152,7 @@ export function CompanionRoster() {
     setName("");
     setModelPreference(DEFAULT_MODEL_PREFERENCE);
     setWorkspaces([]);
+    setStyleId(null);
     setError(null);
     setEditingId(null);
     setIsFormOpen(false);
@@ -147,6 +162,7 @@ export function CompanionRoster() {
     setName("");
     setModelPreference(DEFAULT_MODEL_PREFERENCE);
     setWorkspaces([]);
+    setStyleId(null);
     setError(null);
     setEditingId(null);
     setPendingDeleteId(null);
@@ -164,6 +180,7 @@ export function CompanionRoster() {
     setImportingId(null);
     setName(companion.name ?? "");
     setModelPreference(companion.modelPreference);
+    setStyleId(companion.styleId);
     setWorkspaces(
       companion.workspaces.map((workspace) => ({
         key: workspace.id,
@@ -202,11 +219,13 @@ export function CompanionRoster() {
             name: submitted,
             modelPreference,
             workspaces: submittedWorkspaces,
+            styleId,
           })
         : await createCompanion({
             name: submitted,
             modelPreference,
             workspaces: submittedWorkspaces,
+            styleId,
           });
       setCompanions((current) =>
         reconcileCompanionEvent(current, {
@@ -311,6 +330,27 @@ export function CompanionRoster() {
               />
             </div>
 
+            <label className="credential-field credential-field--wide">
+              <span>
+                Style <small>Optional — a voice from your style library</small>
+              </span>
+              <select
+                aria-label="Companion style"
+                value={styleId ?? ""}
+                onChange={(event) => setStyleId(event.target.value || null)}
+              >
+                <option value="">No style — speaks plainly</option>
+                {availableStyles.map((style) => (
+                  <option key={style.id} value={style.id}>
+                    {style.name}
+                    {style.exemplarCount > 0
+                      ? ` (${style.exemplarCount} exchanges)`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             <div className="credential-field credential-field--wide">
               <WorkspaceFolderEditor
                 value={workspaces}
@@ -376,6 +416,13 @@ export function CompanionRoster() {
                   <strong>{companionLabel(companion)}</strong>
                   <span>
                     {voiceLabel(companion, configuredModels, userPreferences)}
+                    {companion.styleId
+                      ? ` · ${
+                          availableStyles.find(
+                            (style) => style.id === companion.styleId,
+                          )?.name ?? "Style"
+                        }`
+                      : ""}
                     {companion.isBuiltIn ? " · Built-in" : ""}
                   </span>
                 </div>

@@ -1,6 +1,7 @@
 import { useState, type ComponentType } from "react";
 
 import { CompanionRoster } from "../features/companions/CompanionRoster";
+import { StyleLibrary } from "../features/styles/StyleLibrary";
 import { MemorySettingsSection } from "../features/memory/MemorySettingsSection";
 import { ProviderApiKeyStore } from "../features/models/credentials/ProviderApiKeyStore";
 import { ConfiguredModelStore } from "../features/models/configuredModels/ConfiguredModelStore";
@@ -27,11 +28,16 @@ function CompanionsPanel() {
   return <CompanionRoster />;
 }
 
+function StylesPanel() {
+  return <StyleLibrary />;
+}
+
 /** The registry drives both the tab strip and the panel — a new settings
  *  section is one entry here and nothing else. */
 const SETTINGS_TABS: SettingsTab[] = [
   { id: "models", label: "Models", Panel: ModelsPanel },
   { id: "companions", label: "Companions", Panel: CompanionsPanel },
+  { id: "styles", label: "Styles", Panel: StylesPanel },
 ];
 
 export function SettingsScreen() {
