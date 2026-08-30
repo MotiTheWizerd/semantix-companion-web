@@ -153,6 +153,7 @@ const ChatThread = memo(function ChatThread({
   callsError,
   companions,
 }: ChatThreadProps) {
+  const contentRef = useRef<HTMLDivElement>(null);
   const callPlacements = useMemo(
     () => placeCalls(messages, callThreads),
     [messages, callThreads],
@@ -161,6 +162,28 @@ const ChatThread = memo(function ChatThread({
     () => new Map(companions.map((companion) => [companion.id, companionLabel(companion)])),
     [companions],
   );
+
+  // ⚑ NOT EVERY GROWTH IS A COMMIT OF THIS COMPONENT. The follow below rides
+  // ChatThread's own renders, which covers new messages and streamed tokens —
+  // but a call card owns its `expanded` state privately and opens ITSELF the
+  // moment speech starts, so the whole turns block appears, and grows through
+  // the back-and-forth, without ChatThread ever re-rendering. The view is left
+  // behind with nothing to tell it.
+  // Enumerating growth paths is the trap that cost us the thinking panel, so
+  // this watches the RESULT instead: any change in content height re-lands the
+  // pin while it is armed, whoever caused it — a call expanding, an image
+  // decoding, a card we have not written yet. Reader scrolled away ⇒ pin
+  // released ⇒ this does nothing, which is the whole contract.
+  useEffect(() => {
+    const thread = threadRef.current;
+    const content = contentRef.current;
+    if (!thread || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (pinnedToEndRef.current) thread.scrollTop = thread.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [threadRef, pinnedToEndRef]);
 
   // The pin stays honest through the scroll events themselves: every scroll —
   // the reader's wheel and our own snaps alike — re-measures whether the view
@@ -195,87 +218,89 @@ const ChatThread = memo(function ChatThread({
       aria-label="Conversation messages"
       aria-live="polite"
     >
-      {callPlacements.beforeFirstMessage.map((thread) => (
-        <CallTranscriptItem
-          key={thread.call.id}
-          thread={thread}
-          agentNames={callAgentNames}
-          streamingMessages={streamingCallMessages.filter(
-            (message) => message.callId === thread.call.id,
-          )}
-        />
-      ))}
-      {messages.map((message) => {
-        const recall = recallByMessageId[message.id];
-        const toolCalls = toolCallsByMessageId[message.id];
-        const reasoning = reasoningByMessageId[message.id] ?? "";
-        const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
-        const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
-        const showReasoning =
-          message.role === "assistant" &&
-          (Boolean(reasoning) || (message.status === "streaming" && !message.content));
-        // The first tool call opens its own row, like a message of its
-        // own; later calls in the same turn join that row. The turn's
-        // real reply only gets a row once it actually has something to
-        // show — otherwise it's a redundant empty bubble under the chip.
-        const showTextRow =
-          !hasToolRow ||
-          message.attachments.length > 0 ||
-          Boolean(message.content) ||
-          Boolean(message.errorMessage) ||
-          Boolean(recall) ||
-          showReasoning;
-        return (
-          <Fragment key={message.id}>
-            {toolCalls && toolCalls.length > 0 ? (
-              <article className="chat-message chat-message--assistant chat-message--tool-activity">
-                <ToolCallChip calls={toolCalls} />
-              </article>
-            ) : null}
-            {showTextRow ? (
-              <article className={`chat-message chat-message--${message.role}`}>
-                {message.attachments.length > 0 ? (
-                  <div className="chat-message__images">
-                    {message.attachments.map((attachment) => (
-                      <img
-                        key={attachment.id}
-                        src={`data:${attachment.mediaType};base64,${attachment.data}`}
-                        alt="Attached image"
-                      />
-                    ))}
-                  </div>
-                ) : null}
-                {showReasoning ? (
-                  <ReasoningDisclosure
-                    reasoning={reasoning}
-                    isStreaming={message.status === "streaming"}
-                  />
-                ) : null}
-                {message.role === "assistant" && message.content ? (
-                  <MarkdownRenderer content={message.content} />
-                ) : message.content ? (
-                  <p>{message.content}</p>
-                ) : null}
-                {message.errorMessage ? (
-                  <span className="chat-message__error">{message.errorMessage}</span>
-                ) : null}
-                {recall ? <MemoryRecallChip data={recall} /> : null}
-              </article>
-            ) : null}
-            {callsAfterMessage.map((thread) => (
-              <CallTranscriptItem
-                key={thread.call.id}
-                thread={thread}
-                agentNames={callAgentNames}
-                streamingMessages={streamingCallMessages.filter(
-                  (streaming) => streaming.callId === thread.call.id,
-                )}
-              />
-            ))}
-          </Fragment>
-        );
-      })}
-      {callsError ? <CallTranscriptError error={callsError} /> : null}
+      <div className="chat-thread__content" ref={contentRef}>
+        {callPlacements.beforeFirstMessage.map((thread) => (
+          <CallTranscriptItem
+            key={thread.call.id}
+            thread={thread}
+            agentNames={callAgentNames}
+            streamingMessages={streamingCallMessages.filter(
+              (message) => message.callId === thread.call.id,
+            )}
+          />
+        ))}
+        {messages.map((message) => {
+          const recall = recallByMessageId[message.id];
+          const toolCalls = toolCallsByMessageId[message.id];
+          const reasoning = reasoningByMessageId[message.id] ?? "";
+          const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
+          const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
+          const showReasoning =
+            message.role === "assistant" &&
+            (Boolean(reasoning) || (message.status === "streaming" && !message.content));
+          // The first tool call opens its own row, like a message of its
+          // own; later calls in the same turn join that row. The turn's
+          // real reply only gets a row once it actually has something to
+          // show — otherwise it's a redundant empty bubble under the chip.
+          const showTextRow =
+            !hasToolRow ||
+            message.attachments.length > 0 ||
+            Boolean(message.content) ||
+            Boolean(message.errorMessage) ||
+            Boolean(recall) ||
+            showReasoning;
+          return (
+            <Fragment key={message.id}>
+              {toolCalls && toolCalls.length > 0 ? (
+                <article className="chat-message chat-message--assistant chat-message--tool-activity">
+                  <ToolCallChip calls={toolCalls} />
+                </article>
+              ) : null}
+              {showTextRow ? (
+                <article className={`chat-message chat-message--${message.role}`}>
+                  {message.attachments.length > 0 ? (
+                    <div className="chat-message__images">
+                      {message.attachments.map((attachment) => (
+                        <img
+                          key={attachment.id}
+                          src={`data:${attachment.mediaType};base64,${attachment.data}`}
+                          alt="Attached image"
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {showReasoning ? (
+                    <ReasoningDisclosure
+                      reasoning={reasoning}
+                      isStreaming={message.status === "streaming"}
+                    />
+                  ) : null}
+                  {message.role === "assistant" && message.content ? (
+                    <MarkdownRenderer content={message.content} />
+                  ) : message.content ? (
+                    <p>{message.content}</p>
+                  ) : null}
+                  {message.errorMessage ? (
+                    <span className="chat-message__error">{message.errorMessage}</span>
+                  ) : null}
+                  {recall ? <MemoryRecallChip data={recall} /> : null}
+                </article>
+              ) : null}
+              {callsAfterMessage.map((thread) => (
+                <CallTranscriptItem
+                  key={thread.call.id}
+                  thread={thread}
+                  agentNames={callAgentNames}
+                  streamingMessages={streamingCallMessages.filter(
+                    (streaming) => streaming.callId === thread.call.id,
+                  )}
+                />
+              ))}
+            </Fragment>
+          );
+        })}
+        {callsError ? <CallTranscriptError error={callsError} /> : null}
+      </div>
     </section>
   );
 });
@@ -301,6 +326,8 @@ export function ChatSurface({
   onRemoveAttachment,
 }: ChatSurfaceProps) {
   const threadRef = useRef<HTMLElement>(null);
+  const surfaceRef = useRef<HTMLElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
   const pinnedToEndRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
@@ -314,6 +341,27 @@ export function ChatSurface({
     isInitialLoading: areCallsInitiallyLoading,
     error: callsError,
   } = useConversationCalls(activeConversationId, isSending);
+
+  // The dock floats OVER the thread so messages frost under the composer glass.
+  // That costs the thread its floor, so the thread rents it back as bottom
+  // padding — and the dock's height is not a constant: the textarea grows to
+  // 160px, attachment chips appear, the note wraps on an error. Measure it and
+  // publish it as --composer-dock-h. A dock that grew while the reader was
+  // pinned would push the newest line up behind the glass, so the same callback
+  // re-lands the pin.
+  useLayoutEffect(() => {
+    const dock = dockRef.current;
+    const surface = surfaceRef.current;
+    if (!dock || !surface) return;
+    const observer = new ResizeObserver(() => {
+      surface.style.setProperty("--composer-dock-h", `${dock.offsetHeight}px`);
+      const thread = threadRef.current;
+      if (thread && pinnedToEndRef.current) thread.scrollTop = thread.scrollHeight;
+    });
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, []);
+
   // Opening a conversation is a snap, not a tour through its history. Wait
   // until BOTH independently loaded timelines (messages + calls) are in the
   // DOM, then land at the true bottom before paint. Images that finish decoding
@@ -451,7 +499,11 @@ export function ChatSurface({
   };
 
   return (
-    <main className={`chat-surface ${hasMessages ? "has-messages" : ""}`} id="chat">
+    <main
+      className={`chat-surface ${hasMessages ? "has-messages" : ""}`}
+      id="chat"
+      ref={surfaceRef}
+    >
       {hasMessages ? (
         <ChatThread
           threadRef={threadRef}
@@ -469,104 +521,106 @@ export function ChatSurface({
         <EmptyState />
       )}
 
-      <form className="chat-composer" onSubmit={handleSubmit}>
-        <label className="sr-only" htmlFor="companion-message">
-          Message Companion
-        </label>
-        {pendingAttachments.length > 0 ? (
-          <div className="chat-composer__attachments">
-            {pendingAttachments.map((attachment) => (
-              <span className="composer-attachment" key={attachment.id}>
-                <img
-                  src={`data:${attachment.mediaType};base64,${attachment.data}`}
-                  alt="Image ready to send"
-                />
-                <button
-                  type="button"
-                  aria-label="Remove image"
-                  onClick={() => onRemoveAttachment(attachment.id)}
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        ) : null}
-        <textarea
-          ref={messageInputRef}
-          id="companion-message"
-          name="message"
-          rows={1}
-          placeholder="Message Companion…"
-          aria-describedby="composer-note"
-          value={content}
-          disabled={isLoading}
-          onChange={(event) => onContentChange(event.target.value)}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-        />
-        <div className="chat-composer__toolbar">
-          <input
-            ref={fileInputRef}
-            className="sr-only"
-            type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
-            multiple
-            tabIndex={-1}
-            aria-hidden="true"
-            onChange={(event) => {
-              const files = Array.from(event.target.files ?? []);
-              event.target.value = "";
-              if (files.length > 0) onAttachFiles(files);
-            }}
-          />
-          <button
-            className="composer-button"
-            type="button"
-            aria-label="Attach images"
-            disabled={isLoading || isSending}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <AttachIcon />
-          </button>
-          <EmojiPicker
-            triggerClassName="composer-button"
-            disabled={isLoading || isSending}
-            returnFocus={false}
-            onSelect={handleEmojiSelect}
-          />
-          <label className="sr-only" htmlFor="companion-picker">
-            Companion
+      <div className="chat-composer-dock" ref={dockRef}>
+        <form className="chat-composer" onSubmit={handleSubmit}>
+          <label className="sr-only" htmlFor="companion-message">
+            Message Companion
           </label>
-          <CompanionSelect
-            className="chat-composer__model"
-            id="companion-picker"
-            companions={companions}
-            value={companionId}
-            disabled={isLoading || isSending}
-            onChange={onCompanionChange}
+          {pendingAttachments.length > 0 ? (
+            <div className="chat-composer__attachments">
+              {pendingAttachments.map((attachment) => (
+                <span className="composer-attachment" key={attachment.id}>
+                  <img
+                    src={`data:${attachment.mediaType};base64,${attachment.data}`}
+                    alt="Image ready to send"
+                  />
+                  <button
+                    type="button"
+                    aria-label="Remove image"
+                    onClick={() => onRemoveAttachment(attachment.id)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          <textarea
+            ref={messageInputRef}
+            id="companion-message"
+            name="message"
+            rows={1}
+            placeholder="Message Companion…"
+            aria-describedby="composer-note"
+            value={content}
+            disabled={isLoading}
+            onChange={(event) => onContentChange(event.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
           />
-          <button
-            className="composer-send"
-            type="submit"
-            aria-label="Send message"
-            disabled={
-              isLoading ||
-              isSending ||
-              (content.trim().length === 0 && pendingAttachments.length === 0)
-            }
-          >
-            <SendIcon />
-          </button>
-        </div>
-      </form>
-      <p
-        className={`composer-note${error ? " composer-note--error" : ""}`}
-        id="composer-note"
-        role={error ? "alert" : undefined}
-      >
-        {error ?? notice ?? "Your conversations stay in your private workspace."}
-      </p>
+          <div className="chat-composer__toolbar">
+            <input
+              ref={fileInputRef}
+              className="sr-only"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              multiple
+              tabIndex={-1}
+              aria-hidden="true"
+              onChange={(event) => {
+                const files = Array.from(event.target.files ?? []);
+                event.target.value = "";
+                if (files.length > 0) onAttachFiles(files);
+              }}
+            />
+            <button
+              className="composer-button"
+              type="button"
+              aria-label="Attach images"
+              disabled={isLoading || isSending}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <AttachIcon />
+            </button>
+            <EmojiPicker
+              triggerClassName="composer-button"
+              disabled={isLoading || isSending}
+              returnFocus={false}
+              onSelect={handleEmojiSelect}
+            />
+            <label className="sr-only" htmlFor="companion-picker">
+              Companion
+            </label>
+            <CompanionSelect
+              className="chat-composer__model"
+              id="companion-picker"
+              companions={companions}
+              value={companionId}
+              disabled={isLoading || isSending}
+              onChange={onCompanionChange}
+            />
+            <button
+              className="composer-send"
+              type="submit"
+              aria-label="Send message"
+              disabled={
+                isLoading ||
+                isSending ||
+                (content.trim().length === 0 && pendingAttachments.length === 0)
+              }
+            >
+              <SendIcon />
+            </button>
+          </div>
+        </form>
+        <p
+          className={`composer-note${error ? " composer-note--error" : ""}`}
+          id="composer-note"
+          role={error ? "alert" : undefined}
+        >
+          {error ?? notice ?? "Your conversations stay in your private workspace."}
+        </p>
+      </div>
     </main>
   );
 }
