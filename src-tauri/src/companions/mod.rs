@@ -86,6 +86,10 @@ pub(crate) struct Companion {
     /// off their own memory. Only meaningful alongside `is_origin`; the organ
     /// takes its identity from the bearer token. See schema 17.
     pub(crate) origin_agent_id: Option<String>,
+    /// The voice this companion wears — a reference into the style library,
+    /// never a copy. `None` speaks plainly. Deleting a style SET NULLs this,
+    /// so a companion is never broken by losing its coat. See schema 21.
+    pub(crate) style_id: Option<String>,
 }
 
 /// What an origin companion is allowed to sign with. Absent = the companion is
@@ -102,6 +106,8 @@ pub(crate) struct CreateCompanionInput {
     model_preference: ModelPreference,
     #[serde(default)]
     workspaces: Vec<CompanionWorkspaceInput>,
+    #[serde(default)]
+    style_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +118,8 @@ pub(crate) struct UpdateCompanionInput {
     model_preference: ModelPreference,
     #[serde(default)]
     workspaces: Vec<CompanionWorkspaceInput>,
+    #[serde(default)]
+    style_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -206,9 +214,11 @@ impl CompanionService {
             name,
             model_preference,
             workspaces,
+            style_id,
         } = input;
         let name = normalise_name(name)?;
         let workspaces = normalise_workspaces(workspaces, &[])?;
+        let style_id = normalise_style_id(style_id);
         self.preferences
             .validate_model_preference(&model_preference)?;
         let id = Uuid::new_v4().to_string();
@@ -227,6 +237,7 @@ impl CompanionService {
             // thing the UI can do — see schema 16.
             is_origin: false,
             origin_agent_id: None,
+            style_id,
         };
 
         self.repository.insert(&companion)?;
@@ -239,10 +250,12 @@ impl CompanionService {
             name,
             model_preference,
             workspaces,
+            style_id,
         } = input;
         let current = self.require(companion_id.trim())?;
         let name = normalise_name(name)?;
         let workspaces = normalise_workspaces(workspaces, &current.workspaces)?;
+        let style_id = normalise_style_id(style_id);
         self.preferences
             .validate_model_preference(&model_preference)?;
         let timestamp = unix_timestamp_ms()?;
@@ -251,6 +264,7 @@ impl CompanionService {
             name.as_deref(),
             &model_preference,
             &workspaces,
+            style_id.as_deref(),
             timestamp,
         )?;
 
@@ -258,6 +272,7 @@ impl CompanionService {
             name,
             model_preference,
             workspaces,
+            style_id,
             updated_at: timestamp,
             ..current
         })
@@ -345,6 +360,18 @@ fn normalise_workspaces(
     }
 
     Ok(workspaces)
+}
+
+/// Blank and absent both mean "no style". Existence is enforced by the
+/// foreign key — the dropdown only offers real styles, and a race with a
+/// concurrent delete surfaces as a database error rather than silently
+/// dressing the companion in a ghost.
+fn normalise_style_id(style_id: Option<String>) -> Option<String> {
+    style_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 /// Blank, whitespace, or absent all mean the same thing: unnamed.
@@ -505,6 +532,7 @@ mod tests {
 
         let made = service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: Some("Rook".to_owned()),
                 model_preference: ModelPreference::Inherit,
                 workspaces: Vec::new(),
@@ -544,6 +572,7 @@ mod tests {
         let made = database
             .service()
             .create(CreateCompanionInput {
+                style_id: None,
                 name: Some("Arc".to_owned()),
                 model_preference: ModelPreference::Inherit,
                 workspaces: Vec::new(),
@@ -572,6 +601,7 @@ mod tests {
         let made = database
             .service()
             .create(CreateCompanionInput {
+                style_id: None,
                 name: Some("Studio".to_owned()),
                 model_preference: ModelPreference::Inherit,
                 workspaces: Vec::new(),
@@ -608,6 +638,7 @@ mod tests {
         let made = database
             .service()
             .create(CreateCompanionInput {
+                style_id: None,
                 name: Some("Arc".to_owned()),
                 model_preference: ModelPreference::Inherit,
                 workspaces: Vec::new(),
@@ -659,6 +690,7 @@ mod tests {
 
         let first = service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: Some("Ragnar".to_owned()),
                 model_preference: ModelPreference::Test,
                 workspaces: Vec::new(),
@@ -666,6 +698,7 @@ mod tests {
             .expect("the first companion should be created");
         let second = service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: None,
                 model_preference: ModelPreference::Inherit,
                 workspaces: Vec::new(),
@@ -688,6 +721,7 @@ mod tests {
         let service = database.service();
         let created = service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: None,
                 model_preference: ModelPreference::Inherit,
                 workspaces: Vec::new(),
@@ -696,6 +730,7 @@ mod tests {
 
         let renamed = service
             .update(UpdateCompanionInput {
+                style_id: None,
                 companion_id: created.id.clone(),
                 name: Some("  Bjorn  ".to_owned()),
                 model_preference: ModelPreference::Test,
@@ -707,6 +742,7 @@ mod tests {
 
         let cleared = service
             .update(UpdateCompanionInput {
+                style_id: None,
                 companion_id: created.id,
                 name: Some(String::new()),
                 model_preference: ModelPreference::Inherit,
@@ -723,6 +759,7 @@ mod tests {
         let service = database.service();
         let added = service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: None,
                 model_preference: ModelPreference::Inherit,
                 workspaces: Vec::new(),
@@ -828,6 +865,7 @@ mod tests {
                 }],
                 is_origin: false,
                 origin_agent_id: None,
+                style_id: None,
             },
         })
         .expect("created event should serialize");
@@ -877,6 +915,7 @@ mod tests {
         let added = database
             .service()
             .create(CreateCompanionInput {
+                style_id: None,
                 name: Some("Bjorn".to_owned()),
                 model_preference: ModelPreference::Test,
                 workspaces: Vec::new(),
@@ -901,6 +940,7 @@ mod tests {
 
         let created = service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: Some("Bjorn".to_owned()),
                 model_preference: ModelPreference::Inherit,
                 workspaces: vec![
@@ -938,6 +978,7 @@ mod tests {
         // Reordering and renaming keep the existing capability ids.
         let reordered = service
             .update(UpdateCompanionInput {
+                style_id: None,
                 companion_id: created.id.clone(),
                 name: created.name.clone(),
                 model_preference: ModelPreference::Inherit,
@@ -961,6 +1002,7 @@ mod tests {
         // An empty collection revokes every file capability atomically.
         let cleared = service
             .update(UpdateCompanionInput {
+                style_id: None,
                 companion_id: reordered.id,
                 name: None,
                 model_preference: ModelPreference::Inherit,
@@ -979,6 +1021,7 @@ mod tests {
         assert!(
             service
                 .create(CreateCompanionInput {
+                    style_id: None,
                     name: None,
                     model_preference: ModelPreference::Inherit,
                     workspaces: vec![CompanionWorkspaceInput {
@@ -1008,6 +1051,7 @@ mod tests {
         };
         assert!(service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: None,
                 model_preference: ModelPreference::Inherit,
                 workspaces: vec![input("Code", &directory), input("code", &other)],
@@ -1015,6 +1059,7 @@ mod tests {
             .is_err());
         assert!(service
             .create(CreateCompanionInput {
+                style_id: None,
                 name: None,
                 model_preference: ModelPreference::Inherit,
                 workspaces: vec![input("Code", &directory), input("Mirror", &directory)],

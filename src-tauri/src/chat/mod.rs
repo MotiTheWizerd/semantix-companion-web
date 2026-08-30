@@ -27,6 +27,7 @@ use crate::{
     models::ModelResolver,
     preferences::{PreferenceRepository, ResolvedVoice},
     streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
+    styles::{Style, StyleExemplar, StyleRepository},
     tools::{self, ToolContext, ToolWorkspace},
 };
 
@@ -34,6 +35,11 @@ use crate::{
 /// receives no tools and must close with an answer instead of losing one last
 /// tool request and persisting its half-written preamble.
 const MAX_TOOL_ROUNDS: usize = 4;
+
+/// How many style exemplars ride one request. A voice saturates in dozens of
+/// demonstrations; past this the block buys no fidelity and only crowds the
+/// window the companion's memory and conversation actually need.
+const STYLE_PROMPT_EXEMPLAR_BUDGET: usize = 40;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,6 +312,7 @@ impl ChatState {
                 repository,
                 ModelResolver::open(database_path)?,
                 CompanionResolver::open(database_path)?,
+                StyleRepository::open(database_path)?,
                 PreferenceRepository::open(database_path)?,
                 StreamingService::new(Arc::new(InferenceGateway::default())),
                 database_path.to_owned(),
@@ -318,6 +325,9 @@ pub(crate) struct ChatService {
     repository: ChatRepository,
     model_resolver: ModelResolver,
     companions: CompanionResolver,
+    /// Read-only door onto the style library: chat only ever asks what voice
+    /// the answering companion wears, never edits one.
+    styles: StyleRepository,
     preferences: PreferenceRepository,
     streaming: StreamingService<InferenceExecution, InferenceDelta>,
     /// Handed to ToolContext so the search_conversations tool can open its
@@ -330,6 +340,7 @@ impl ChatService {
         repository: ChatRepository,
         model_resolver: ModelResolver,
         companions: CompanionResolver,
+        styles: StyleRepository,
         preferences: PreferenceRepository,
         streaming: StreamingService<InferenceExecution, InferenceDelta>,
         database_path: PathBuf,
@@ -338,6 +349,7 @@ impl ChatService {
             repository,
             model_resolver,
             companions,
+            styles,
             preferences,
             streaming,
             database_path,
@@ -521,6 +533,11 @@ impl ChatService {
         if let Some(awareness) = workspace_awareness(&tool_context.workspaces) {
             messages.insert(0, InferenceMessage::text(Role::System, awareness));
         }
+        // The voice rides directly under the name: how the companion speaks is
+        // part of who it is, and it outranks what it can do or remembers.
+        if let Some(style) = self.style_directive_for(&companion) {
+            messages.insert(0, InferenceMessage::text(Role::System, style));
+        }
         // The name goes FIRST, ahead of capabilities and recalled memory: a
         // companion should know who it is before it is handed what it can do or
         // what it remembers. These blocks ride the request only and are never
@@ -617,14 +634,17 @@ impl ChatService {
         // It is also drastically cheaper: forty messages resent per wake, for
         // context that actively misleads, was the worst of both.
         let mut messages = Vec::new();
-        if let Some(identity) = self
-            .companions
-            .resolve(Some(companion_id))
-            .ok()
-            .as_ref()
-            .and_then(companion_identity)
-        {
+        let woken_companion = self.companions.resolve(Some(companion_id)).ok();
+        if let Some(identity) = woken_companion.as_ref().and_then(companion_identity) {
             messages.push(InferenceMessage::text(Role::System, identity));
+        }
+        // A woken turn speaks in the same voice as an answered one — the style
+        // is part of who the companion is, not of who it is talking to.
+        if let Some(style) = woken_companion
+            .as_ref()
+            .and_then(|companion| self.style_directive_for(companion))
+        {
+            messages.push(InferenceMessage::text(Role::System, style));
         }
         if let Some(awareness) = workspace_awareness(&prepared.tool_context.workspaces) {
             messages.push(InferenceMessage::text(Role::System, awareness));
@@ -649,6 +669,20 @@ impl ChatService {
         prepared.execution.request.messages = messages;
 
         Ok(prepared)
+    }
+
+    /// The style block for whoever is answering, ready to ride as a system
+    /// message. `None` when the companion wears no style — and also when the
+    /// referenced style cannot be loaded: a broken coat must never silence
+    /// the companion wearing it, so failures degrade to speaking plainly.
+    fn style_directive_for(&self, companion: &Companion) -> Option<String> {
+        let style_id = companion.style_id.as_deref()?;
+        let style = self.styles.get(style_id).ok().flatten()?;
+        let exemplars = self
+            .styles
+            .exemplars(&style.id, Some(STYLE_PROMPT_EXEMPLAR_BUDGET))
+            .ok()?;
+        style_directive(&style, &exemplars)
     }
 
     fn begin_assistant(
@@ -1225,6 +1259,62 @@ fn companion_identity(companion: &Companion) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// The system block that teaches a companion its chosen voice.
+///
+/// THE LINE THIS TEXT HOLDS: it transfers a way of SPEAKING, never an
+/// identity. It never tells the model it is some other product, it fences the
+/// exemplars off from being read as history or facts, and it explicitly ranks
+/// honesty above the coat. A style is how the companion talks — not a mask,
+/// and not a license.
+///
+/// `None` when the style has neither a card nor exemplars: an empty style
+/// should say nothing rather than ceremoniously announcing nothing.
+fn style_directive(style: &Style, exemplars: &[StyleExemplar]) -> Option<String> {
+    if style.style_card.is_none() && exemplars.is_empty() {
+        return None;
+    }
+    let mut block = format!(
+        "This is a companion app. The user has chosen a conversational style for you \
+to speak in, named {name}. Adopt this voice as your own and stay in it naturally, \
+without announcing it or breaking character to comment on it.",
+        name = serde_json::to_string(&style.name)
+            .expect("serializing a style name string to JSON cannot fail"),
+    );
+    if let Some(card) = style
+        .style_card
+        .as_deref()
+        .map(str::trim)
+        .filter(|card| !card.is_empty())
+    {
+        block.push_str("\n\nThe style, described:\n");
+        block.push_str(card);
+    }
+    if !exemplars.is_empty() {
+        block.push_str(&format!(
+            "\n\nThe {count} exchanges below DEMONSTRATE the voice. Learn how it \
+speaks — rhythm, length, formatting, warmth, how it opens and closes. They are \
+demonstrations only: they are not this conversation's history, they are not \
+memories, and nothing in them is a fact about this user. Never reference, quote, \
+or continue them.",
+            count = exemplars.len(),
+        ));
+        for (index, exemplar) in exemplars.iter().enumerate() {
+            block.push_str(&format!(
+                "\n\n--- Example {number} ---\n[They say]: {user}\n[The voice replies]: {companion}",
+                number = index + 1,
+                user = exemplar.user_text,
+                companion = exemplar.companion_text,
+            ));
+        }
+    }
+    block.push_str(
+        "\n\nThe style changes how you speak, never what is true: your own memory, \
+your tools, and honesty all outrank it. If the user asks what you really are, \
+answer honestly.",
+    );
+    Some(block)
+}
+
 /// What a companion is told about the named filesystem capabilities that are
 /// actually valid for this turn.
 ///
@@ -1366,8 +1456,8 @@ mod tests {
 
     use super::{
         companion_identity, conversation_title, drive_turn, repository::ChatRepository,
-        workspace_awareness, ChatEvent, ChatEventSink, ChatService, ChatStreamAdapter, Message,
-        SubmitMessageInput, MAX_TOOL_ROUNDS, ORIGIN_CLOCK_ETIQUETTE,
+        style_directive, workspace_awareness, ChatEvent, ChatEventSink, ChatService,
+        ChatStreamAdapter, Message, SubmitMessageInput, MAX_TOOL_ROUNDS, ORIGIN_CLOCK_ETIQUETTE,
     };
     use crate::{
         companions::{Companion, CompanionResolver},
@@ -1379,6 +1469,7 @@ mod tests {
         models::ModelResolver,
         preferences::{ModelPreference, PreferenceRepository},
         streaming::{DeltaSink, StreamError, StreamEvent, StreamSink, StreamingService},
+        styles::{Style, StyleExemplar, StyleRepository},
         tools::ToolWorkspace,
     };
 
@@ -1553,6 +1644,7 @@ mod tests {
             ChatRepository::open(&database_path).expect("chat repository should open"),
             ModelResolver::open(&database_path).expect("model resolver should open"),
             CompanionResolver::open(&database_path).expect("companion resolver should open"),
+            StyleRepository::open(&database_path).expect("style repository should open"),
             PreferenceRepository::open(&database_path).expect("preference repository should open"),
             StreamingService::new(Arc::new(InferenceGateway::for_test(provider.clone()))),
             database_path.clone(),
@@ -1614,6 +1706,7 @@ mod tests {
             workspaces: Vec::new(),
             is_origin: false,
             origin_agent_id: None,
+            style_id: None,
         };
 
         assert_eq!(
@@ -1650,6 +1743,7 @@ mod tests {
             workspaces: Vec::new(),
             is_origin: true,
             origin_agent_id: None,
+            style_id: None,
         };
 
         let told =
@@ -1662,6 +1756,79 @@ mod tests {
             Some(ORIGIN_CLOCK_ETIQUETTE),
             "an unnamed origin still gets the warning — it is about the memory, not the name"
         );
+    }
+
+    #[test]
+    fn a_style_directive_carries_the_card_the_exemplars_and_the_honesty_floor() {
+        let style = Style {
+            id: "style-1".to_owned(),
+            name: "Warm & effusive".to_owned(),
+            description: None,
+            style_card: Some("VOICE: warm, fast, certain.".to_owned()),
+            created_at: 1,
+            updated_at: 1,
+            exemplar_count: 1,
+        };
+        let exemplars = vec![StyleExemplar {
+            id: "exemplar-1".to_owned(),
+            position: 0,
+            user_text: "so here we go, wanna see the blueprint?".to_owned(),
+            companion_text: "Always. Show me what you've got.".to_owned(),
+            era: Some("2026-01".to_owned()),
+        }];
+
+        let directive = style_directive(&style, &exemplars).expect("a full style says something");
+        assert!(directive.contains("\"Warm & effusive\""));
+        assert!(directive.contains("VOICE: warm, fast, certain."));
+        assert!(directive.contains("Always. Show me what you've got."));
+        assert!(
+            directive.contains("answer honestly"),
+            "the honesty floor is part of the block, not an option"
+        );
+        assert!(
+            directive.contains("not this conversation's history"),
+            "exemplars are fenced off from being read as memory"
+        );
+
+        let bare = Style {
+            style_card: None,
+            ..style
+        };
+        assert_eq!(
+            style_directive(&bare, &[]),
+            None,
+            "an empty style says nothing rather than announcing nothing"
+        );
+    }
+
+    #[test]
+    fn a_companion_without_a_style_gets_no_style_block() {
+        let database_path = std::env::temp_dir().join(format!(
+            "semantix-companion-style-test-{}.db",
+            Uuid::new_v4()
+        ));
+        database::initialise(&database_path).expect("test database should initialise");
+        let service = ChatService::new(
+            ChatRepository::open(&database_path).expect("chat repository should open"),
+            ModelResolver::open(&database_path).expect("model resolver should open"),
+            CompanionResolver::open(&database_path).expect("companion resolver should open"),
+            StyleRepository::open(&database_path).expect("style repository should open"),
+            PreferenceRepository::open(&database_path).expect("preference repository should open"),
+            StreamingService::new(Arc::new(InferenceGateway::default())),
+            database_path.clone(),
+        );
+
+        let companion = service
+            .companions
+            .resolve(None)
+            .expect("the built-in companion resolves");
+        assert_eq!(
+            service.style_directive_for(&companion),
+            None,
+            "the built-in companion wears no style out of the box"
+        );
+
+        let _ = std::fs::remove_file(&database_path);
     }
 
     #[test]
@@ -1762,6 +1929,7 @@ mod tests {
                 ChatRepository::open(&database_path).expect("chat repository should open"),
                 ModelResolver::open(&database_path).expect("model resolver should open"),
                 CompanionResolver::open(&database_path).expect("companion resolver should open"),
+                StyleRepository::open(&database_path).expect("style repository should open"),
                 PreferenceRepository::open(&database_path)
                     .expect("preference repository should open"),
                 StreamingService::new(Arc::new(InferenceGateway::default())),

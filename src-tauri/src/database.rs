@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 20;
+const LATEST_SCHEMA_VERSION: i64 = 21;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -702,6 +702,50 @@ fn migration_sql(version: i64) -> &'static str {
             // here). The FTS triggers index them on insert for free.
             "ALTER TABLE conversations ADD COLUMN source TEXT;"
         }
+        21 => {
+            // CONVERSATIONAL STYLES. A style is a reusable voice — a compact
+            // trait sheet plus real example exchanges — that a companion can
+            // wear. It exists for the user who misses how an older model
+            // spoke, or who wants a persona; the exemplars teach the voice by
+            // demonstration, riding the system prompt of whatever model the
+            // companion runs on.
+            //
+            // Styles are a LIBRARY, companions hold a REFERENCE: one style
+            // can dress many companions, and editing it re-dresses them all.
+            // ON DELETE SET NULL is the same mercy the roster shows threads —
+            // deleting a style leaves its companions speaking plainly, never
+            // broken.
+            //
+            // Exemplars are ROWS, not a JSON blob on the style: a harvest can
+            // land thousands of pairs, and the prompt builder reads a LIMIT of
+            // them by position — a query, not a parse of a megablob. `era`
+            // (YYYY-MM) is carried per pair because a voice drifts across
+            // months and the source month is unrecoverable once dropped.
+            "CREATE TABLE styles (
+                 id          TEXT    PRIMARY KEY,
+                 name        TEXT    NOT NULL CHECK (length(trim(name)) > 0),
+                 description TEXT,
+                 style_card  TEXT,
+                 created_at  INTEGER NOT NULL,
+                 updated_at  INTEGER NOT NULL
+             );
+
+             CREATE TABLE style_exemplars (
+                 id             TEXT    PRIMARY KEY,
+                 style_id       TEXT    NOT NULL
+                                        REFERENCES styles(id) ON DELETE CASCADE,
+                 position       INTEGER NOT NULL CHECK (position >= 0),
+                 user_text      TEXT    NOT NULL CHECK (length(trim(user_text)) > 0),
+                 companion_text TEXT    NOT NULL CHECK (length(trim(companion_text)) > 0),
+                 era            TEXT
+             );
+
+             CREATE INDEX idx_style_exemplars_style
+                 ON style_exemplars(style_id, position);
+
+             ALTER TABLE companions ADD COLUMN style_id TEXT
+                 REFERENCES styles(id) ON DELETE SET NULL;"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -1270,6 +1314,45 @@ mod tests {
         assert!(
             shared_agent.is_err(),
             "two companions must never share one memory"
+        );
+    }
+
+    #[test]
+    fn deleting_a_style_undresses_its_companions_and_drops_its_exemplars() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("foreign keys should enable");
+        migrate(&mut connection).expect("migrations should succeed");
+        connection
+            .execute_batch(
+                "INSERT INTO styles (id, name, created_at, updated_at)
+                 VALUES ('style-4o', '4o', 1, 1);
+                 INSERT INTO style_exemplars (
+                     id, style_id, position, user_text, companion_text, era
+                 ) VALUES ('exemplar-1', 'style-4o', 0, 'hello', 'Always. Show me.', '2026-01');
+                 INSERT INTO companions (
+                     id, name, memory_agent_name, is_built_in, created_at, updated_at, style_id
+                 ) VALUES ('companion-styled', 'Hugin', 'hugin-memory', 0, 1, 1, 'style-4o');
+                 DELETE FROM styles WHERE id = 'style-4o';",
+            )
+            .expect("the style should round-trip through deletion");
+
+        let orphaned_exemplars: i64 = connection
+            .query_row("SELECT COUNT(*) FROM style_exemplars", [], |row| row.get(0))
+            .expect("exemplars should remain queryable");
+        assert_eq!(orphaned_exemplars, 0, "exemplars die with their style");
+
+        let style_id: Option<String> = connection
+            .query_row(
+                "SELECT style_id FROM companions WHERE id = 'companion-styled'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the companion should survive");
+        assert_eq!(
+            style_id, None,
+            "a companion loses its coat, never its life, when a style is deleted"
         );
     }
 }

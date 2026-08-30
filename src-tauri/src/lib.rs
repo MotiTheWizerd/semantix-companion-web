@@ -14,6 +14,7 @@ mod preferences;
 mod raven_calls;
 mod secret_vault;
 mod streaming;
+mod styles;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use memory::MemoryState;
 use models::ModelState;
 use preferences::PreferenceState;
 use raven_calls::RavenCallState;
+use styles::StyleState;
 use tauri::Manager;
 
 /// `~/.semantix/companion/companion.db` — the Companion's ONE database, at a
@@ -124,9 +126,11 @@ pub fn run() {
             // `running`, so the UI offers resume instead of a phantom run.
             let import_state = import::worker::ImportState::open(&database_path, memory_state.service())?;
             let companion_state = CompanionState::open(&database_path)?;
+            let style_state = StyleState::open(&database_path)?;
             let raven_call_state = RavenCallState::open(&database_path)?;
             app.manage(import_state);
             app.manage(companion_state);
+            app.manage(style_state);
             app.manage(credential_state);
             app.manage(model_state);
             app.manage(preference_state);
@@ -157,6 +161,11 @@ pub fn run() {
             companions::create_companion,
             companions::update_companion,
             companions::delete_companion,
+            styles::list_styles,
+            styles::get_style_exemplars,
+            styles::create_style,
+            styles::update_style,
+            styles::delete_style,
             preferences::get_user_preferences,
             preferences::update_user_preferences,
             chat::list_conversations,
