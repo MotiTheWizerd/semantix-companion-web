@@ -166,6 +166,8 @@ pub fn run() {
             styles::create_style,
             styles::update_style,
             styles::delete_style,
+            styles::harvest::inspect_style_source,
+            styles::harvest::harvest_style_exemplars,
             preferences::get_user_preferences,
             preferences::update_user_preferences,
             chat::list_conversations,

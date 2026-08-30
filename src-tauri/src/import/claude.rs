@@ -35,6 +35,8 @@ struct Message {
     text: String,
     #[serde(default)]
     content: Vec<Block>,
+    #[serde(default)]
+    created_at: String,
 }
 
 #[derive(Deserialize)]
@@ -96,7 +98,14 @@ fn turn_of(message: &Message) -> Option<ImportTurn> {
     if text.is_empty() {
         return None;
     }
-    Some(ImportTurn { role, text })
+    Some(ImportTurn {
+        role,
+        text,
+        // A Claude export never says which model spoke — the wall is real,
+        // measured on the archive: no model field anywhere in the format.
+        model_slug: None,
+        created_at_ms: iso_to_epoch_ms(&message.created_at).unwrap_or(0),
+    })
 }
 
 /// `memories.json` — Claude.ai's own distilled memory of this user, the one

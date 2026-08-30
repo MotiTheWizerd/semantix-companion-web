@@ -12,6 +12,7 @@
 // it IS some other product, and it tells it to answer honestly about what it
 // is when asked. A style is a coat, not a mask.
 
+pub(crate) mod harvest;
 pub(crate) mod repository;
 
 use std::{path::Path, sync::Arc};

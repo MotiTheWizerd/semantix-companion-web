@@ -39,6 +39,14 @@ pub(crate) enum TurnRole {
 pub(crate) struct ImportTurn {
     pub(crate) role: TurnRole,
     pub(crate) text: String,
+    /// Which model spoke an assistant turn, when the export records it —
+    /// ChatGPT stamps `metadata.model_slug` per message; Claude exports carry
+    /// no model at all. The distiller ignores this; the style harvest filters
+    /// on it ("give me the exchanges where gpt-4o itself replied").
+    pub(crate) model_slug: Option<String>,
+    /// When this turn was spoken, ms epoch. 0 = the export didn't say; the
+    /// conversation's own stamp is the fallback.
+    pub(crate) created_at_ms: i64,
 }
 
 /// One conversation in the export, already linearized and stripped to speech.

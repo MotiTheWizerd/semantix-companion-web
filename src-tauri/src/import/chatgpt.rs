@@ -180,7 +180,24 @@ fn turn_of(node: &Node) -> Option<ImportTurn> {
     if text.is_empty() {
         return None;
     }
-    Some(ImportTurn { role, text })
+    Some(ImportTurn {
+        role,
+        // Stamped on assistant messages ("gpt-4o", "gpt-5"…); user messages
+        // and older exports leave it empty, and `auto` chats carry the REAL
+        // answering model here even when the chat default hides it.
+        model_slug: message
+            .metadata
+            .get("model_slug")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|slug| !slug.is_empty())
+            .map(str::to_owned),
+        created_at_ms: message
+            .create_time
+            .map(|seconds| (seconds * 1000.0) as i64)
+            .unwrap_or(0),
+        text,
+    })
 }
 
 #[cfg(test)]
