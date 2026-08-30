@@ -1,5 +1,6 @@
 import {
   Fragment,
+  memo,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -7,6 +8,7 @@ import {
   type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
+  type RefObject,
 } from "react";
 
 import { onConversationScrollToEnd } from "../features/chat/chatScrollEvents";
@@ -29,6 +31,7 @@ import {
   CallTranscriptItem,
   useConversationCalls,
   type CallThread,
+  type StreamingCallMessage,
 } from "../features/calls";
 import { MemoryRecallChip } from "./MemoryRecallChip";
 import { ToolCallChip } from "./ToolCallChip";
@@ -111,6 +114,137 @@ function placeCalls(messages: ChatMessage[], threads: CallThread[]): CallPlaceme
   return { beforeFirstMessage, afterMessageId };
 }
 
+interface ChatThreadProps {
+  threadRef: RefObject<HTMLElement | null>;
+  messages: ChatMessage[];
+  recallByMessageId: Record<string, MemoryRecallChipData>;
+  toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
+  reasoningByMessageId: Record<string, string>;
+  callThreads: CallThread[];
+  streamingCallMessages: StreamingCallMessage[];
+  callsError: string | null;
+  companions: Companion[];
+}
+
+/** The transcript, behind memo. Typing routes every keystroke through the
+ * store draft and back down through ChatSurface, so without this wall the
+ * whole conversation — every markdown row, every base64 image src — was
+ * rebuilt per character, and the composer got slower the longer the chat
+ * grew. Every prop here is reference-stable while the user types: message
+ * state comes straight from the store, call state from useState inside
+ * useConversationCalls. The wall holds only as long as that stays true. */
+const ChatThread = memo(function ChatThread({
+  threadRef,
+  messages,
+  recallByMessageId,
+  toolCallsByMessageId,
+  reasoningByMessageId,
+  callThreads,
+  streamingCallMessages,
+  callsError,
+  companions,
+}: ChatThreadProps) {
+  const callPlacements = useMemo(
+    () => placeCalls(messages, callThreads),
+    [messages, callThreads],
+  );
+  const callAgentNames = useMemo(
+    () => new Map(companions.map((companion) => [companion.id, companionLabel(companion)])),
+    [companions],
+  );
+
+  return (
+    <section
+      className="chat-thread"
+      ref={threadRef}
+      aria-label="Conversation messages"
+      aria-live="polite"
+    >
+      {callPlacements.beforeFirstMessage.map((thread) => (
+        <CallTranscriptItem
+          key={thread.call.id}
+          thread={thread}
+          agentNames={callAgentNames}
+          streamingMessages={streamingCallMessages.filter(
+            (message) => message.callId === thread.call.id,
+          )}
+        />
+      ))}
+      {messages.map((message) => {
+        const recall = recallByMessageId[message.id];
+        const toolCalls = toolCallsByMessageId[message.id];
+        const reasoning = reasoningByMessageId[message.id] ?? "";
+        const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
+        const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
+        const showReasoning =
+          message.role === "assistant" &&
+          (Boolean(reasoning) || (message.status === "streaming" && !message.content));
+        // The first tool call opens its own row, like a message of its
+        // own; later calls in the same turn join that row. The turn's
+        // real reply only gets a row once it actually has something to
+        // show — otherwise it's a redundant empty bubble under the chip.
+        const showTextRow =
+          !hasToolRow ||
+          message.attachments.length > 0 ||
+          Boolean(message.content) ||
+          Boolean(message.errorMessage) ||
+          Boolean(recall) ||
+          showReasoning;
+        return (
+          <Fragment key={message.id}>
+            {toolCalls && toolCalls.length > 0 ? (
+              <article className="chat-message chat-message--assistant chat-message--tool-activity">
+                <ToolCallChip calls={toolCalls} />
+              </article>
+            ) : null}
+            {showTextRow ? (
+              <article className={`chat-message chat-message--${message.role}`}>
+                {message.attachments.length > 0 ? (
+                  <div className="chat-message__images">
+                    {message.attachments.map((attachment) => (
+                      <img
+                        key={attachment.id}
+                        src={`data:${attachment.mediaType};base64,${attachment.data}`}
+                        alt="Attached image"
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                {showReasoning ? (
+                  <ReasoningDisclosure
+                    reasoning={reasoning}
+                    isStreaming={message.status === "streaming"}
+                  />
+                ) : null}
+                {message.role === "assistant" && message.content ? (
+                  <MarkdownRenderer content={message.content} />
+                ) : message.content ? (
+                  <p>{message.content}</p>
+                ) : null}
+                {message.errorMessage ? (
+                  <span className="chat-message__error">{message.errorMessage}</span>
+                ) : null}
+                {recall ? <MemoryRecallChip data={recall} /> : null}
+              </article>
+            ) : null}
+            {callsAfterMessage.map((thread) => (
+              <CallTranscriptItem
+                key={thread.call.id}
+                thread={thread}
+                agentNames={callAgentNames}
+                streamingMessages={streamingCallMessages.filter(
+                  (streaming) => streaming.callId === thread.call.id,
+                )}
+              />
+            ))}
+          </Fragment>
+        );
+      })}
+      {callsError ? <CallTranscriptError error={callsError} /> : null}
+    </section>
+  );
+});
+
 export function ChatSurface({
   activeConversationId,
   messages,
@@ -144,15 +278,6 @@ export function ChatSurface({
     isInitialLoading: areCallsInitiallyLoading,
     error: callsError,
   } = useConversationCalls(activeConversationId, isSending);
-  const callPlacements = useMemo(
-    () => placeCalls(messages, callThreads),
-    [messages, callThreads],
-  );
-  const callAgentNames = useMemo(
-    () => new Map(companions.map((companion) => [companion.id, companionLabel(companion)])),
-    [companions],
-  );
-
   // Opening a conversation is a snap, not a tour through its history. Wait
   // until BOTH independently loaded timelines (messages + calls) are in the
   // DOM, then land at the true bottom before paint. Images that finish decoding
@@ -291,94 +416,17 @@ export function ChatSurface({
   return (
     <main className={`chat-surface ${hasMessages ? "has-messages" : ""}`} id="chat">
       {hasMessages ? (
-        <section
-          className="chat-thread"
-          ref={threadRef}
-          aria-label="Conversation messages"
-          aria-live="polite"
-        >
-          {callPlacements.beforeFirstMessage.map((thread) => (
-            <CallTranscriptItem
-              key={thread.call.id}
-              thread={thread}
-              agentNames={callAgentNames}
-              streamingMessages={streamingCallMessages.filter(
-                (message) => message.callId === thread.call.id,
-              )}
-            />
-          ))}
-          {messages.map((message) => {
-            const recall = recallByMessageId[message.id];
-            const toolCalls = toolCallsByMessageId[message.id];
-            const reasoning = reasoningByMessageId[message.id] ?? "";
-            const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
-            const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
-            const showReasoning =
-              message.role === "assistant" &&
-              (Boolean(reasoning) || (message.status === "streaming" && !message.content));
-            // The first tool call opens its own row, like a message of its
-            // own; later calls in the same turn join that row. The turn's
-            // real reply only gets a row once it actually has something to
-            // show — otherwise it's a redundant empty bubble under the chip.
-            const showTextRow =
-              !hasToolRow ||
-              message.attachments.length > 0 ||
-              Boolean(message.content) ||
-              Boolean(message.errorMessage) ||
-              Boolean(recall) ||
-              showReasoning;
-            return (
-              <Fragment key={message.id}>
-                {toolCalls && toolCalls.length > 0 ? (
-                  <article className="chat-message chat-message--assistant chat-message--tool-activity">
-                    <ToolCallChip calls={toolCalls} />
-                  </article>
-                ) : null}
-                {showTextRow ? (
-                  <article className={`chat-message chat-message--${message.role}`}>
-                    {message.attachments.length > 0 ? (
-                      <div className="chat-message__images">
-                        {message.attachments.map((attachment) => (
-                          <img
-                            key={attachment.id}
-                            src={`data:${attachment.mediaType};base64,${attachment.data}`}
-                            alt="Attached image"
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {showReasoning ? (
-                      <ReasoningDisclosure
-                        reasoning={reasoning}
-                        isStreaming={message.status === "streaming"}
-                      />
-                    ) : null}
-                    {message.role === "assistant" && message.content ? (
-                      <MarkdownRenderer content={message.content} />
-                    ) : message.content ? (
-                      <p>{message.content}</p>
-                    ) : null}
-                    {message.errorMessage ? (
-                      <span className="chat-message__error">{message.errorMessage}</span>
-                    ) : null}
-                    {recall ? <MemoryRecallChip data={recall} /> : null}
-                  </article>
-                ) : null}
-                {callsAfterMessage.map((thread) => (
-                  <CallTranscriptItem
-                    key={thread.call.id}
-                    thread={thread}
-                    agentNames={callAgentNames}
-                    streamingMessages={streamingCallMessages.filter(
-                      (streaming) => streaming.callId === thread.call.id,
-                    )}
-                  />
-                ))}
-              </Fragment>
-            );
-          })}
-          {callsError ? <CallTranscriptError error={callsError} /> : null}
-        </section>
+        <ChatThread
+          threadRef={threadRef}
+          messages={messages}
+          recallByMessageId={recallByMessageId}
+          toolCallsByMessageId={toolCallsByMessageId}
+          reasoningByMessageId={reasoningByMessageId}
+          callThreads={callThreads}
+          streamingCallMessages={streamingCallMessages}
+          callsError={callsError}
+          companions={companions}
+        />
       ) : (
         <EmptyState />
       )}
