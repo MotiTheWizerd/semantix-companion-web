@@ -576,13 +576,18 @@ impl ChatService {
     /// user's mouth, in their own transcript, forever. The companion is told by
     /// the system, which is what actually happened.
     ///
-    /// It lands in the companion's most recent thread, or a new one. A person
-    /// looking for what their companion did while they were away should find it
-    /// where they last left that companion, not in a hidden place.
+    /// It lands in `target_conversation` when that thread is still live —
+    /// the close reporter aims at the conversation a call was born from, so
+    /// the report arrives where the person watched the call happen — else in
+    /// the companion's most recent thread, or a new one. The row itself is
+    /// backstage: the UI hides `system` rows and silent woken replies (s533),
+    /// so what the person sees is the call card plus whatever the companion
+    /// chooses to SAY — while the model's own history keeps everything.
     pub(crate) fn prepare_woken(
         &self,
         companion_id: &str,
         notice: String,
+        target_conversation: Option<String>,
     ) -> Result<PreparedSubmission, AppError> {
         // ⚑ NO FALLBACK IN THIS LANE, AND THIS CHECK IS LOAD-BEARING.
         // `resolve` answers an unknown id with the BUILT-IN companion, which is
@@ -596,9 +601,10 @@ impl ChatService {
             ));
         }
 
-        let conversation_id = self
-            .repository
-            .latest_conversation_for_companion(companion_id)?;
+        let conversation_id = match target_conversation {
+            Some(id) if self.repository.conversation_is_live(&id)? => Some(id),
+            _ => self.repository.latest_conversation_for_companion(companion_id)?,
+        };
         let mut prepared = self.submit(
             SubmitMessageInput {
                 conversation_id,
@@ -628,7 +634,9 @@ impl ChatService {
         // A wake is not the next turn of that conversation. It is a different
         // errand that happens to be recorded there, so the request carries only
         // who it is and what it was woken for. The exchange still PERSISTS into
-        // the thread — the user must be able to see what their companion did —
+        // the thread — for the MODEL, whose later turns inherit it; since s533
+        // the UI hides these backstage rows ("it should feel like a real call")
+        // and the call card is what the person sees —
         // but the model is not asked to continue a talk nobody is having.
         //
         // It is also drastically cheaper: forty messages resent per wake, for
@@ -669,6 +677,62 @@ impl ChatService {
         prepared.execution.request.messages = messages;
 
         Ok(prepared)
+    }
+
+    /// Persist one `system` message into a companion's thread WITHOUT driving
+    /// a turn — the write half of a wake, for records that need no answer.
+    /// `canonical_messages` resends `system` rows on every later turn, so
+    /// whatever lands here is part of what the thread knows from now on.
+    ///
+    /// Lands in `preferred_conversation` when that thread is still live, else
+    /// the companion's most recent thread, else a new one. Same no-fallback
+    /// law as `prepare_woken`: an id that is not a companion here is refused,
+    /// never answered by the built-in one.
+    pub(crate) fn record_system_message(
+        &self,
+        companion_id: &str,
+        preferred_conversation: Option<&str>,
+        content: &str,
+    ) -> Result<AcceptedMessage, AppError> {
+        if !self.companions.exists(companion_id)? {
+            return Err(AppError::validation(
+                "that agent id is not a companion on this machine — nowhere to record",
+            ));
+        }
+        let conversation_id = match preferred_conversation {
+            Some(id) if self.repository.conversation_is_live(id)? => Some(id.to_owned()),
+            _ => self.repository.latest_conversation_for_companion(companion_id)?,
+        };
+        let timestamp = unix_timestamp_ms()?;
+        let new_conversation_id = Uuid::new_v4().to_string();
+        let message_id = Uuid::new_v4().to_string();
+        let title = conversation_title(content);
+        self.repository.commit_user_message(CommitUserMessage {
+            conversation_id: conversation_id.as_deref(),
+            role: "system",
+            companion_id,
+            content,
+            title: &title,
+            timestamp,
+            new_conversation_id: &new_conversation_id,
+            message_id: &message_id,
+            attachments: &[],
+        })
+    }
+
+    /// The full companion row for an id, or `None` for an id that is not a
+    /// companion on this machine. Exists because `resolve` answers unknown
+    /// ids with the BUILT-IN companion — right for a stale composer, wrong
+    /// for anything writing on a companion's behalf, where the fallback would
+    /// file one companion's business under another's name and memory.
+    pub(crate) fn companion_profile(
+        &self,
+        companion_id: &str,
+    ) -> Result<Option<Companion>, AppError> {
+        if !self.companions.exists(companion_id)? {
+            return Ok(None);
+        }
+        self.companions.resolve(Some(companion_id)).map(Some)
     }
 
     /// The style block for whoever is answering, ready to ride as a system

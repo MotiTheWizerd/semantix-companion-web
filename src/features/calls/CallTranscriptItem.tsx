@@ -14,6 +14,13 @@ import {
   type StreamingCallMessage,
 } from "./types";
 
+/** How long a woken companion may compose before its quiet is called
+ * "No answer". The wake guard lands BEFORE the woken turn runs (Rust's
+ * anti-retry-storm law), so guard-on-newest-turn alone cannot separate
+ * "thinking" from "gave up" — the wake stamp plus this window can. Generous
+ * on purpose: a slow model deep in tool rounds is still answering. */
+const ANSWER_BUDGET_MS = 120_000;
+
 function shortId(id: string): string {
   return id.slice(0, 8);
 }
@@ -259,14 +266,25 @@ export function CallTranscriptItem({
   const otherName = other ? agentLabel(other, agentNames) : null;
   const title = otherName ? `${initiatorName} called ${otherName}` : `${initiatorName} opened a call`;
 
+  // The call's own clock: ticking while it is open, final once it closed.
+  // Duration is a fact about the call, not about any phase, so it never hides.
+  // The same tick re-derives the phases below, which is what lets "Replying"
+  // honestly expire into "No answer" when the answering window runs out.
+  const now = useNow(call.status === "open");
+  const duration = formatElapsed((call.closedAt ?? now) - call.createdAt);
+
   // The card's phases, most specific first. "Speaking" is words actually
   // streaming; "replying" is the woken turn running before (or between) words —
   // hidden again once the reply has landed as the newest turn, because a woken
   // turn can outlive its own answer by a closing thought. Below those two,
   // Rust's wake guard splits the remaining quiet of an open call in half:
   // guard behind the newest turn means the phone is still RINGING for whoever
-  // it addresses; guard on the newest turn means they were woken and stayed
-  // SILENT — the state a person may answer with "ring again".
+  // it addresses; guard on the newest turn means they were WOKEN — and the
+  // wake stamp splits THAT in half again: a fresh wake is a companion
+  // composing its answer ("Replying"), only a stale one is silence a person
+  // may answer with "ring again". Before the stamp existed, the card called a
+  // model mid-thought "No answer" the moment the waker picked up (seen live,
+  // s533) — the guard lands BEFORE the turn runs, by design.
   const speaking = streamingMessages.length > 0;
   const newestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const replying =
@@ -276,22 +294,24 @@ export function CallTranscriptItem({
     newestMessage?.fromAgentId !== replyingAgentId;
   const atRest = call.status === "open" && !speaking && !replying && newestMessage !== null;
   const ringing = atRest && call.wokenForMessageId !== newestMessage.id;
-  const unanswered = atRest && call.wokenForMessageId === newestMessage.id;
-  const liveWord = speaking ? "Speaking" : replying ? "Replying" : ringing ? "Ringing" : null;
+  const answering =
+    atRest &&
+    call.wokenForMessageId === newestMessage.id &&
+    call.wokenAt !== null &&
+    now - call.wokenAt < ANSWER_BUDGET_MS;
+  const unanswered =
+    atRest && call.wokenForMessageId === newestMessage.id && !answering;
+  const liveWord =
+    speaking ? "Speaking" : replying || answering ? "Replying" : ringing ? "Ringing" : null;
   const statusWord =
     liveWord ?? (call.status === "open" ? (unanswered ? "No answer" : "Open") : "Ended");
-
-  // The call's own clock: ticking while it is open, final once it closed.
-  // Duration is a fact about the call, not about any phase, so it never hides.
-  const now = useNow(call.status === "open");
-  const duration = formatElapsed((call.closedAt ?? now) - call.createdAt);
 
   // Anything happening live inside a collapsed call must be visible without
   // making the user notice a changing meter and manually open it mid-sentence.
   // A ring counts: a phone that rings where nobody can see it rings for nobody.
   useEffect(() => {
-    if (streamingMessages.length > 0 || replying || ringing) setExpanded(true);
-  }, [streamingMessages.length, replying, ringing]);
+    if (streamingMessages.length > 0 || replying || answering || ringing) setExpanded(true);
+  }, [streamingMessages.length, replying, answering, ringing]);
 
   // One press, one retry. Success flips the card back to ringing through the
   // refetch Rust's changed event triggers; the effect below re-arms the button

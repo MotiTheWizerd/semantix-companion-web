@@ -13,7 +13,7 @@ use super::{
 use crate::{app_error::AppError, credentials::unix_timestamp_ms, database};
 
 const CALL_COLUMNS: &str = "id, root_conversation_id, initiator_agent_id, status,
-     message_count, created_at, closed_at, woken_for_message_id";
+     message_count, created_at, closed_at, woken_for_message_id, woken_at";
 
 const MESSAGE_COLUMNS: &str = "id, call_id, from_agent_id, to_agent_id, body, created_at";
 
@@ -84,6 +84,7 @@ impl RavenCallRepository {
             created_at: unix_timestamp_ms()?,
             closed_at: None,
             woken_for_message_id: None,
+            woken_at: None,
         };
 
         connection
@@ -106,16 +107,43 @@ impl RavenCallRepository {
     }
 
     /// Add one turn to a call, or refuse because the call is full or finished.
-    ///
-    /// The count check and the insert share ONE TRANSACTION. Without it two
-    /// concurrent hops both read four, both write, and the call ends up with
-    /// six turns in a table whose whole purpose was to make that impossible.
     pub(crate) fn append_message(
         &self,
         call_id: &str,
         from_agent_id: &str,
         to_agent_id: &str,
         body: &str,
+    ) -> Result<RavenCallMessage, AppError> {
+        self.append(call_id, from_agent_id, to_agent_id, body, false)
+    }
+
+    /// Add one turn AND hang up: the message lands and the call closes in the
+    /// same transaction. This is a participant COMPLETING an exchange — before
+    /// this existed, a call that was logically done at turn two kept waking
+    /// both sides into pleasantries until the cap killed it at five (watched
+    /// live, s533: "thanks!" → wake → "bye!" → wake). The goodbye itself
+    /// reaches whoever did not see it through the close record, exactly like a
+    /// cap-close's last word.
+    pub(crate) fn append_final_message(
+        &self,
+        call_id: &str,
+        from_agent_id: &str,
+        to_agent_id: &str,
+        body: &str,
+    ) -> Result<RavenCallMessage, AppError> {
+        self.append(call_id, from_agent_id, to_agent_id, body, true)
+    }
+
+    /// The count check and the insert share ONE TRANSACTION. Without it two
+    /// concurrent hops both read four, both write, and the call ends up with
+    /// six turns in a table whose whole purpose was to make that impossible.
+    fn append(
+        &self,
+        call_id: &str,
+        from_agent_id: &str,
+        to_agent_id: &str,
+        body: &str,
+        hang_up: bool,
     ) -> Result<RavenCallMessage, AppError> {
         let body = validate_body(body)?;
         let from = require_id(from_agent_id, "sender")?;
@@ -179,8 +207,9 @@ impl RavenCallRepository {
 
         // The turn that fills a call also ends it. A call left open at its
         // ceiling would accept nothing and still read as live to every caller
-        // and every badge — better to have the row say what is true.
-        let now_full = message_count + 1 >= MAX_MESSAGES_PER_CALL;
+        // and every badge — better to have the row say what is true. A hang-up
+        // closes the same way for the same reason, just earlier.
+        let now_full = message_count + 1 >= MAX_MESSAGES_PER_CALL || hang_up;
         transaction
             .execute(
                 "UPDATE raven_calls
@@ -281,10 +310,11 @@ impl RavenCallRepository {
     /// fails must still count as "we tried", or a companion whose model is
     /// erroring gets woken in a loop for as long as the error lasts.
     pub(crate) fn mark_woken(&self, call_id: &str, message_id: &str) -> Result<(), AppError> {
+        let now = unix_timestamp_ms()?;
         self.connection()?
             .execute(
-                "UPDATE raven_calls SET woken_for_message_id = ?2 WHERE id = ?1",
-                params![call_id, message_id],
+                "UPDATE raven_calls SET woken_for_message_id = ?2, woken_at = ?3 WHERE id = ?1",
+                params![call_id, message_id, now],
             )
             .map_err(AppError::database)?;
         Ok(())
@@ -303,7 +333,7 @@ impl RavenCallRepository {
             .connection()?
             .execute(
                 "UPDATE raven_calls
-                 SET woken_for_message_id = NULL
+                 SET woken_for_message_id = NULL, woken_at = NULL
                  WHERE id = ?1 AND status = 'open' AND woken_for_message_id IS NOT NULL",
                 [call_id],
             )
@@ -415,6 +445,64 @@ impl RavenCallRepository {
             .map_err(AppError::database)
     }
 
+    /// Closed calls whose record has not yet been delivered — the work list of
+    /// the close reporter, exactly as `calls_awaiting_wake` is the waker's.
+    ///
+    /// Calls nobody spoke in are excluded outright: a record of nothing has
+    /// nobody to inform and nothing to remember. Oldest close first, so a
+    /// backlog drains in the order the exchanges actually ended.
+    pub(crate) fn calls_needing_close_report(&self, limit: i64) -> Result<Vec<RavenCall>, AppError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {CALL_COLUMNS} FROM raven_calls
+                 WHERE status = 'closed'
+                   AND close_reported_at IS NULL
+                   AND message_count > 0
+                 ORDER BY closed_at ASC, id ASC
+                 LIMIT ?1"
+            ))
+            .map_err(AppError::database)?;
+
+        let calls = statement
+            .query_map([limit.max(1)], map_call)
+            .map_err(AppError::database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::database)?;
+
+        Ok(calls)
+    }
+
+    /// Record that this call's close has been reported.
+    ///
+    /// ⚑ CALLED BEFORE THE REPORT RUNS, NOT AFTER — the same law as
+    /// `mark_woken`. A report whose wake fails must still count as "we tried",
+    /// or a companion whose model is erroring is woken with the same transcript
+    /// every tick for as long as the error lasts.
+    pub(crate) fn mark_close_reported(&self, call_id: &str) -> Result<(), AppError> {
+        let now = unix_timestamp_ms()?;
+        self.connection()?
+            .execute(
+                "UPDATE raven_calls SET close_reported_at = ?2 WHERE id = ?1",
+                params![call_id, now],
+            )
+            .map_err(AppError::database)?;
+        Ok(())
+    }
+
+    /// A millisecond stamp rendered as the machine's own local date and time.
+    /// SQLite resolves `'localtime'` against the operating system's timezone —
+    /// the same clock, and the same reasoning, as `CALLS_TODAY` above.
+    pub(crate) fn local_datetime(&self, timestamp_ms: i64) -> Result<String, AppError> {
+        self.connection()?
+            .query_row(
+                "SELECT datetime(?1 / 1000, 'unixepoch', 'localtime')",
+                [timestamp_ms],
+                |row| row.get(0),
+            )
+            .map_err(AppError::database)
+    }
+
     /// End a call early.
     ///
     /// Deliberately NOT given to the model. A call closes itself on its last
@@ -488,6 +576,7 @@ fn map_call(row: &Row<'_>) -> rusqlite::Result<RavenCall> {
         created_at: row.get(5)?,
         closed_at: row.get(6)?,
         woken_for_message_id: row.get(7)?,
+        woken_at: row.get(8)?,
     })
 }
 
@@ -549,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sixth_call_of_the_day_is_refused_with_a_sentence_naming_the_reset() {
+    fn the_call_past_the_daily_allowance_is_refused_with_a_sentence_naming_the_reset() {
         let (calls, path) = open_calls("daily-cap");
 
         for index in 0..MAX_CALLS_PER_DAY {
@@ -564,7 +653,7 @@ mod tests {
 
         let refused = calls
             .open_call("rook", None)
-            .expect_err("the sixth call must be refused");
+            .expect_err("the call past the allowance must be refused");
         let sentence = refused.to_string();
         assert!(
             sentence.contains(&MAX_CALLS_PER_DAY.to_string()),
@@ -589,7 +678,7 @@ mod tests {
         }
         assert!(
             calls.open_call("rook", None).is_err(),
-            "a sixth call is refused however many agents were addressed"
+            "a call past the allowance is refused however many agents were addressed"
         );
 
         // And it is scoped: another companion still has its own full day.
@@ -932,6 +1021,146 @@ mod tests {
             closed.closed_at,
             "closed_at records when the exchange stopped, not when it was last asked about"
         );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_call_that_fills_surfaces_for_close_report_exactly_once() {
+        let (calls, path) = open_calls("close-report");
+        let call = calls.open_call("rook", None).unwrap();
+        for turn in 0..MAX_MESSAGES_PER_CALL {
+            let (from, to) = if turn % 2 == 0 { ("rook", "hugin") } else { ("hugin", "rook") };
+            calls
+                .append_message(&call.id, from, to, &format!("turn {turn}"))
+                .unwrap();
+        }
+        assert!(
+            !calls.calls_needing_close_report(10).unwrap().is_empty(),
+            "the auto-closed call is waiting for its record to be delivered"
+        );
+
+        calls.mark_close_reported(&call.id).unwrap();
+        assert!(
+            calls.calls_needing_close_report(10).unwrap().is_empty(),
+            "one report per call — the guard makes delivered a stable state"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_human_hang_up_with_words_in_it_is_reported_too() {
+        let (calls, path) = open_calls("hang-up-report");
+        let call = calls.open_call("rook", None).unwrap();
+        calls
+            .append_message(&call.id, "rook", "hugin", "are you there?")
+            .unwrap();
+        calls.close(&call.id).unwrap();
+
+        let pending = calls.calls_needing_close_report(10).unwrap();
+        assert_eq!(pending.len(), 1, "both close paths reach the same reporter");
+        assert_eq!(pending[0].id, call.id);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_call_nobody_spoke_in_is_never_reported() {
+        let (calls, path) = open_calls("silent-close");
+        let call = calls.open_call("rook", None).unwrap();
+        calls.close(&call.id).unwrap();
+
+        assert!(
+            calls.calls_needing_close_report(10).unwrap().is_empty(),
+            "a record of nothing has nobody to inform"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn an_open_call_is_not_a_closed_one_however_full_its_transcript() {
+        let (calls, path) = open_calls("open-not-reported");
+        let call = calls.open_call("rook", None).unwrap();
+        calls
+            .append_message(&call.id, "rook", "hugin", "still talking")
+            .unwrap();
+
+        assert!(
+            calls.calls_needing_close_report(10).unwrap().is_empty(),
+            "the reporter only speaks after the line goes dead"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_final_turn_hangs_up_the_call_and_still_gets_its_record() {
+        let (calls, path) = open_calls("hang-up");
+        let call = calls.open_call("rook", None).unwrap();
+        calls
+            .append_message(&call.id, "rook", "hugin", "quick question?")
+            .unwrap();
+        calls
+            .append_final_message(&call.id, "hugin", "rook", "answered — hanging up.")
+            .unwrap();
+
+        let closed = calls.get(&call.id).unwrap().unwrap();
+        assert_eq!(closed.status, CallStatus::Closed, "the final word ends the call");
+        assert!(closed.closed_at.is_some(), "a hang-up is stamped like any close");
+        assert_eq!(closed.message_count, 2, "well under the cap — ended by choice");
+
+        assert!(
+            calls
+                .append_message(&call.id, "rook", "hugin", "one more thing…")
+                .is_err(),
+            "a hung-up call takes nothing more"
+        );
+        assert_eq!(
+            calls.calls_needing_close_report(10).unwrap().len(),
+            1,
+            "an early goodbye still gets the full record delivered"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_wake_carries_its_stamp_and_ring_again_clears_it() {
+        let (calls, path) = open_calls("wake-stamp");
+        let call = calls.open_call("rook", None).unwrap();
+        let turn = calls
+            .append_message(&call.id, "rook", "hugin", "you there?")
+            .unwrap();
+
+        calls.mark_woken(&call.id, &turn.id).unwrap();
+        let woken = calls.get(&call.id).unwrap().unwrap();
+        assert_eq!(woken.woken_for_message_id.as_deref(), Some(turn.id.as_str()));
+        assert!(
+            woken.woken_at.is_some(),
+            "the stamp is what lets a card tell composing from silence"
+        );
+
+        assert!(calls.retry_wake(&call.id).unwrap());
+        let rearmed = calls.get(&call.id).unwrap().unwrap();
+        assert!(rearmed.woken_for_message_id.is_none());
+        assert!(
+            rearmed.woken_at.is_none(),
+            "ring again clears the stamp with the guard — no stale window"
+        );
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn local_datetime_renders_a_readable_stamp() {
+        let (calls, path) = open_calls("local-stamp");
+        let stamp = calls.local_datetime(1_700_000_000_000).unwrap();
+        // "YYYY-MM-DD HH:MM:SS" in whatever timezone the machine lives in —
+        // the shape is asserted, the zone is the machine's own business.
+        assert_eq!(stamp.len(), 19, "sqlite datetime shape: {stamp}");
+        assert!(stamp.starts_with("2023-11-1"), "epoch 1.7e12 is mid-November 2023: {stamp}");
 
         fs::remove_file(path).ok();
     }

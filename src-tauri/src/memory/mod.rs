@@ -404,7 +404,7 @@ pub(crate) async fn clear_memory_account_token() -> Result<(), String> {
 /// create response omits it (a fresh agent holds nothing).
 #[derive(Deserialize, Serialize)]
 pub(crate) struct MemoryAgentDto {
-    agent_id: String,
+    pub(crate) agent_id: String,
     name: String,
     description: String,
     #[serde(default)]
@@ -475,6 +475,17 @@ pub(crate) async fn ensure_memory_agent(
         });
     }
 
+    ensure_organ_agent(&name, &description).await
+}
+
+/// Find-or-create one agent on the organ roster by name. Extracted from the
+/// `ensure_memory_agent` command so backend callers (the call close reporter)
+/// can reach a companion's organ memory without a frontend in the loop — the
+/// roster round-trip the frontend normally makes before a turn.
+pub(crate) async fn ensure_organ_agent(
+    name: &str,
+    description: &str,
+) -> Result<MemoryAgentDto, String> {
     let bearer = organ_bearer().await?;
     let client = reqwest::Client::new();
 

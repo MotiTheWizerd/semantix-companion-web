@@ -228,6 +228,23 @@ impl ChatRepository {
             .map_err(AppError::database)
     }
 
+    /// Whether a conversation exists and is not archived — the same predicate
+    /// `commit_user_message` enforces, checkable BEFORE preparing a whole
+    /// turn, so a caller with a preferred thread can fall back instead of
+    /// failing mid-wake.
+    pub(crate) fn conversation_is_live(&self, conversation_id: &str) -> Result<bool, AppError> {
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS (
+                     SELECT 1 FROM conversations
+                     WHERE id = ?1 AND archived_at IS NULL
+                 )",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::database)
+    }
+
     pub(crate) fn list_conversations(&self) -> Result<Vec<Conversation>, AppError> {
         let connection = self.connection()?;
         let mut statement = connection

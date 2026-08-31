@@ -438,18 +438,22 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
         // whether a question is worth a call before spending one.
         tools.push(ToolDeclaration {
             name: OPEN_CALL.to_owned(),
-            description: concat!(
-                "Start a call with another agent and say your first line. Use ",
-                "this instead of send_message when you expect a back-and-forth ",
-                "rather than a note — a call keeps both sides' turns together ",
-                "and belongs to this conversation, so the user can see what ",
-                "was said on their behalf. ",
-                "You may open only 5 calls a day, and each call holds only 5 ",
-                "messages from both sides together, so open one for something ",
-                "worth the exchange. The other agent will not answer inside ",
-                "this turn.",
-            )
-            .to_owned(),
+            // The numbers are read from the same constants the repository
+            // enforces, so the promise in the prompt can never drift from the
+            // refusal in the database (it had, quietly, when the cap changed).
+            description: format!(
+                "Start a call with another agent and say your first line. Use \
+                 this instead of send_message when you expect a back-and-forth \
+                 rather than a note — a call keeps both sides' turns together \
+                 and belongs to this conversation, so the user can see what \
+                 was said on their behalf. \
+                 You may open only {} calls a day, and each call holds only {} \
+                 messages from both sides together, so open one for something \
+                 worth the exchange. The other agent will not answer inside \
+                 this turn.",
+                raven_calls::MAX_CALLS_PER_DAY,
+                raven_calls::MAX_MESSAGES_PER_CALL,
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -476,9 +480,12 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             name: SEND_IN_CALL.to_owned(),
             description: concat!(
                 "Say something into a call that is already open. This does NOT ",
-                "cost one of your 5 daily calls — replying inside a call is ",
+                "cost one of your daily calls — replying inside a call is ",
                 "free, and the call's own 5-message limit still applies. The ",
-                "call closes itself on its last message.",
+                "call closes itself on its last message. When your message ",
+                "completes the exchange, pass final: true to hang up with it — ",
+                "the other side gets your last word through the call record ",
+                "instead of being woken again just to say goodbye.",
             )
             .to_owned(),
             parameters: serde_json::json!({
@@ -491,6 +498,15 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                     "body": {
                         "type": "string",
                         "description": "What you want to say. Plain text."
+                    },
+                    "final": {
+                        "type": "boolean",
+                        "description": concat!(
+                            "true = this message ends the call. Use it when the ",
+                            "exchange is complete — a final answer, a sign-off — ",
+                            "so the line does not stay open collecting ",
+                            "pleasantries. Default false."
+                        )
                     }
                 },
                 "required": ["call_id", "body"]
@@ -811,7 +827,7 @@ fn execute_call(
             ))
         }
         SEND_IN_CALL => {
-            let (call_id, body) = parse_call_message_arguments(arguments)?;
+            let (call_id, body, hang_up) = parse_call_message_arguments(arguments)?;
 
             // Scoped BEFORE the write: without this, knowing a uuid would be
             // enough to speak into someone else's call.
@@ -824,6 +840,17 @@ fn execute_call(
             let to = other_end(&turns, me).ok_or_else(|| {
                 "that call has nobody else in it yet — open_call starts one".to_owned()
             })?;
+
+            if hang_up {
+                calls
+                    .append_final_message(&call_id, me, &to, &body)
+                    .map_err(|error| error.to_string())?;
+                return Ok(
+                    "[sent, and the call is now closed — your word was the last one. \
+                     Both of you will receive the full record]"
+                        .to_owned(),
+                );
+            }
 
             calls
                 .append_message(&call_id, me, &to, &body)
@@ -920,7 +947,7 @@ fn render_calls(open: &[raven_calls::RavenCall], calls_left: i64) -> String {
     out
 }
 
-fn parse_call_message_arguments(arguments: &str) -> Result<(String, String), String> {
+fn parse_call_message_arguments(arguments: &str) -> Result<(String, String, bool), String> {
     let parsed: serde_json::Value = serde_json::from_str(arguments)
         .map_err(|error| format!("arguments were not valid JSON: {error}"))?;
     let call_id = parsed
@@ -937,7 +964,13 @@ fn parse_call_message_arguments(arguments: &str) -> Result<(String, String), Str
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| "a non-empty \"body\" argument is required".to_owned())?;
-    Ok((call_id, body))
+    // Absent or malformed reads as false: the safe default keeps the line
+    // open, and a model that wants to hang up says so explicitly.
+    let hang_up = parsed
+        .get("final")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    Ok((call_id, body, hang_up))
 }
 
 fn parse_call_id_argument(arguments: &str) -> Result<String, String> {
@@ -1593,13 +1626,22 @@ mod tests {
         )
         .expect("opening a call should succeed");
         assert!(opened.contains("call opened"), "got: {opened}");
-        assert!(opened.contains("4 of today's calls left"), "got: {opened}");
+        assert!(
+            opened.contains(&format!(
+                "{} of today's calls left",
+                raven_calls::MAX_CALLS_PER_DAY - 1
+            )),
+            "got: {opened}"
+        );
 
         // The recipient finds the call without being told its id.
         let listed = execute_call(LIST_CALLS, "{}", &hugin, None, &path).expect("list should work");
         assert!(listed.contains("1 open call"), "got: {listed}");
         assert!(
-            listed.contains("5 of today's 5 calls left"),
+            listed.contains(&format!(
+                "{max} of today's {max} calls left",
+                max = raven_calls::MAX_CALLS_PER_DAY
+            )),
             "being called costs the recipient nothing: {listed}"
         );
 
@@ -1660,7 +1702,74 @@ mod tests {
 
         // And the refused call spent nothing.
         let listed = execute_call(LIST_CALLS, "{}", &rook, None, &path).unwrap();
-        assert!(listed.contains("5 of today's 5 calls left"), "got: {listed}");
+        assert!(
+            listed.contains(&format!(
+                "{max} of today's {max} calls left",
+                max = raven_calls::MAX_CALLS_PER_DAY
+            )),
+            "got: {listed}"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_final_reply_hangs_up_instead_of_farming_goodbyes() {
+        let path = mail_fixture("call-hang-up");
+        let rook = built_in(&path);
+        let hugin = companion(&path, "Hugin");
+
+        execute_call(
+            OPEN_CALL,
+            &serde_json::json!({ "to_agent_id": &hugin, "body": "Quick check — you alive?" })
+                .to_string(),
+            &rook,
+            None,
+            &path,
+        )
+        .unwrap();
+        let call_id = execute_call(LIST_CALLS, "{}", &rook, None, &path)
+            .unwrap()
+            .split("id ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("a call id")
+            .to_owned();
+
+        let sent = execute_call(
+            SEND_IN_CALL,
+            &serde_json::json!({
+                "call_id": &call_id,
+                "body": "Alive and well — that answers it. Hanging up.",
+                "final": true
+            })
+            .to_string(),
+            &hugin,
+            None,
+            &path,
+        )
+        .unwrap();
+        assert!(
+            sent.contains("closed"),
+            "the result tells the model its word ended the call: {sent}"
+        );
+
+        let calls = RavenCallRepository::open(&path).unwrap();
+        let call = calls.get(&call_id).unwrap().expect("the call row");
+        assert_eq!(call.status, raven_calls::CallStatus::Closed);
+        assert_eq!(call.message_count, 2, "hung up at two turns, not ground to five");
+
+        // The refusal a late word gets is the CLOSED sentence, so neither side
+        // is woken again into an exchange that is over.
+        let late = execute_call(
+            SEND_IN_CALL,
+            &serde_json::json!({ "call_id": &call_id, "body": "also—" }).to_string(),
+            &rook,
+            None,
+            &path,
+        )
+        .expect_err("a hung-up call takes nothing more");
+        assert!(late.contains("closed"), "the refusal names the state: {late}");
 
         std::fs::remove_file(path).ok();
     }
@@ -1728,7 +1837,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sixth_call_is_refused_with_a_sentence_the_model_can_act_on() {
+    fn the_call_past_the_daily_allowance_is_refused_with_a_sentence_the_model_can_act_on() {
         let path = mail_fixture("call-cap");
         let rook = built_in(&path);
         let hugin = companion(&path, "Hugin");
@@ -1739,7 +1848,7 @@ mod tests {
         }
 
         let refused = execute_call(OPEN_CALL, &open, &rook, None, &path)
-            .expect_err("the sixth call must be refused");
+            .expect_err("the call past the allowance must be refused");
         assert!(refused.contains("midnight"), "got: {refused}");
         assert!(
             refused.contains(&raven_calls::MAX_CALLS_PER_DAY.to_string()),
@@ -1748,7 +1857,13 @@ mod tests {
 
         // And the model is not left guessing what it has left.
         let listed = execute_call(LIST_CALLS, "{}", &rook, None, &path).unwrap();
-        assert!(listed.contains("0 of today's 5 calls left"), "got: {listed}");
+        assert!(
+            listed.contains(&format!(
+                "0 of today's {} calls left",
+                raven_calls::MAX_CALLS_PER_DAY
+            )),
+            "got: {listed}"
+        );
 
         std::fs::remove_file(path).ok();
     }

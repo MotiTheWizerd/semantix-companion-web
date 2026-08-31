@@ -85,6 +85,28 @@ interface CallPlacements {
   afterMessageId: Map<string, CallThread[]>;
 }
 
+/** Backstage rows — persisted for the MODEL, never shown to the person. A
+ * `system` row is machinery talking to the companion (a wake notice, a call
+ * record); a completed assistant row with nothing in it is a woken turn that
+ * answered through the call instead of the thread. Both stay in the database
+ * and ride every later request's history — but the call CARD is the whole
+ * user-facing surface of a call, and showing the stage directions beside it
+ * broke the illusion of a real call (Moti, s533: "it should feel like a real
+ * call"). */
+function isUserFacing(message: ChatMessage): boolean {
+  if (message.role === "system") return false;
+  if (
+    message.role === "assistant" &&
+    message.status === "completed" &&
+    !message.content &&
+    message.attachments.length === 0 &&
+    !message.errorMessage
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /** Keep chat sequence authoritative and place each call after the latest
  * message that already existed when the call opened. The call's createdAt is
  * immutable, so later call turns update the same slot instead of moving it. */
@@ -158,9 +180,13 @@ const ChatThread = memo(function ChatThread({
   companions,
 }: ChatThreadProps) {
   const contentRef = useRef<HTMLDivElement>(null);
+  // Calls anchor against the same filtered list the reader sees, so a card
+  // whose nearest real anchor is a hidden row lands after the latest VISIBLE
+  // message instead of vanishing with its anchor.
+  const visibleMessages = useMemo(() => messages.filter(isUserFacing), [messages]);
   const callPlacements = useMemo(
-    () => placeCalls(messages, callThreads),
-    [messages, callThreads],
+    () => placeCalls(visibleMessages, callThreads),
+    [visibleMessages, callThreads],
   );
   const callAgentNames = useMemo(
     () => new Map(companions.map((companion) => [companion.id, companionLabel(companion)])),
@@ -234,7 +260,7 @@ const ChatThread = memo(function ChatThread({
             replyingAgentId={replyingByCallId.get(thread.call.id) ?? null}
           />
         ))}
-        {messages.map((message) => {
+        {visibleMessages.map((message) => {
           const recall = recallByMessageId[message.id];
           const toolCalls = toolCallsByMessageId[message.id];
           const reasoning = reasoningByMessageId[message.id] ?? "";
@@ -340,7 +366,6 @@ export function ChatSurface({
   const positionedConversationIdRef = useRef<string | null>(null);
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
-  const hasMessages = messages.length > 0;
   const {
     threads: callThreads,
     streamingMessages: streamingCallMessages,
@@ -348,6 +373,9 @@ export function ChatSurface({
     isInitialLoading: areCallsInitiallyLoading,
     error: callsError,
   } = useConversationCalls(activeConversationId, isSending);
+  // A thread whose every row is backstage still shows its call cards — the
+  // cards are the one surface a call is allowed to have.
+  const hasMessages = messages.some(isUserFacing) || callThreads.length > 0;
 
   // The dock floats OVER the thread so messages frost under the composer glass.
   // That costs the thread its floor, so the thread rents it back as bottom

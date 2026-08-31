@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 21;
+const LATEST_SCHEMA_VERSION: i64 = 23;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -746,6 +746,38 @@ fn migration_sql(version: i64) -> &'static str {
              ALTER TABLE companions ADD COLUMN style_id TEXT
                  REFERENCES styles(id) ON DELETE SET NULL;"
         }
+        22 => {
+            // THE CLOSE-REPORT GUARD. When a call closes, its record is
+            // delivered once: a transcript into each participant's thread, a
+            // carve into each participant's long-term memory, and one woken
+            // turn for the initiator to tell its user what came of it. This
+            // stamp is what makes "once" true — the reporter scans for closed
+            // calls without it, and marks BEFORE delivering, the same
+            // anti-retry-storm law as the wake guard in schema 15.
+            //
+            // ⚑ THE BACKFILL IS THE POINT OF THE SECOND STATEMENT. Every call
+            // closed before this schema existed is stamped as already
+            // reported — otherwise the first launch after the upgrade would
+            // wake companions with transcripts of exchanges from days ago, a
+            // burst of model calls nobody asked for about calls nobody
+            // remembers placing.
+            "ALTER TABLE raven_calls ADD COLUMN close_reported_at INTEGER;
+
+             UPDATE raven_calls
+             SET close_reported_at = closed_at
+             WHERE status = 'closed';"
+        }
+        23 => {
+            // WHEN the wake fired, not just FOR WHAT. The wake guard (schema
+            // 15) says which turn a companion was last woken for; it cannot
+            // say whether that companion is still composing its answer or gave
+            // up an hour ago — and the UI was calling a model mid-thought
+            // "No answer" the moment the guard landed (found live, s533: the
+            // card flashed the failure word seconds into a healthy call).
+            // This stamp lets the card grant a woken companion an honest
+            // answering window before declaring silence.
+            "ALTER TABLE raven_calls ADD COLUMN woken_at INTEGER;"
+        }
         _ => unreachable!("all schema versions must have migration SQL"),
     }
 }
@@ -1028,6 +1060,57 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .expect("the pragma should be readable");
         assert_eq!(enforcing, 1);
+    }
+
+    /// Migration 22 must grandfather every already-closed call as "reported".
+    /// Without the backfill, the first launch after the upgrade would wake
+    /// companions with transcripts of exchanges from days ago — a burst of
+    /// model calls about calls nobody remembers placing.
+    #[test]
+    fn migration_twenty_two_grandfathers_old_closed_calls_out_of_the_reporter() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        for version in 1..=21 {
+            connection
+                .execute_batch(migration_sql(version))
+                .expect("migration should apply");
+        }
+        connection
+            .pragma_update(None, "user_version", 21)
+            .expect("version should stamp");
+        connection
+            .execute_batch(
+                "INSERT INTO raven_calls (
+                     id, root_conversation_id, initiator_agent_id, status,
+                     message_count, created_at, closed_at
+                 ) VALUES
+                     ('call-old', NULL, 'rook', 'closed', 5, 10, 20),
+                     ('call-live', NULL, 'rook', 'open', 1, 30, NULL);",
+            )
+            .expect("pre-upgrade calls should seed");
+
+        migrate(&mut connection).expect("migration twenty-two should apply");
+
+        let reported: Option<i64> = connection
+            .query_row(
+                "SELECT close_reported_at FROM raven_calls WHERE id = 'call-old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the closed call should be readable");
+        assert_eq!(
+            reported,
+            Some(20),
+            "a call closed before the reporter existed counts as already reported"
+        );
+
+        let live: Option<i64> = connection
+            .query_row(
+                "SELECT close_reported_at FROM raven_calls WHERE id = 'call-live'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the open call should be readable");
+        assert_eq!(live, None, "a still-open call keeps its report ahead of it");
     }
 
     /// Migration 11 rebuilds `companions` so a Claude Code voice is storable —

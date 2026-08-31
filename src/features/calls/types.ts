@@ -17,6 +17,10 @@ export interface RavenCall {
    *  message with no reply after it: the other side was woken and stayed
    *  silent. Those are the two silences this field tells apart. */
   wokenForMessageId: string | null;
+  /** WHEN that wake fired (ms). The guard lands before the woken turn runs,
+   *  so this stamp is what separates "picked up, composing" from "gave up" —
+   *  a fresh wake renders as Replying, only a stale one as No answer. */
+  wokenAt: number | null;
 }
 
 export interface RavenCallMessage {

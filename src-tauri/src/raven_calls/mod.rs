@@ -13,8 +13,10 @@
 //! than inferred from a table that is growing while you scan it.
 //!
 //! THE TWO LIMITS, set by Moti and deliberately blunt until we have data:
-//!   · 5 CALLS PER COMPANION PER DAY, in total — not per correspondent. A
+//!   · 30 CALLS PER COMPANION PER DAY, in total — not per correspondent. A
 //!     companion that makes friends does not thereby earn more budget.
+//!     (Was 5 through the wiring era; raised in s533 when calls graduated
+//!     from wiring tests to real collaborative work sessions.)
 //!   · 5 MESSAGES PER CALL, counting both sides together.
 //!
 //! "A day" means the LOCAL calendar day — the clock on the machine the
@@ -34,6 +36,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::app_error::AppError;
 
+mod record;
 mod repository;
 mod waker;
 
@@ -52,7 +55,7 @@ pub(crate) const CALL_WAKE_EVENT: &str = "calls://wake";
 
 /// Calls one companion may open between local midnight and local midnight.
 /// Counted across every recipient — the cap is on the companion, not the pair.
-pub(crate) const MAX_CALLS_PER_DAY: i64 = 5;
+pub(crate) const MAX_CALLS_PER_DAY: i64 = 30;
 
 /// Turns one call may hold, both sides together. Five total is roughly two
 /// round trips and a closing word: enough to ask and be answered, short enough
@@ -88,6 +91,11 @@ pub(crate) struct RavenCall {
     /// other side was woken and stayed silent — declined, or failed. Those two
     /// silences are different rooms, and this field is the wall between them.
     pub(crate) woken_for_message_id: Option<String>,
+    /// WHEN that wake fired (ms). The guard alone cannot tell "picked up and
+    /// composing" from "gave up long ago" — and a card that calls a model
+    /// mid-thought "No answer" is lying (seen live, s533). With the stamp, the
+    /// UI grants a woken companion an answering window before naming silence.
+    pub(crate) woken_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]

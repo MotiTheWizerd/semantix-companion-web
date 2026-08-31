@@ -4,6 +4,7 @@ import { create } from "zustand";
 import {
   getConversationThread,
   listConversations,
+  onWokenChatEvent,
   submitMessage,
   updateConversationCompanion,
 } from "../chat/chatService";
@@ -211,6 +212,72 @@ function requestScrollForChatEvent(event: ChatEvent): void {
   }
 }
 
+/** Fold one woken-lane event into whatever runtime already holds its thread.
+ *
+ * The human lane replays these same shapes through its own channel with its
+ * own optimistic bookkeeping; this fold is deliberately NARROWER — a woken
+ * turn is BACKSTAGE (Moti, s533: "it should feel like a real call"), so only
+ * its two durable moments land: `accepted` (the persisted row + the sidebar
+ * reorder) and `assistantCompleted` (the finished reply). The live theatre —
+ * deltas, reasoning, tool chips — is deliberately dropped: the call card owns
+ * a call's liveness, and ChatSurface hides backstage rows anyway. The fold
+ * never touches `isStreaming` (the composer belongs to the person), never
+ * creates a runtime (an unopened thread loads complete on first open), and
+ * ignores `failed` (a woken turn's error is the waker's log, not this tab's
+ * banner). */
+function foldWokenEvent(
+  state: CompanionStore,
+  event: ChatEvent,
+): Partial<CompanionStore> {
+  if (event.kind === "accepted") {
+    const conversationId = event.conversation.id;
+    const runtimeState = state.runtimeByConversationId[conversationId];
+    return {
+      conversations: reconcileConversation(state.conversations, event.conversation),
+      ...(runtimeState
+        ? {
+            runtimeByConversationId: {
+              ...state.runtimeByConversationId,
+              [conversationId]: {
+                ...runtimeState,
+                messages: reconcileMessage(runtimeState.messages, event.message),
+              },
+            },
+          }
+        : {}),
+    };
+  }
+  if (event.kind !== "assistantCompleted") return {};
+
+  const conversationId = event.message.conversationId;
+  const runtimeState = state.runtimeByConversationId[conversationId];
+  if (!runtimeState) return {};
+  // A silent woken reply (all of its words went through the call) never
+  // renders, so it must not light an unread badge for a row nobody can see.
+  const spoke = Boolean(event.message.content);
+  const targetTab = Object.values(state.tabsById).find(
+    (candidate) => candidate.conversationId === conversationId,
+  );
+  const isVisible = state.activeView === "chat" && targetTab?.id === state.activeTabId;
+  return {
+    ...(spoke && targetTab && !isVisible
+      ? {
+          tabsById: {
+            ...state.tabsById,
+            [targetTab.id]: { ...targetTab, unreadCount: targetTab.unreadCount + 1 },
+          },
+        }
+      : {}),
+    runtimeByConversationId: {
+      ...state.runtimeByConversationId,
+      [conversationId]: {
+        ...runtimeState,
+        messages: reconcileMessage(runtimeState.messages, event.message),
+      },
+    },
+  };
+}
+
 export const useCompanionStore = create<CompanionStore>()((set, get) => ({
   activeView: "chat",
   isInitialising: false,
@@ -245,7 +312,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
         get().openNewConversation();
       }
 
-      const [stopModels, stopPreferences, stopCompanions] = await Promise.all([
+      const [stopModels, stopPreferences, stopCompanions, stopWokenEvents] = await Promise.all([
         onModelsChanged(() => {
           void Promise.all([
             listConfiguredModels(),
@@ -301,8 +368,18 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
             };
           });
         }),
+        onWokenChatEvent((event) => {
+          set((state) => foldWokenEvent(state, event));
+          // Scroll only for rows the reader can actually see: a hidden system
+          // notice or a silent woken reply must never yank the viewport.
+          if (event.kind === "accepted" && event.message.role !== "system") {
+            requestConversationScrollToEnd(event.conversation.id);
+          } else if (event.kind === "assistantCompleted" && event.message.content) {
+            requestConversationScrollToEnd(event.message.conversationId);
+          }
+        }),
       ]);
-      unlisteners = [stopModels, stopPreferences, stopCompanions];
+      unlisteners = [stopModels, stopPreferences, stopCompanions, stopWokenEvents];
       set({ isInitialised: true, isInitialising: false });
     } catch (error) {
       const tab = newConversationTab();
