@@ -44,6 +44,12 @@ pub(crate) use waker::spawn as spawn_waker;
 /// showing one knows to look again.
 pub(crate) const CALLS_CHANGED_EVENT: &str = "calls://changed";
 
+/// Emitted the moment the waker starts a woken turn for a call — the honest
+/// "a reply is in flight" signal. Every wake is followed by CALLS_CHANGED_EVENT
+/// when the attempt ends, whichever way it ends, so a listener that arms on
+/// this and disarms on that can never be left holding a stale indicator.
+pub(crate) const CALL_WAKE_EVENT: &str = "calls://wake";
+
 /// Calls one companion may open between local midnight and local midnight.
 /// Counted across every recipient — the cap is on the companion, not the pair.
 pub(crate) const MAX_CALLS_PER_DAY: i64 = 5;

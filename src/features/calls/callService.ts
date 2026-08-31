@@ -7,7 +7,18 @@ import type { CallThread } from "./types";
 /** Rust fires this when a call moved on its own — a woken companion answered
  *  one while nobody was looking at it. */
 const CALLS_CHANGED_EVENT = "calls://changed";
+/** Rust fires this the instant the waker starts a woken turn for a call —
+ *  the reply is in flight from this moment. Every wake is followed by
+ *  CALLS_CHANGED_EVENT when the attempt ends, success or failure, so an
+ *  indicator armed on wake and disarmed on changed can never go stale. */
+const CALL_WAKE_EVENT = "calls://wake";
 const CHAT_EVENT = "chat://event";
+
+/** The waker's payload: which call is being answered, and by whom. */
+export interface CallWakeEvent {
+  callId: string;
+  agentId: string;
+}
 
 /** Every call born out of one conversation, newest first, with its turns.
  *
@@ -23,6 +34,11 @@ export function listConversationCalls(conversationId: string): Promise<CallThrea
  *  truth about state this module already knows how to fetch. */
 export function onCallsChanged(handler: () => void): Promise<UnlistenFn> {
   return listen(CALLS_CHANGED_EVENT, () => handler());
+}
+
+/** Fires when a woken turn starts answering a call. */
+export function onCallWake(handler: (event: CallWakeEvent) => void): Promise<UnlistenFn> {
+  return listen<CallWakeEvent>(CALL_WAKE_EVENT, ({ payload }) => handler(payload));
 }
 
 /** Provider-neutral live call speech. Other app-wide chat events share this

@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { requestConversationScrollToEnd } from "../chat/chatScrollEvents";
-import { listConversationCalls, onCallsChanged, onCallSpeech } from "./callService";
+import { listConversationCalls, onCallsChanged, onCallSpeech, onCallWake } from "./callService";
 import type { CallThread, StreamingCallMessage } from "./types";
+
+const NOBODY_REPLYING: ReadonlyMap<string, string> = new Map();
 
 interface ConversationCallsState {
   threads: CallThread[];
   streamingMessages: StreamingCallMessage[];
+  /** callId → agentId for every call whose reply is in flight right now: the
+   * waker started a turn for it and that turn has not ended. Armed by
+   * `calls://wake`, disarmed by `calls://changed` — Rust guarantees the second
+   * always follows the first, so this cannot be left stale. */
+  replyingByCallId: ReadonlyMap<string, string>;
   /** True only while this conversation's first authoritative call read is
    * pending. Refreshes do not blank or re-block the already rendered thread. */
   isInitialLoading: boolean;
@@ -32,6 +39,8 @@ export function useConversationCalls(
 ): ConversationCallsState {
   const [threads, setThreads] = useState<CallThread[]>([]);
   const [streamingMessages, setStreamingMessages] = useState<StreamingCallMessage[]>([]);
+  const [replyingByCallId, setReplyingByCallId] =
+    useState<ReadonlyMap<string, string>>(NOBODY_REPLYING);
   const [error, setError] = useState<string | null>(null);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const wasBusy = useRef(turnInProgress);
@@ -84,6 +93,7 @@ export function useConversationCalls(
   useEffect(() => {
     setThreads([]);
     setStreamingMessages([]);
+    setReplyingByCallId(NOBODY_REPLYING);
     setError(null);
     if (!conversationId) {
       setLoadedConversationId(null);
@@ -159,13 +169,37 @@ export function useConversationCalls(
     };
   }, [turnInProgress, conversationId, load]);
 
+  // The reply-in-flight lane. The waker announces the woken turn the moment
+  // it starts; the card shows a typing ghost for that call until the turn
+  // ends. Filtered by the loaded thread set, same as speech — call ids are
+  // globally unique and other windows share this bus.
+  useEffect(() => {
+    if (!conversationId) return;
+    let active = true;
+    const subscription = onCallWake((event) => {
+      if (!active) return;
+      if (!knownCallIds.current.get(conversationId)?.has(event.callId)) return;
+      setReplyingByCallId((current) =>
+        new Map(current).set(event.callId, event.agentId),
+      );
+    });
+    return () => {
+      active = false;
+      void subscription.then((unlisten) => unlisten());
+    };
+  }, [conversationId]);
+
   // The woken lane. A companion answered a call with nobody watching, and
   // this is how the card learns about it — the only path here that is not
-  // downstream of something the user did.
+  // downstream of something the user did. It is also the falling edge of
+  // every wake: woken turns run one at a time and each ends with this event,
+  // so clearing the whole in-flight set here is exact, not approximate.
   useEffect(() => {
     if (!conversationId) return;
     let active = true;
     const subscription = onCallsChanged(() => {
+      if (!active) return;
+      setReplyingByCallId(NOBODY_REPLYING);
       void load(conversationId, () => active);
     });
     return () => {
@@ -177,6 +211,7 @@ export function useConversationCalls(
   return {
     threads,
     streamingMessages,
+    replyingByCallId,
     isInitialLoading:
       conversationId !== null && loadedConversationId !== conversationId,
     error,

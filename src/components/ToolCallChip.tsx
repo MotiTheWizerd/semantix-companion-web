@@ -49,7 +49,13 @@ export function ToolCallChip({ calls }: { calls: ToolCallChipItem[] }) {
         >
           <span aria-hidden="true">{callIcon(call)}</span>
           <span>{callLabel(call)}</span>
-          {call.status === "running" && <span aria-hidden="true">…</span>}
+          {call.status === "running" && (
+            <span className="tool-chip__working" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          )}
           {call.status === "error" && (
             <span className="tool-chip__error">⚠ {call.detail ?? "failed"}</span>
           )}

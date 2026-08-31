@@ -161,6 +161,13 @@
   background: rgba(118, 184, 146, 0.06);
 }
 
+/* Something is happening inside RIGHT NOW — the summary row is the only part
+   of a collapsed card that exists, so the live pulse lives here. */
+.calls__status--live > span {
+  box-shadow: 0 0 0 3px rgba(118, 184, 146, 0.08);
+  animation: calls-live-pulse 1.4s ease-in-out infinite;
+}
+
 .calls__meter strong {
   color: var(--text-secondary);
   font-weight: 650;
@@ -305,6 +312,37 @@
   animation: calls-caret 0.8s steps(1, end) infinite;
 }
 
+/* The ghost turn — a reply the waker says is in flight, before any words.
+   Slightly translucent so a landed turn always reads as more real. */
+.calls__turn--ghost {
+  opacity: 0.85;
+}
+
+.calls__typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+  color: var(--text-muted);
+}
+
+.calls__typing > span {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  opacity: 0.35;
+  animation: calls-typing 1.2s ease-in-out infinite;
+}
+
+.calls__typing > span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.calls__typing > span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
 .calls__empty {
   margin: 0;
   padding: 13px 0;
@@ -330,6 +368,13 @@
   50% {
     opacity: 0.45;
     transform: scale(0.82);
+  }
+}
+
+@keyframes calls-typing {
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
   }
 }
 
@@ -371,7 +416,14 @@
 
 @media (prefers-reduced-motion: reduce) {
   .calls__body--streaming::after,
-  .calls__live > span {
+  .calls__live > span,
+  .calls__status--live > span,
+  .calls__typing > span {
     animation: none;
+  }
+
+  /* Still visibly "on" without the motion. */
+  .calls__typing > span {
+    opacity: 0.7;
   }
 }

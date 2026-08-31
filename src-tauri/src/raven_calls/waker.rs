@@ -27,7 +27,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::chat::{drive_turn, AppEventSink, ChatService};
 
-use super::{RavenCallRepository, CALLS_CHANGED_EVENT};
+use super::{RavenCallRepository, CALLS_CHANGED_EVENT, CALL_WAKE_EVENT};
 
 /// How often the table is read. Long enough that an idle machine is idle,
 /// short enough that an answer feels like a reply rather than a delivery.
@@ -120,6 +120,13 @@ async fn tick(
                 continue;
             }
         };
+
+        // Armed here, disarmed by the CALLS_CHANGED_EVENT below — which runs
+        // whether the turn succeeds or fails, so the pairing cannot leak.
+        let _ = app.emit(
+            CALL_WAKE_EVENT,
+            serde_json::json!({ "callId": wake.call_id, "agentId": wake.agent_id }),
+        );
 
         let sink = Arc::new(AppEventSink::new(app.clone()));
         if let Err(error) = drive_turn(Arc::clone(chat), prepared, sink).await {

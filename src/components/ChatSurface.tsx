@@ -130,6 +130,9 @@ interface ChatThreadProps {
   reasoningByMessageId: Record<string, string>;
   callThreads: CallThread[];
   streamingCallMessages: StreamingCallMessage[];
+  /** callId → agentId while a woken reply is in flight — changes only on wake
+   * edges, never per keystroke, so it is safe inside the memo wall. */
+  replyingByCallId: ReadonlyMap<string, string>;
   callsError: string | null;
   companions: Companion[];
 }
@@ -150,6 +153,7 @@ const ChatThread = memo(function ChatThread({
   reasoningByMessageId,
   callThreads,
   streamingCallMessages,
+  replyingByCallId,
   callsError,
   companions,
 }: ChatThreadProps) {
@@ -227,6 +231,7 @@ const ChatThread = memo(function ChatThread({
             streamingMessages={streamingCallMessages.filter(
               (message) => message.callId === thread.call.id,
             )}
+            replyingAgentId={replyingByCallId.get(thread.call.id) ?? null}
           />
         ))}
         {messages.map((message) => {
@@ -294,6 +299,7 @@ const ChatThread = memo(function ChatThread({
                   streamingMessages={streamingCallMessages.filter(
                     (streaming) => streaming.callId === thread.call.id,
                   )}
+                  replyingAgentId={replyingByCallId.get(thread.call.id) ?? null}
                 />
               ))}
             </Fragment>
@@ -338,6 +344,7 @@ export function ChatSurface({
   const {
     threads: callThreads,
     streamingMessages: streamingCallMessages,
+    replyingByCallId,
     isInitialLoading: areCallsInitiallyLoading,
     error: callsError,
   } = useConversationCalls(activeConversationId, isSending);
@@ -514,6 +521,7 @@ export function ChatSurface({
           reasoningByMessageId={reasoningByMessageId}
           callThreads={callThreads}
           streamingCallMessages={streamingCallMessages}
+          replyingByCallId={replyingByCallId}
           callsError={callsError}
           companions={companions}
         />

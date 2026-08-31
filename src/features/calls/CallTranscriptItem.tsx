@@ -93,13 +93,54 @@ function CallTurn({
   );
 }
 
+/** The messenger typing bubble, for a reply the waker told us is in flight.
+ *  A ghost turn, not a message — it holds the newest slot until words start
+ *  streaming (the draft replaces it) or the woken turn ends. */
+function TypingTurn({
+  agentId,
+  initiatorAgentId,
+  agentNames,
+}: {
+  agentId: string;
+  initiatorAgentId: string;
+  agentNames: ReadonlyMap<string, string>;
+}) {
+  const name = agentLabel(agentId, agentNames);
+  const side = agentId === initiatorAgentId ? "initiator" : "recipient";
+
+  return (
+    <div className={`calls__turn calls__turn--${side} calls__turn--ghost`}>
+      <span className="calls__avatar" aria-hidden="true">
+        {agentInitial(name)}
+      </span>
+      <div className="calls__turn-content">
+        <div className="calls__turn-meta">
+          <span className="calls__speaker">{name}</span>
+          <span className="calls__live">
+            <span aria-hidden="true" /> Replying
+          </span>
+        </div>
+        <span className="calls__typing" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function CallTranscriptItem({
   thread,
   streamingMessages = [],
+  replyingAgentId = null,
   agentNames,
 }: {
   thread: CallThread;
   streamingMessages?: StreamingCallMessage[];
+  /** Who is composing a reply to this call right now — the waker's word, not
+   *  a guess. Null when nothing is in flight. */
+  replyingAgentId?: string | null;
   agentNames: ReadonlyMap<string, string>;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -113,11 +154,24 @@ export function CallTranscriptItem({
   const otherName = other ? agentLabel(other, agentNames) : null;
   const title = otherName ? `${initiatorName} called ${otherName}` : `${initiatorName} opened a call`;
 
-  // Speech arriving into a collapsed call must be visible without making the
-  // user notice a changing meter and manually open it mid-sentence.
+  // The three live moments, most specific first. "Speaking" is words actually
+  // streaming; "replying" is the woken turn running before (or between) words —
+  // hidden again once the reply has landed as the newest turn, because a woken
+  // turn can outlive its own answer by a closing thought.
+  const speaking = streamingMessages.length > 0;
+  const newestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  const replying =
+    replyingAgentId !== null &&
+    call.status === "open" &&
+    !speaking &&
+    newestMessage?.fromAgentId !== replyingAgentId;
+  const liveWord = speaking ? "Speaking" : replying ? "Replying" : null;
+
+  // Anything happening live inside a collapsed call must be visible without
+  // making the user notice a changing meter and manually open it mid-sentence.
   useEffect(() => {
-    if (streamingMessages.length > 0) setExpanded(true);
-  }, [streamingMessages.length]);
+    if (streamingMessages.length > 0 || replying) setExpanded(true);
+  }, [streamingMessages.length, replying]);
 
   return (
     <article className="chat-message chat-message--call">
@@ -141,9 +195,13 @@ export function CallTranscriptItem({
               <span className="calls__title">{title}</span>
             </span>
             <span className="calls__summary-meta">
-              <span className={`calls__status calls__status--${call.status}`}>
+              <span
+                className={`calls__status calls__status--${call.status}${
+                  liveWord ? " calls__status--live" : ""
+                }`}
+              >
                 <span aria-hidden="true" />
-                {call.status === "open" ? "Open" : "Ended"}
+                {liveWord ?? (call.status === "open" ? "Open" : "Ended")}
               </span>
               <span className="calls__meter">
                 <strong>{used}</strong> / {MAX_MESSAGES_PER_CALL} turns
@@ -156,7 +214,7 @@ export function CallTranscriptItem({
 
           {expanded && (
             <div className="calls__turns">
-              {messages.length === 0 && streamingMessages.length === 0 ? (
+              {messages.length === 0 && streamingMessages.length === 0 && !replying ? (
                 <p className="calls__empty">Nothing was said in this call.</p>
               ) : (
                 <>
@@ -177,6 +235,13 @@ export function CallTranscriptItem({
                       streaming
                     />
                   ))}
+                  {replying && replyingAgentId !== null && (
+                    <TypingTurn
+                      agentId={replyingAgentId}
+                      initiatorAgentId={call.initiatorAgentId}
+                      agentNames={agentNames}
+                    />
+                  )}
                 </>
               )}
             </div>
