@@ -28,6 +28,14 @@ export function listConversationCalls(conversationId: string): Promise<CallThrea
   return invoke<CallThread[]>("list_conversation_calls", { conversationId });
 }
 
+/** Ring again: clear the wake guard on an open call so the waker re-rings its
+ *  newest turn within a tick. The human's door out of a stable silence — one
+ *  press buys exactly one more wake. Resolves to whether anything re-armed;
+ *  false means the call was already over or already ringing. */
+export function retryCallWake(callId: string): Promise<boolean> {
+  return invoke<boolean>("retry_call_wake", { callId });
+}
+
 /** Fires when a call changed without this window doing anything — the waker
  *  gave a companion a turn and it answered. Carries no payload on purpose: the
  *  only honest response is to re-read, and a diff would be a second source of

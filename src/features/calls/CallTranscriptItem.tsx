@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 
+import { retryCallWake } from "./callService";
 import {
   MAX_MESSAGES_PER_CALL,
   type CallThread,
@@ -48,6 +49,31 @@ const CALL_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
 
 function messageTime(timestamp: number): string {
   return CALL_TIME_FORMATTER.format(timestamp);
+}
+
+/** "0:07", "4:12", "1:04:07" — a phone's clock, not a log's. */
+function formatElapsed(milliseconds: number): string {
+  const total = Math.max(0, Math.floor(milliseconds / 1000));
+  const seconds = total % 60;
+  const minutes = Math.floor(total / 60) % 60;
+  const hours = Math.floor(total / 3600);
+  const padded = String(seconds).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${padded}`
+    : `${minutes}:${padded}`;
+}
+
+/** The current time, re-read every second while `active` — the one clock all
+ *  of a card's tickers share, so they advance together instead of drifting. */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
 }
 
 interface CallTurnProps {
@@ -107,6 +133,10 @@ function TypingTurn({
 }) {
   const name = agentLabel(agentId, agentNames);
   const side = agentId === initiatorAgentId ? "initiator" : "recipient";
+  // The reply began when this ghost appeared — the wake event has no
+  // timestamp, and the mount is at most a render behind it.
+  const [since] = useState(() => Date.now());
+  const now = useNow(true);
 
   return (
     <div className={`calls__turn calls__turn--${side} calls__turn--ghost`}>
@@ -117,7 +147,7 @@ function TypingTurn({
         <div className="calls__turn-meta">
           <span className="calls__speaker">{name}</span>
           <span className="calls__live">
-            <span aria-hidden="true" /> Replying
+            <span aria-hidden="true" /> Replying · {formatElapsed(now - since)}
           </span>
         </div>
         <span className="calls__typing" aria-hidden="true">
@@ -126,6 +156,80 @@ function TypingTurn({
           <span />
         </span>
       </div>
+    </div>
+  );
+}
+
+/** The phone, mid-ring. The newest turn is addressed to someone the waker has
+ *  not reached yet — its own timestamp is when the ringing began, so this
+ *  clock survives a window reopen where a session timer would reset. */
+function RingingTurn({
+  message,
+  initiatorAgentId,
+  agentNames,
+  now,
+}: {
+  message: RavenCallMessage;
+  initiatorAgentId: string;
+  agentNames: ReadonlyMap<string, string>;
+  now: number;
+}) {
+  const name = agentLabel(message.toAgentId, agentNames);
+  const side = message.toAgentId === initiatorAgentId ? "initiator" : "recipient";
+
+  return (
+    <div className={`calls__turn calls__turn--${side} calls__turn--ghost calls__turn--ringing`}>
+      <span className="calls__avatar" aria-hidden="true">
+        {agentInitial(name)}
+      </span>
+      <div className="calls__turn-content">
+        <div className="calls__turn-meta">
+          <span className="calls__speaker">{name}</span>
+          <span className="calls__live calls__live--ringing">
+            <span aria-hidden="true" /> Ringing · {formatElapsed(now - message.createdAt)}
+          </span>
+        </div>
+        <span className="calls__ring-pulse" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** The wake fired for the newest turn and nothing came back — a decline, a
+ *  dead model, or a companion that read and moved on. From the outside those
+ *  are one fact: no answer. The button clears the wake guard so the waker
+ *  rings once more; each press buys exactly one retry, never a loop. */
+function SilenceNotice({
+  agentId,
+  agentNames,
+  callId,
+  redialing,
+  onRedial,
+}: {
+  agentId: string;
+  agentNames: ReadonlyMap<string, string>;
+  callId: string;
+  redialing: boolean;
+  onRedial: (callId: string) => void;
+}) {
+  const name = agentLabel(agentId, agentNames);
+  return (
+    <div className="calls__silence" role="status">
+      <p className="calls__silence-word">
+        No answer — {name} was woken and no reply came.
+      </p>
+      <button
+        type="button"
+        className="calls__redial"
+        disabled={redialing}
+        onClick={() => onRedial(callId)}
+      >
+        {redialing ? "Ringing…" : "Ring again"}
+      </button>
     </div>
   );
 }
@@ -144,6 +248,7 @@ export function CallTranscriptItem({
   agentNames: ReadonlyMap<string, string>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [redialing, setRedialing] = useState(false);
   const { call, messages } = thread;
   const used = call.messageCount;
   const other =
@@ -154,10 +259,14 @@ export function CallTranscriptItem({
   const otherName = other ? agentLabel(other, agentNames) : null;
   const title = otherName ? `${initiatorName} called ${otherName}` : `${initiatorName} opened a call`;
 
-  // The three live moments, most specific first. "Speaking" is words actually
+  // The card's phases, most specific first. "Speaking" is words actually
   // streaming; "replying" is the woken turn running before (or between) words —
   // hidden again once the reply has landed as the newest turn, because a woken
-  // turn can outlive its own answer by a closing thought.
+  // turn can outlive its own answer by a closing thought. Below those two,
+  // Rust's wake guard splits the remaining quiet of an open call in half:
+  // guard behind the newest turn means the phone is still RINGING for whoever
+  // it addresses; guard on the newest turn means they were woken and stayed
+  // SILENT — the state a person may answer with "ring again".
   const speaking = streamingMessages.length > 0;
   const newestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const replying =
@@ -165,13 +274,41 @@ export function CallTranscriptItem({
     call.status === "open" &&
     !speaking &&
     newestMessage?.fromAgentId !== replyingAgentId;
-  const liveWord = speaking ? "Speaking" : replying ? "Replying" : null;
+  const atRest = call.status === "open" && !speaking && !replying && newestMessage !== null;
+  const ringing = atRest && call.wokenForMessageId !== newestMessage.id;
+  const unanswered = atRest && call.wokenForMessageId === newestMessage.id;
+  const liveWord = speaking ? "Speaking" : replying ? "Replying" : ringing ? "Ringing" : null;
+  const statusWord =
+    liveWord ?? (call.status === "open" ? (unanswered ? "No answer" : "Open") : "Ended");
+
+  // The call's own clock: ticking while it is open, final once it closed.
+  // Duration is a fact about the call, not about any phase, so it never hides.
+  const now = useNow(call.status === "open");
+  const duration = formatElapsed((call.closedAt ?? now) - call.createdAt);
 
   // Anything happening live inside a collapsed call must be visible without
   // making the user notice a changing meter and manually open it mid-sentence.
+  // A ring counts: a phone that rings where nobody can see it rings for nobody.
   useEffect(() => {
-    if (streamingMessages.length > 0 || replying) setExpanded(true);
-  }, [streamingMessages.length, replying]);
+    if (streamingMessages.length > 0 || replying || ringing) setExpanded(true);
+  }, [streamingMessages.length, replying, ringing]);
+
+  // One press, one retry. Success flips the card back to ringing through the
+  // refetch Rust's changed event triggers; the effect below re-arms the button
+  // only when the silence state has genuinely been left and re-entered.
+  useEffect(() => {
+    if (!unanswered) setRedialing(false);
+  }, [unanswered]);
+  const redial = (callId: string) => {
+    setRedialing(true);
+    retryCallWake(callId)
+      .then((rearmed) => {
+        // False means the call closed under us — nothing will refetch, so
+        // the button must not stay dead in a state that will not change.
+        if (!rearmed) setRedialing(false);
+      })
+      .catch(() => setRedialing(false));
+  };
 
   return (
     <article className="chat-message chat-message--call">
@@ -198,10 +335,16 @@ export function CallTranscriptItem({
               <span
                 className={`calls__status calls__status--${call.status}${
                   liveWord ? " calls__status--live" : ""
-                }`}
+                }${unanswered ? " calls__status--silent" : ""}`}
               >
                 <span aria-hidden="true" />
-                {liveWord ?? (call.status === "open" ? "Open" : "Ended")}
+                {statusWord}
+              </span>
+              <span
+                className="calls__duration"
+                title={call.status === "open" ? "Call running for" : "Call lasted"}
+              >
+                {duration}
               </span>
               <span className="calls__meter">
                 <strong>{used}</strong> / {MAX_MESSAGES_PER_CALL} turns
@@ -240,6 +383,23 @@ export function CallTranscriptItem({
                       agentId={replyingAgentId}
                       initiatorAgentId={call.initiatorAgentId}
                       agentNames={agentNames}
+                    />
+                  )}
+                  {ringing && newestMessage !== null && (
+                    <RingingTurn
+                      message={newestMessage}
+                      initiatorAgentId={call.initiatorAgentId}
+                      agentNames={agentNames}
+                      now={now}
+                    />
+                  )}
+                  {unanswered && newestMessage !== null && (
+                    <SilenceNotice
+                      agentId={newestMessage.toAgentId}
+                      agentNames={agentNames}
+                      callId={call.id}
+                      redialing={redialing}
+                      onRedial={redial}
                     />
                   )}
                 </>

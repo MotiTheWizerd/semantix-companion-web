@@ -30,7 +30,7 @@
 use std::{path::Path, sync::Arc};
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::app_error::AppError;
 
@@ -81,6 +81,13 @@ pub(crate) struct RavenCall {
     pub(crate) message_count: i64,
     pub(crate) created_at: i64,
     pub(crate) closed_at: Option<i64>,
+    /// The newest turn a wake has been fired for — the wake guard, on the wire.
+    /// Together with the newest message it lets a UI say something TRUE about
+    /// the silence: guard behind the newest turn means the phone is still
+    /// ringing; guard ON the newest turn with no reply after it means the
+    /// other side was woken and stayed silent — declined, or failed. Those two
+    /// silences are different rooms, and this field is the wall between them.
+    pub(crate) woken_for_message_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -167,6 +174,35 @@ impl RavenCallState {
 /// returns calls across conversations or by agent: the human surface answers
 /// "what was said on my behalf HERE", and a wider door would have to justify
 /// itself separately.
+/// Ring again: re-arm the wake for a call's newest turn, at the human's ask.
+///
+/// The wake guard makes silence STABLE on purpose — a companion that declines,
+/// or whose model errored, must not be redialled every tick forever. But
+/// stable is not the same as final: the person watching the call is allowed to
+/// decide the silence was wrong and try once more. Clearing the guard hands
+/// the call back to the waker, which re-rings within one tick; each press buys
+/// exactly one more wake, so a dead model costs one attempt per human ask
+/// rather than a retry storm.
+#[tauri::command]
+pub(crate) async fn retry_call_wake(
+    app: AppHandle,
+    state: State<'_, RavenCallState>,
+    call_id: String,
+) -> Result<bool, String> {
+    let repository = Arc::clone(&state.repository);
+    let rearmed = tauri::async_runtime::spawn_blocking(move || repository.retry_wake(&call_id))
+        .await
+        .map_err(|error| format!("Call task failed: {error}"))?
+        .map_err(String::from)?;
+
+    // Every window showing this call flips to "ringing" now, not at the next
+    // turn edge — the press should be visible in the same second it lands.
+    if rearmed {
+        let _ = app.emit(CALLS_CHANGED_EVENT, ());
+    }
+    Ok(rearmed)
+}
+
 #[tauri::command]
 pub(crate) async fn list_conversation_calls(
     state: State<'_, RavenCallState>,

@@ -117,6 +117,12 @@ async fn tick(
             // already means we will not come back to this message.
             Err(error) => {
                 eprintln!("raven call waker: could not wake {}: {error}", wake.agent_id);
+                // The guard above is already set, so this call will never be
+                // tried again on its own — the one thing that must not happen
+                // is the UI still saying "ringing". The changed event makes
+                // every window re-read and find the guard on the newest turn:
+                // the silence becomes "no answer", which a person can retry.
+                let _ = app.emit(CALLS_CHANGED_EVENT, ());
                 continue;
             }
         };

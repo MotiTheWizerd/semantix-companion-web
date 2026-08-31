@@ -13,7 +13,7 @@ use super::{
 use crate::{app_error::AppError, credentials::unix_timestamp_ms, database};
 
 const CALL_COLUMNS: &str = "id, root_conversation_id, initiator_agent_id, status,
-     message_count, created_at, closed_at";
+     message_count, created_at, closed_at, woken_for_message_id";
 
 const MESSAGE_COLUMNS: &str = "id, call_id, from_agent_id, to_agent_id, body, created_at";
 
@@ -83,6 +83,7 @@ impl RavenCallRepository {
             message_count: 0,
             created_at: unix_timestamp_ms()?,
             closed_at: None,
+            woken_for_message_id: None,
         };
 
         connection
@@ -289,6 +290,27 @@ impl RavenCallRepository {
         Ok(())
     }
 
+    /// Clear the wake guard so the waker rings the newest turn once more.
+    ///
+    /// The guard exists so that declining is a STABLE state — see
+    /// `calls_awaiting_wake`. This is the one door out of that stability, and
+    /// it is human-shaped: pressed on a call, not run in a loop. Only an open
+    /// call re-arms; a closed one has nobody left to ring. Returns whether
+    /// anything changed, so the caller can tell "ringing again" from "that
+    /// call is already over".
+    pub(crate) fn retry_wake(&self, call_id: &str) -> Result<bool, AppError> {
+        let changed = self
+            .connection()?
+            .execute(
+                "UPDATE raven_calls
+                 SET woken_for_message_id = NULL
+                 WHERE id = ?1 AND status = 'open' AND woken_for_message_id IS NOT NULL",
+                [call_id],
+            )
+            .map_err(AppError::database)?;
+        Ok(changed > 0)
+    }
+
     /// The open calls one agent is part of — as the one who opened it, or as
     /// someone who has written or been written to inside it.
     ///
@@ -465,6 +487,7 @@ fn map_call(row: &Row<'_>) -> rusqlite::Result<RavenCall> {
         message_count: row.get(4)?,
         created_at: row.get(5)?,
         closed_at: row.get(6)?,
+        woken_for_message_id: row.get(7)?,
     })
 }
 
@@ -791,6 +814,42 @@ mod tests {
         let pending = calls.calls_awaiting_wake(10).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].agent_id, "rook", "the debt changed hands");
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn ring_again_reopens_exactly_one_more_wake() {
+        let (calls, path) = open_calls("retry-wake");
+        let call = calls.open_call("rook", None).unwrap();
+        calls
+            .append_message(&call.id, "rook", "hugin", "are you there?")
+            .unwrap();
+
+        // The wake fired and nothing came back — the stable silence.
+        let pending = calls.calls_awaiting_wake(10).unwrap();
+        calls.mark_woken(&call.id, &pending[0].message_id).unwrap();
+        assert!(calls.calls_awaiting_wake(10).unwrap().is_empty());
+        assert_eq!(
+            calls.get(&call.id).unwrap().unwrap().woken_for_message_id,
+            Some(pending[0].message_id.clone()),
+            "the guard is visible on the row, so a UI can name the silence"
+        );
+
+        // ⚑ THE HUMAN'S DOOR OUT. One press, one more ring, same turn.
+        assert!(calls.retry_wake(&call.id).unwrap(), "an open guarded call re-arms");
+        let again = calls.calls_awaiting_wake(10).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].message_id, pending[0].message_id, "same turn, rung again");
+
+        // Already ringing: a second press before the wake fires changes nothing.
+        assert!(!calls.retry_wake(&call.id).unwrap(), "an unguarded call has nothing to clear");
+
+        // And a closed call has nobody left to ring.
+        calls.mark_woken(&call.id, &pending[0].message_id).unwrap();
+        calls.close(&call.id).unwrap();
+        assert!(!calls.retry_wake(&call.id).unwrap(), "a closed call does not re-arm");
+        assert!(calls.calls_awaiting_wake(10).unwrap().is_empty());
 
         fs::remove_file(path).ok();
     }

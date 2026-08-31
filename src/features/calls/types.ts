@@ -12,6 +12,11 @@ export interface RavenCall {
   messageCount: number;
   createdAt: number;
   closedAt: number | null;
+  /** The newest turn a wake has fired for — Rust's wake guard, on the wire.
+   *  Behind the newest message: the phone is still ringing. On the newest
+   *  message with no reply after it: the other side was woken and stayed
+   *  silent. Those are the two silences this field tells apart. */
+  wokenForMessageId: string | null;
 }
 
 export interface RavenCallMessage {

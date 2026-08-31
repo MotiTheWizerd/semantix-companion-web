@@ -188,6 +188,7 @@ pub fn run() {
             import::worker::retry_failed_import,
             import::worker::list_import_jobs,
             raven_calls::list_conversation_calls,
+            raven_calls::retry_call_wake,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Semantix Companion");
