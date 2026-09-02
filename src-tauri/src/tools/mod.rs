@@ -33,6 +33,14 @@ pub(crate) const SEND_IN_CALL: &str = "send_in_call";
 pub(crate) const READ_CALL: &str = "read_call";
 pub(crate) const LIST_CALLS: &str = "list_calls";
 
+/// The memory tools are the companion remembering, not the companion using
+/// a tool. A person does not announce "let me check my memory" with a chip,
+/// so the chat lane keeps these off the transcript entirely (Moti, s540:
+/// "make all memory tool calling invisible — let it feel like real memory").
+pub(crate) fn is_memory_tool(name: &str) -> bool {
+    matches!(name, RECALL_MEMORY | CARVE_MEMORY | SEARCH_CONVERSATIONS)
+}
+
 /// Turns returned by `read_call`. A call cannot hold more than
 /// `MAX_MESSAGES_PER_CALL`, so this only ever bites if that limit is raised.
 const CALL_READ_LIMIT: i64 = 50;

@@ -73,6 +73,13 @@
   margin-right: auto;
 }
 
+/* One turn can be several assistant rows — each thing the companion said
+   between its tool calls (s540). Rows from the same breath sit closer than a
+   change of speaker would. */
+.chat-message--assistant + .chat-message--assistant {
+  margin-top: -8px;
+}
+
 .chat-message__error {
   display: block;
   margin-top: 7px;

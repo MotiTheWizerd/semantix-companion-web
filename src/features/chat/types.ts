@@ -77,6 +77,9 @@ export interface ToolCallChipItem {
   arguments: string;
   status: "running" | "ok" | "error";
   detail: string | null;
+  /** The row had already said something when this call was made — the chip
+   *  sits below that text, not above it. */
+  afterText: boolean;
 }
 
 /** One tool call's lifecycle on an assistant message — instrument data,
@@ -90,6 +93,7 @@ export interface ToolCallEvent {
   arguments: string;
   status: "running" | "ok" | "error";
   detail: string | null;
+  afterText: boolean;
 }
 
 /** Transient call speech rides the app event bus. It is deliberately part of
@@ -125,12 +129,6 @@ export type ChatEvent =
       messageId: string;
       sequence: number;
       delta: string;
-    }
-  | {
-      kind: "assistantContentReplaced";
-      conversationId: string;
-      messageId: string;
-      content: string;
     }
   | {
       kind: "assistantReasoningDelta";

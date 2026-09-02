@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
 };
 
@@ -163,18 +163,9 @@ pub(crate) enum ChatEvent {
         sequence: u64,
         delta: String,
     },
-    /// Replace the provisional visible answer after discovering that its text
-    /// was narration leading into a tool call, not the turn's final answer.
-    AssistantContentReplaced {
-        #[serde(rename = "conversationId")]
-        conversation_id: String,
-        #[serde(rename = "messageId")]
-        message_id: String,
-        content: String,
-    },
-    /// Provider-supplied reasoning or progress narration reclassified at a
-    /// tool boundary. Like tool-call activity, this is runtime instrumentation:
-    /// visible in the live UI but never persisted or replayed to a model.
+    /// Provider-supplied reasoning (a model's thinking stream). Like tool-call
+    /// activity, this is runtime instrumentation: visible in the live UI but
+    /// never persisted or replayed to a model.
     AssistantReasoningDelta {
         #[serde(rename = "conversationId")]
         conversation_id: String,
@@ -207,6 +198,10 @@ pub(crate) enum ChatEvent {
         arguments: String,
         status: &'static str,
         detail: Option<String>,
+        /// The row this call sits on had already said something when the
+        /// call was made — the chip belongs below that text, not above it.
+        #[serde(rename = "afterText")]
+        after_text: bool,
     },
     /// A transient, provider-independent piece of one companion's call line.
     /// It is never persisted; the completed tool execution remains the truth.
@@ -796,31 +791,52 @@ struct ChatToolRunner {
     context: ToolContext,
     on_event: Arc<dyn ChatEventSink>,
     conversation_id: String,
-    message_id: String,
+    /// A call lands on whichever row is receiving text when the model asks
+    /// for it — the adapter knows, because it is the one opening the rows.
+    rows: Arc<ChatStreamAdapter>,
 }
 
 #[async_trait::async_trait]
 impl ToolRunner for ChatToolRunner {
     async fn run(&self, call: &ToolCall) -> Result<String, String> {
-        self.on_event.send(ChatEvent::ToolCall {
-            conversation_id: self.conversation_id.clone(),
-            message_id: self.message_id.clone(),
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-            status: "running",
-            detail: None,
-        });
+        let message_id = self.rows.message_id();
+        let after_text = self.rows.current_has_text();
+        // Remembering is not tool use. A memory call runs like any other —
+        // same executor, same result back to the model — but never lights a
+        // chip: the person sees the companion remember, not look something up.
+        let visible = !tools::is_memory_tool(&call.name);
+        if visible {
+            self.on_event.send(ChatEvent::ToolCall {
+                conversation_id: self.conversation_id.clone(),
+                message_id: message_id.clone(),
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                status: "running",
+                detail: None,
+                after_text,
+            });
+        }
         let result = tools::execute(call, &self.context).await;
-        self.on_event.send(ChatEvent::ToolCall {
-            conversation_id: self.conversation_id.clone(),
-            message_id: self.message_id.clone(),
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-            status: if result.is_ok() { "ok" } else { "error" },
-            detail: result.as_ref().err().cloned(),
-        });
+        if visible {
+            self.on_event.send(ChatEvent::ToolCall {
+                conversation_id: self.conversation_id.clone(),
+                message_id,
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                status: if result.is_ok() { "ok" } else { "error" },
+                detail: result.as_ref().err().cloned(),
+                after_text,
+            });
+        } else if let Err(error) = &result {
+            // The model still reads the error and recovers; only the chip is
+            // withheld. The log keeps the trail a silent failure would lose.
+            eprintln!(
+                "[memory] {} failed quietly in {}: {error}",
+                call.name, self.conversation_id
+            );
+        }
         if let (Some((call_id, body)), Some(from_agent_id)) = (
             completed_call_speech(call),
             self.context.companion_id.clone(),
@@ -836,11 +852,40 @@ impl ToolRunner for ChatToolRunner {
     }
 }
 
-struct ChatStreamAdapter {
-    assistant: Message,
+/// Where the companion's words go when it speaks again after a tool: the row
+/// holding what it said before is closed as its own message and a fresh one
+/// is opened for what comes next. One turn, several rows, nothing retracted.
+/// A trait so the adapter's unit tests can watch rows open without a database.
+trait AssistantRows: Send + Sync {
+    fn close(&self, message_id: &str, content: &str) -> Result<Message, String>;
+    fn open(&self) -> Result<Message, String>;
+}
+
+struct ServiceRows {
+    service: Arc<ChatService>,
     conversation_id: String,
-    message_id: String,
+    provider_id: String,
+    model_id: String,
+}
+
+impl AssistantRows for ServiceRows {
+    fn close(&self, message_id: &str, content: &str) -> Result<Message, String> {
+        self.service
+            .complete_assistant(message_id, content)
+            .map_err(String::from)
+    }
+
+    fn open(&self) -> Result<Message, String> {
+        self.service
+            .begin_assistant(&self.conversation_id, &self.provider_id, &self.model_id)
+            .map_err(String::from)
+    }
+}
+
+struct ChatStreamAdapter {
+    conversation_id: String,
     on_event: Arc<dyn ChatEventSink>,
+    rows: Box<dyn AssistantRows>,
     text: Mutex<ChatTextState>,
     started: AtomicBool,
     /// Tool calls the model requested in the round currently streaming;
@@ -850,23 +895,30 @@ struct ChatStreamAdapter {
     call_speech: Mutex<CallSpeechProjector>,
 }
 
-#[derive(Default)]
+/// ⚑ THIS USED TO RETRACT TEXT, AND THAT WAS THE BUG MOTI NAMED AT s540.
+/// The first tool signal was read as proof that everything streamed before
+/// it was a "progress preamble": it was cut out of the answer, shown once in
+/// a runtime-only reasoning disclosure, and never persisted. So a turn shaped
+/// text → tool → text → tool → text kept only its last text, and a reload
+/// showed a companion that had said one thing when it had said three.
+///
+/// Now every text the companion streams stays where it was said. A tool
+/// boundary takes nothing back; the first text AFTER a tool opens the next
+/// row, so each thing said between tool calls is its own message in the
+/// thread — live and after a reload alike.
 struct ChatTextState {
-    /// The answer candidate currently visible and eligible for persistence.
-    content: String,
-    /// Text streamed since the latest tool boundary. It stays provisional
-    /// until the round ends without a tool call.
-    provisional: String,
-    /// A tool was seen after the current provisional text. The first later
-    /// text delta opens the next candidate round (including Claude's native
-    /// mid-stream loop, which never returns to `drive_turn` between tools).
+    /// The row receiving text now. Rows before it are already closed with
+    /// their own text; this one closes when the turn ends or the companion
+    /// speaks again after a tool.
+    current: Message,
+    /// A tool was seen after the current row's text. The first text delta
+    /// after it is the companion speaking again — the next row opens then,
+    /// if this row said something (a tool-first row keeps the text that
+    /// follows its tools).
     tool_seen: bool,
-    /// Narration removed from external-provider rounds, retained long enough
-    /// to ride back to that provider beside the completed tool calls.
-    tool_narrations: Vec<String>,
-    /// Keeps provider reasoning and tool narration separated in one process
-    /// disclosure without inventing provider-specific UI contracts.
-    reasoning_seen: bool,
+    /// Text of each round that ended in tool calls since the loop last took
+    /// it — replayed to the provider beside the calls it led into.
+    round_texts: Vec<String>,
 }
 
 impl ChatStreamAdapter {
@@ -874,13 +926,17 @@ impl ChatStreamAdapter {
         assistant: Message,
         from_agent_id: Option<String>,
         on_event: Arc<dyn ChatEventSink>,
+        rows: Box<dyn AssistantRows>,
     ) -> Self {
         Self {
             conversation_id: assistant.conversation_id.clone(),
-            message_id: assistant.id.clone(),
-            assistant,
             on_event,
-            text: Mutex::new(ChatTextState::default()),
+            rows,
+            text: Mutex::new(ChatTextState {
+                current: assistant,
+                tool_seen: false,
+                round_texts: Vec::new(),
+            }),
             started: AtomicBool::new(false),
             tool_calls: Mutex::new(Vec::new()),
             from_agent_id,
@@ -888,87 +944,84 @@ impl ChatStreamAdapter {
         }
     }
 
-    fn content(&self) -> Result<String, StreamError> {
+    fn state(&self) -> Result<MutexGuard<'_, ChatTextState>, StreamError> {
         self.text
             .lock()
-            .map(|state| state.content.clone())
             .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))
     }
 
-    fn append_text(&self, text: &str) -> Result<(), StreamError> {
-        let mut state = self
-            .text
-            .lock()
-            .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))?;
+    /// The row currently receiving text — where a tool call lands, and what
+    /// the loop completes or fails when the turn ends.
+    fn message_id(&self) -> String {
+        match self.text.lock() {
+            Ok(state) => state.current.id.clone(),
+            Err(poisoned) => poisoned.into_inner().current.id.clone(),
+        }
+    }
+
+    /// Whether the current row already holds text — a tool called now comes
+    /// AFTER what this row says, not before it.
+    fn current_has_text(&self) -> bool {
+        match self.text.lock() {
+            Ok(state) => !state.current.content.is_empty(),
+            Err(poisoned) => !poisoned.into_inner().current.content.is_empty(),
+        }
+    }
+
+    fn content(&self) -> Result<String, StreamError> {
+        self.state().map(|state| state.current.content.clone())
+    }
+
+    /// Append streamed text to the current row — opening the next row first
+    /// when the companion is speaking again after a tool. Returns the id of
+    /// the row the text landed on.
+    fn append_text(&self, text: &str) -> Result<String, StreamError> {
+        let mut state = self.state()?;
         if state.tool_seen {
             state.tool_seen = false;
-            state.provisional.clear();
+            if !state.current.content.is_empty() {
+                // It spoke, used a tool, and is speaking again: what it said
+                // before stands as its own message. Close that row, open the
+                // next — nothing said is ever taken back.
+                let closed = self
+                    .rows
+                    .close(&state.current.id, &state.current.content)
+                    .map_err(|error| StreamError::new(&error))?;
+                self.on_event
+                    .send(ChatEvent::AssistantCompleted { message: closed });
+                let opened = self
+                    .rows
+                    .open()
+                    .map_err(|error| StreamError::new(&error))?;
+                self.on_event.send(ChatEvent::AssistantStarted {
+                    message: opened.clone(),
+                });
+                state.current = opened;
+            }
         }
-        state.content.push_str(text);
-        state.provisional.push_str(text);
+        state.current.content.push_str(text);
+        Ok(state.current.id.clone())
+    }
+
+    /// The first tool signal after some text: what the row says so far is
+    /// this round's text, kept for the provider's tool-call history. Nothing
+    /// is taken back from the row.
+    fn mark_tool_boundary(&self) -> Result<(), StreamError> {
+        let mut state = self.state()?;
+        if state.tool_seen {
+            return Ok(());
+        }
+        state.tool_seen = true;
+        if !state.current.content.is_empty() {
+            let text = state.current.content.clone();
+            state.round_texts.push(text);
+        }
         Ok(())
     }
 
-    /// The first tool signal proves that the text immediately before it was a
-    /// progress preamble. Retract it from the answer, keep it in the visible
-    /// process disclosure, and retain it for the provider's tool-call history.
-    fn mark_tool_boundary(&self, sequence: u64) -> Result<(), StreamError> {
-        let reclassified = {
-            let mut state = self
-                .text
-                .lock()
-                .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))?;
-            if state.tool_seen {
-                return Ok(());
-            }
-            state.tool_seen = true;
-            let narration = std::mem::take(&mut state.provisional);
-            if narration.is_empty() {
-                return Ok(());
-            }
-            let new_length = state
-                .content
-                .len()
-                .checked_sub(narration.len())
-                .filter(|length| state.content[*length..] == narration)
-                .ok_or_else(|| StreamError::new("the provisional chat buffer lost its suffix"))?;
-            state.content.truncate(new_length);
-            state.tool_narrations.push(narration.clone());
-            let reasoning_delta = if state.reasoning_seen {
-                format!("\n\n{narration}")
-            } else {
-                state.reasoning_seen = true;
-                narration
-            };
-            (state.content.clone(), reasoning_delta)
-        };
-
-        self.on_event.send(ChatEvent::AssistantContentReplaced {
-            conversation_id: self.conversation_id.clone(),
-            message_id: self.message_id.clone(),
-            content: reclassified.0,
-        });
-        self.on_event.send(ChatEvent::AssistantReasoningDelta {
-            conversation_id: self.conversation_id.clone(),
-            message_id: self.message_id.clone(),
-            sequence,
-            delta: reclassified.1,
-        });
-        Ok(())
-    }
-
-    fn take_tool_narration(&self) -> Result<String, StreamError> {
-        self.text
-            .lock()
-            .map(|mut state| std::mem::take(&mut state.tool_narrations).join("\n\n"))
-            .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))
-    }
-
-    fn mark_reasoning_seen(&self) -> Result<(), StreamError> {
-        self.text
-            .lock()
-            .map(|mut state| state.reasoning_seen = true)
-            .map_err(|_| StreamError::new("the chat stream buffer was poisoned"))
+    fn take_round_texts(&self) -> Result<String, StreamError> {
+        self.state()
+            .map(|mut state| std::mem::take(&mut state.round_texts).join("\n\n"))
     }
 
     fn take_tool_calls(&self) -> Result<Vec<ToolCall>, StreamError> {
@@ -984,30 +1037,29 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
         match event {
             StreamEvent::Started => {
                 if !self.started.swap(true, Ordering::AcqRel) {
-                    self.on_event.send(ChatEvent::AssistantStarted {
-                        message: self.assistant.clone(),
-                    });
+                    let message = self.state()?.current.clone();
+                    self.on_event.send(ChatEvent::AssistantStarted { message });
                 }
             }
             StreamEvent::Delta { sequence, payload } => match payload {
                 InferenceDelta::Text { text } => {
-                    self.append_text(&text)?;
+                    let message_id = self.append_text(&text)?;
                     self.on_event.send(ChatEvent::AssistantDelta {
                         conversation_id: self.conversation_id.clone(),
-                        message_id: self.message_id.clone(),
+                        message_id,
                         sequence,
                         delta: text,
                     });
                 }
                 InferenceDelta::ToolCall(call) => {
-                    self.mark_tool_boundary(sequence)?;
+                    self.mark_tool_boundary()?;
                     self.tool_calls
                         .lock()
                         .map_err(|_| StreamError::new("the tool call buffer was poisoned"))?
                         .push(call);
                 }
                 InferenceDelta::ToolCallDelta(fragment) => {
-                    self.mark_tool_boundary(sequence)?;
+                    self.mark_tool_boundary()?;
                     let chunk = self
                         .call_speech
                         .lock()
@@ -1023,10 +1075,9 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
                     }
                 }
                 InferenceDelta::Reasoning { text } => {
-                    self.mark_reasoning_seen()?;
                     self.on_event.send(ChatEvent::AssistantReasoningDelta {
                         conversation_id: self.conversation_id.clone(),
-                        message_id: self.message_id.clone(),
+                        message_id: self.message_id(),
                         sequence,
                         delta: text,
                     });
@@ -1137,6 +1188,8 @@ pub(crate) async fn drive_turn(
     let conversation_id = accepted.conversation.id.clone();
     let assistant_service = Arc::clone(&service);
     let assistant_conversation_id = conversation_id.clone();
+    let row_provider_id = provider_id.clone();
+    let row_model_id = model_id.clone();
     let assistant = match tauri::async_runtime::spawn_blocking(move || {
         assistant_service.begin_assistant(&assistant_conversation_id, &provider_id, &model_id)
     })
@@ -1155,11 +1208,17 @@ pub(crate) async fn drive_turn(
         }
     };
 
-    let adapter = ChatStreamAdapter::new(
+    let adapter = Arc::new(ChatStreamAdapter::new(
         assistant.clone(),
         tool_context.companion_id.clone(),
         Arc::clone(&on_event),
-    );
+        Box::new(ServiceRows {
+            service: Arc::clone(&service),
+            conversation_id: conversation_id.clone(),
+            provider_id: row_provider_id,
+            model_id: row_model_id,
+        }),
+    ));
 
     // One executor, both lanes: the chat loop calls it between rounds, and a
     // provider that owns its own agentic loop (Claude Code) calls it
@@ -1169,24 +1228,26 @@ pub(crate) async fn drive_turn(
         context: tool_context.clone(),
         on_event: Arc::clone(&on_event),
         conversation_id: assistant.conversation_id.clone(),
-        message_id: assistant.id.clone(),
+        rows: Arc::clone(&adapter),
     });
     execution.tool_runner = Some(Arc::clone(&tool_runner) as Arc<dyn ToolRunner>);
 
     // The execute-and-continue loop: stream a round; if the model requested
-    // tools, move its progress narration into the process disclosure, run the
-    // tools, fold the calls + results into the request, and stream again. Only
-    // the final tool-free round remains eligible for message persistence.
+    // tools, keep what it said as this round's text, run the tools, fold the
+    // calls + results into the request, and stream again. Each thing said
+    // before a tool persists as its own row — the adapter opens the next one
+    // the moment the companion speaks again — and the final tool-free round
+    // closes the last row.
     let mut rounds = 0;
     loop {
         let tools_available = !execution.request.tools.is_empty();
-        if let Err(error) = service.streaming.stream(&execution, &adapter).await {
+        if let Err(error) = service.streaming.stream(&execution, adapter.as_ref()).await {
             let message = error.to_string();
             return Err(fail_stream(
                 Arc::clone(&service),
                 &on_event,
                 &assistant.conversation_id,
-                &assistant.id,
+                &adapter.message_id(),
                 message,
             )
             .await);
@@ -1199,7 +1260,7 @@ pub(crate) async fn drive_turn(
                     Arc::clone(&service),
                     &on_event,
                     &assistant.conversation_id,
-                    &assistant.id,
+                    &adapter.message_id(),
                     error.to_string(),
                 )
                 .await);
@@ -1213,20 +1274,20 @@ pub(crate) async fn drive_turn(
                 Arc::clone(&service),
                 &on_event,
                 &assistant.conversation_id,
-                &assistant.id,
+                &adapter.message_id(),
                 "The companion kept requesting tools after the tool-round safety limit.".to_owned(),
             )
             .await);
         }
 
-        let round_text = match adapter.take_tool_narration() {
+        let round_text = match adapter.take_round_texts() {
             Ok(text) => text,
             Err(error) => {
                 return Err(fail_stream(
                     Arc::clone(&service),
                     &on_event,
                     &assistant.conversation_id,
-                    &assistant.id,
+                    &adapter.message_id(),
                     error.to_string(),
                 )
                 .await);
@@ -1267,14 +1328,14 @@ pub(crate) async fn drive_turn(
                 Arc::clone(&service),
                 &on_event,
                 &assistant.conversation_id,
-                &assistant.id,
+                &adapter.message_id(),
                 error.to_string(),
             )
             .await);
         }
     };
     let completion_service = Arc::clone(&service);
-    let completion_message_id = assistant.id.clone();
+    let completion_message_id = adapter.message_id();
     let completed = tauri::async_runtime::spawn_blocking(move || {
         completion_service.complete_assistant(&completion_message_id, &content)
     })
@@ -1287,7 +1348,7 @@ pub(crate) async fn drive_turn(
                 Arc::clone(&service),
                 &on_event,
                 &assistant.conversation_id,
-                &assistant.id,
+                &adapter.message_id(),
                 error.to_string(),
             )
             .await);
@@ -1442,9 +1503,25 @@ forward into something you carve. Date the memories you write by the date, which
 each turn.";
 
 fn canonical_messages(messages: &[Message]) -> Vec<InferenceMessage> {
-    messages
+    // One turn can persist as several assistant rows — each thing the
+    // companion said between its tool calls. The provider hears them as ONE
+    // assistant turn: consecutive same-role messages are exactly what a
+    // strict chat template rejects, and the model wrote them as one breath.
+    let mut merged: Vec<Message> = Vec::new();
+    for message in messages.iter().filter(|message| message.status == "completed") {
+        if message.role == "assistant" {
+            if let Some(last) = merged.last_mut().filter(|last| last.role == "assistant") {
+                if !last.content.is_empty() && !message.content.is_empty() {
+                    last.content.push_str("\n\n");
+                }
+                last.content.push_str(&message.content);
+                continue;
+            }
+        }
+        merged.push(message.clone());
+    }
+    merged
         .iter()
-        .filter(|message| message.status == "completed")
         .filter_map(|message| {
             let role = match message.role.as_str() {
                 "system" => Role::System,
@@ -1539,9 +1616,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        companion_identity, conversation_title, drive_turn, repository::ChatRepository,
-        style_directive, workspace_awareness, ChatEvent, ChatEventSink, ChatService,
-        ChatStreamAdapter, Message, SubmitMessageInput, MAX_TOOL_ROUNDS, ORIGIN_CLOCK_ETIQUETTE,
+        canonical_messages, companion_identity, conversation_title, drive_turn,
+        repository::ChatRepository, style_directive, workspace_awareness, AssistantRows,
+        ChatEvent, ChatEventSink, ChatService, ChatStreamAdapter, Message, SubmitMessageInput,
+        MAX_TOOL_ROUNDS, ORIGIN_CLOCK_ETIQUETTE,
     };
     use crate::{
         companions::{Companion, CompanionResolver},
@@ -1633,40 +1711,84 @@ mod tests {
         }
     }
 
+    /// Rows the adapter opens and closes — recorded, not persisted. Ids run
+    /// assistant-1 (the row the turn began on), assistant-2, assistant-3…
+    #[derive(Default)]
+    struct RecordingRows {
+        opened: AtomicUsize,
+        closed: Mutex<Vec<(String, String)>>,
+    }
+
+    impl AssistantRows for Arc<RecordingRows> {
+        fn close(&self, message_id: &str, content: &str) -> Result<Message, String> {
+            self.closed
+                .lock()
+                .expect("recorded rows should lock")
+                .push((message_id.to_owned(), content.to_owned()));
+            let mut message = streaming_assistant();
+            message.id = message_id.to_owned();
+            message.content = content.to_owned();
+            message.status = "completed".to_owned();
+            Ok(message)
+        }
+
+        fn open(&self) -> Result<Message, String> {
+            let opened = self.opened.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut message = streaming_assistant();
+            message.id = format!("assistant-{}", opened + 1);
+            Ok(message)
+        }
+    }
+
+    fn tool_call(id: &str) -> InferenceDelta {
+        InferenceDelta::ToolCall(ToolCall {
+            id: id.to_owned(),
+            name: "list_workspaces".to_owned(),
+            arguments: "{}".to_owned(),
+        })
+    }
+
+    fn text(text: &str) -> InferenceDelta {
+        InferenceDelta::Text {
+            text: text.to_owned(),
+        }
+    }
+
     #[test]
-    fn tool_round_narration_is_reclassified_and_only_the_final_answer_survives() {
+    fn text_between_tool_rounds_survives_each_in_its_own_row() {
         let events = Arc::new(RecordingEvents::default());
-        let adapter = ChatStreamAdapter::new(streaming_assistant(), None, events.clone());
+        let rows = Arc::new(RecordingRows::default());
+        let adapter = ChatStreamAdapter::new(
+            streaming_assistant(),
+            None,
+            events.clone(),
+            Box::new(rows.clone()),
+        );
 
         for round in 0..MAX_TOOL_ROUNDS {
             adapter
                 .emit(StreamEvent::Started)
                 .expect("round should start");
-            let narration = format!("Repeated progress preamble {round}.");
+            let said = format!("Said before tool {round}.");
             adapter
                 .emit(StreamEvent::Delta {
                     sequence: 0,
-                    payload: InferenceDelta::Text {
-                        text: narration.clone(),
-                    },
+                    payload: text(&said),
                 })
-                .expect("narration should stream provisionally");
+                .expect("text should stream");
             adapter
                 .emit(StreamEvent::Delta {
                     sequence: 1,
-                    payload: InferenceDelta::ToolCall(ToolCall {
-                        id: format!("call-{round}"),
-                        name: "list_workspaces".to_owned(),
-                        arguments: "{}".to_owned(),
-                    }),
+                    payload: tool_call(&format!("call-{round}")),
                 })
-                .expect("the tool boundary should reclassify narration");
+                .expect("the tool boundary should keep the text");
 
             assert_eq!(
                 adapter
-                    .take_tool_narration()
+                    .take_round_texts()
                     .expect("provider history should remain available"),
-                narration
+                said,
+                "the provider hears this round's text beside its tool calls"
             );
             assert_eq!(
                 adapter
@@ -1677,8 +1799,8 @@ mod tests {
             );
             assert_eq!(
                 adapter.content().expect("content should remain readable"),
-                "",
-                "tool preambles must never become persisted answer text"
+                said,
+                "a tool boundary takes nothing back from the row"
             );
         }
 
@@ -1688,9 +1810,7 @@ mod tests {
         adapter
             .emit(StreamEvent::Delta {
                 sequence: 0,
-                payload: InferenceDelta::Text {
-                    text: "One clean final answer.".to_owned(),
-                },
+                payload: text("One clean final answer."),
             })
             .expect("the final answer should stream");
 
@@ -1698,21 +1818,141 @@ mod tests {
             adapter.content().expect("content should remain readable"),
             "One clean final answer."
         );
+        assert_eq!(
+            adapter.message_id(),
+            format!("assistant-{}", MAX_TOOL_ROUNDS + 1),
+            "the final answer lands on the last row opened"
+        );
+        let closed = rows.closed.lock().expect("recorded rows should lock");
+        assert_eq!(
+            closed.len(),
+            MAX_TOOL_ROUNDS,
+            "every text said before a tool closed as its own row"
+        );
+        assert_eq!(
+            closed[0],
+            ("assistant-1".to_owned(), "Said before tool 0.".to_owned())
+        );
+        assert_eq!(
+            closed[MAX_TOOL_ROUNDS - 1].1,
+            format!("Said before tool {}.", MAX_TOOL_ROUNDS - 1)
+        );
         let recorded = events.0.lock().expect("events should remain readable");
         assert_eq!(
             recorded
                 .iter()
                 .filter(|event| matches!(event, ChatEvent::AssistantStarted { .. }))
                 .count(),
-            1,
-            "one assistant message starts once, regardless of provider rounds"
+            MAX_TOOL_ROUNDS + 1,
+            "one row starts per thing said, live"
         );
         assert_eq!(
             recorded
                 .iter()
-                .filter(|event| matches!(event, ChatEvent::AssistantContentReplaced { .. }))
+                .filter(|event| matches!(event, ChatEvent::AssistantCompleted { .. }))
                 .count(),
-            MAX_TOOL_ROUNDS
+            MAX_TOOL_ROUNDS,
+            "each earlier row completes the moment the companion speaks again"
+        );
+    }
+
+    #[test]
+    fn a_tool_first_row_keeps_the_text_that_follows_its_tools() {
+        let events = Arc::new(RecordingEvents::default());
+        let rows = Arc::new(RecordingRows::default());
+        let adapter = ChatStreamAdapter::new(
+            streaming_assistant(),
+            None,
+            events.clone(),
+            Box::new(rows.clone()),
+        );
+
+        adapter
+            .emit(StreamEvent::Started)
+            .expect("the round should start");
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 0,
+                payload: tool_call("call-0"),
+            })
+            .expect("a tool may come before any text");
+        assert!(
+            !adapter.current_has_text(),
+            "a chip for this call belongs above the row's text"
+        );
+        assert_eq!(
+            adapter
+                .take_round_texts()
+                .expect("round texts should be readable"),
+            "",
+            "a silent round has no text to replay"
+        );
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 1,
+                payload: text("Found it."),
+            })
+            .expect("text after a tool-first round should stream");
+        assert_eq!(
+            adapter.message_id(),
+            "assistant-1",
+            "a row that had said nothing keeps the text that follows its tools"
+        );
+        assert!(adapter.current_has_text());
+
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 2,
+                payload: tool_call("call-1"),
+            })
+            .expect("a second tool should mark a boundary");
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 3,
+                payload: text("And then."),
+            })
+            .expect("speaking again should open the next row");
+
+        assert_eq!(adapter.message_id(), "assistant-2");
+        assert_eq!(
+            adapter.content().expect("content should remain readable"),
+            "And then."
+        );
+        assert_eq!(
+            *rows.closed.lock().expect("recorded rows should lock"),
+            vec![("assistant-1".to_owned(), "Found it.".to_owned())]
+        );
+    }
+
+    #[test]
+    fn consecutive_assistant_rows_replay_to_the_provider_as_one_turn() {
+        let row = |id: &str, role: &str, content: &str| {
+            let mut message = streaming_assistant();
+            message.id = id.to_owned();
+            message.role = role.to_owned();
+            message.status = "completed".to_owned();
+            message.content = content.to_owned();
+            message
+        };
+        let thread = [
+            row("user-1", "user", "Where were we?"),
+            row("assistant-1", "assistant", "Let me look."),
+            row("assistant-2", "assistant", "Found it."),
+            row("user-2", "user", "And?"),
+        ];
+        let merged = canonical_messages(&thread);
+        assert_eq!(
+            merged.len(),
+            3,
+            "two rows from one turn reach the provider as one assistant message"
+        );
+        assert_eq!(
+            merged,
+            canonical_messages(&[
+                thread[0].clone(),
+                row("assistant-1", "assistant", "Let me look.\n\nFound it."),
+                thread[3].clone(),
+            ])
         );
     }
 
@@ -1761,13 +2001,31 @@ mod tests {
         let thread = service
             .get_thread(&conversation_id)
             .expect("completed thread should reload");
+        let assistant_rows: Vec<&Message> = thread
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect();
+        assert_eq!(
+            assistant_rows.len(),
+            MAX_TOOL_ROUNDS + 1,
+            "four things said before tools and one clean answer — nothing swallowed"
+        );
+        assert!(assistant_rows.iter().all(|row| row.status == "completed"));
+        assert_eq!(
+            assistant_rows[0].content,
+            "Let me inspect one more thing in round 0."
+        );
+        assert_eq!(
+            assistant_rows[MAX_TOOL_ROUNDS - 1].content,
+            format!("Let me inspect one more thing in round {}.", MAX_TOOL_ROUNDS - 1)
+        );
         let assistant = thread.messages.last().expect("assistant should persist");
         assert_eq!(assistant.status, "completed");
         assert_eq!(
             assistant.content,
             "One clean answer after the work is done."
         );
-        assert!(!assistant.content.contains("Let me inspect"));
 
         for path in [
             database_path.clone(),
@@ -1964,16 +2222,22 @@ mod tests {
         assert!(event.get("conversation_id").is_none());
         assert!(event.get("message_id").is_none());
 
-        let replacement = serde_json::to_value(ChatEvent::AssistantContentReplaced {
+        let tool_call = serde_json::to_value(ChatEvent::ToolCall {
             conversation_id: "conversation-123".to_owned(),
             message_id: "message-123".to_owned(),
-            content: String::new(),
+            call_id: "call-1".to_owned(),
+            name: "list_agents".to_owned(),
+            arguments: "{}".to_owned(),
+            status: "running",
+            detail: None,
+            after_text: true,
         })
-        .expect("replacement event should serialize");
-        assert_eq!(replacement["kind"], "assistantContentReplaced");
-        assert_eq!(replacement["conversationId"], "conversation-123");
-        assert_eq!(replacement["messageId"], "message-123");
-        assert_eq!(replacement["content"], "");
+        .expect("tool call event should serialize");
+        assert_eq!(tool_call["kind"], "toolCall");
+        assert_eq!(tool_call["messageId"], "message-123");
+        assert_eq!(tool_call["callId"], "call-1");
+        assert_eq!(tool_call["afterText"], true);
+        assert!(tool_call.get("after_text").is_none());
 
         let reasoning = serde_json::to_value(ChatEvent::AssistantReasoningDelta {
             conversation_id: "conversation-123".to_owned(),

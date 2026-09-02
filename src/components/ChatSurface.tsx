@@ -262,17 +262,23 @@ const ChatThread = memo(function ChatThread({
         ))}
         {visibleMessages.map((message) => {
           const recall = recallByMessageId[message.id];
-          const toolCalls = toolCallsByMessageId[message.id];
+          const toolCalls = toolCallsByMessageId[message.id] ?? [];
+          // A row's tool calls sit where they happened: the ones made before
+          // the companion said anything go above its text, the ones made
+          // after it spoke go below — and what it says next is the next row.
+          // (Memory tools never arrive here: remembering is not tool use.)
+          const toolsBefore = toolCalls.filter((call) => !call.afterText);
+          const toolsAfter = toolCalls.filter((call) => call.afterText);
           const reasoning = reasoningByMessageId[message.id] ?? "";
           const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
-          const hasToolRow = Boolean(toolCalls && toolCalls.length > 0);
+          const hasToolRow = toolCalls.length > 0;
           const showReasoning =
             message.role === "assistant" &&
             (Boolean(reasoning) || (message.status === "streaming" && !message.content));
-          // The first tool call opens its own row, like a message of its
-          // own; later calls in the same turn join that row. The turn's
-          // real reply only gets a row once it actually has something to
-          // show — otherwise it's a redundant empty bubble under the chip.
+          // A tool call opens its own row, like a message of its own; later
+          // calls on the same side of the text join that row. The text row
+          // only appears once it actually has something to show — otherwise
+          // it's a redundant empty bubble beside the chip.
           const showTextRow =
             !hasToolRow ||
             message.attachments.length > 0 ||
@@ -282,9 +288,9 @@ const ChatThread = memo(function ChatThread({
             showReasoning;
           return (
             <Fragment key={message.id}>
-              {toolCalls && toolCalls.length > 0 ? (
+              {toolsBefore.length > 0 ? (
                 <article className="chat-message chat-message--assistant chat-message--tool-activity">
-                  <ToolCallChip calls={toolCalls} />
+                  <ToolCallChip calls={toolsBefore} />
                 </article>
               ) : null}
               {showTextRow ? (
@@ -315,6 +321,11 @@ const ChatThread = memo(function ChatThread({
                     <span className="chat-message__error">{message.errorMessage}</span>
                   ) : null}
                   {recall ? <MemoryRecallChip data={recall} /> : null}
+                </article>
+              ) : null}
+              {toolsAfter.length > 0 ? (
+                <article className="chat-message chat-message--assistant chat-message--tool-activity">
+                  <ToolCallChip calls={toolsAfter} />
                 </article>
               ) : null}
               {callsAfterMessage.map((thread) => (

@@ -839,6 +839,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                       arguments: event.arguments,
                       status: event.status,
                       detail: event.detail,
+                      afterText: event.afterText,
                     },
                   ),
                 },
@@ -871,27 +872,6 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                     ? {
                         ...item,
                         content: item.content + event.delta,
-                        status: "streaming",
-                        updatedAt: Date.now(),
-                      }
-                    : item,
-                ),
-              },
-            },
-          };
-        }
-        if (event.kind === "assistantContentReplaced") {
-          return {
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: {
-                ...runtimeState,
-                isStreaming: true,
-                messages: runtimeState.messages.map((item) =>
-                  item.id === event.messageId
-                    ? {
-                        ...item,
-                        content: event.content,
                         status: "streaming",
                         updatedAt: Date.now(),
                       }
