@@ -146,6 +146,14 @@ function blockPrompt(content) {
   })();
 }
 
+/** Queries the host may still stop, by request id — the SDK's abort handle
+ *  for each. `stopped` remembers which ones the host stopped, so the failure
+ *  the abort throws is logged as a stop, never reported as an error. A tool
+ *  call left waiting on the host when its query stops stays pending; the
+ *  host dropped that call with the query and will never answer it. */
+const aborts = new Map();
+const stopped = new Set();
+
 /** Hand one tool call down to Rust and wait for its result. The promise is
  *  settled by the `toolResult` line, or rejected if the host goes away. */
 function executeThroughHost(requestId, name, args) {
@@ -225,8 +233,12 @@ async function handleQuery(request) {
   }
 
   const declarations = request.tools ?? [];
+  // The host's stop reaches the SDK through this handle (a `cancel` line).
+  const controller = new AbortController();
+  aborts.set(request.id, controller);
   const options = {
     model: request.model,
+    abortController: controller,
     // No filesystem settings: no global hooks, no CLAUDE.md, no user config.
     settingSources: [],
     // No Claude Code built-ins either — the companion's own tools, or none.
@@ -388,6 +400,19 @@ stdin.on("line", (line) => {
     return;
   }
 
+  if (request.type === "cancel") {
+    // The host stopped listening. Abort the SDK query so it stops generating;
+    // whatever it had said already reached the host before the stop.
+    const controller = aborts.get(request.id);
+    if (!controller) {
+      log(`cancel for unknown or finished query ${request.id}`);
+      return;
+    }
+    stopped.add(request.id);
+    controller.abort();
+    return;
+  }
+
   if (request.type !== "query" || !request.id) {
     log(`unknown request type: ${request.type ?? "<none>"}`);
     return;
@@ -396,6 +421,10 @@ stdin.on("line", (line) => {
   inFlight += 1;
   handleQuery(request)
     .catch((error) => {
+      if (stopped.has(request.id)) {
+        log(`query ${request.id} stopped by the host`);
+        return;
+      }
       log(`query ${request.id} failed:`, error?.message ?? String(error));
       send({
         id: request.id,
@@ -404,6 +433,8 @@ stdin.on("line", (line) => {
       });
     })
     .finally(() => {
+      aborts.delete(request.id);
+      stopped.delete(request.id);
       inFlight -= 1;
       exitWhenDrained();
     });

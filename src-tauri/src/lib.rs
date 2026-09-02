@@ -174,6 +174,7 @@ pub fn run() {
             chat::get_conversation_thread,
             chat::update_conversation_companion,
             chat::submit_message,
+            chat::stop_turn,
             memory::set_memory_account_token,
             memory::get_memory_account_token,
             memory::clear_memory_account_token,

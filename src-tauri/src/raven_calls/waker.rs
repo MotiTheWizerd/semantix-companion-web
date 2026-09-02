@@ -151,7 +151,7 @@ async fn tick(
         );
 
         let sink = Arc::new(AppEventSink::new(app.clone()));
-        if let Err(error) = drive_turn(Arc::clone(chat), prepared, sink).await {
+        if let Err(error) = drive_turn(Arc::clone(chat), prepared, sink, None).await {
             eprintln!("raven call waker: woken turn failed: {error}");
         }
 
@@ -327,7 +327,7 @@ async fn deliver_close_record(
         match prepared {
             Ok(prepared) => {
                 let sink = Arc::new(AppEventSink::new(app.clone()));
-                if let Err(error) = drive_turn(Arc::clone(chat), prepared, sink).await {
+                if let Err(error) = drive_turn(Arc::clone(chat), prepared, sink, None).await {
                     eprintln!("raven call close record: report turn failed: {error}");
                 }
             }

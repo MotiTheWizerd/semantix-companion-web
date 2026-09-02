@@ -3,9 +3,10 @@
 //! answers, but none of their global hooks, settings or CLAUDE.md load, so
 //! the companion's own memory system stays the only one in the room.
 //!
-//! Protocol: one JSON object per line, requests down the child's stdin,
-//! events back up its stdout (`delta` / `toolCallDelta` / `toolCall` /
-//! `usage` / `done` / `error`), matched to callers by request id.
+//! Protocol: one JSON object per line, requests down the child's stdin
+//! (`query` / `toolResult` / `cancel`), events back up its stdout (`delta` /
+//! `toolCallDelta` / `toolCall` / `usage` / `done` / `error`), matched to
+//! callers by request id.
 //!
 //! Finding the sidecar, in order: the `COMPANION_SIDECAR_DIR` env var, then
 //! the bundled resource dir registered at startup by `lib.rs`, then — dev
@@ -109,6 +110,40 @@ struct SidecarToolResult<'a> {
     error: Option<String>,
 }
 
+/// The host stopped listening to a query; the sidecar should stop generating.
+#[derive(Serialize)]
+struct SidecarCancel<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: &'a str,
+}
+
+/// Tells the sidecar to abandon a query the host stopped reading. Armed for
+/// the life of a stream; dropped ARMED means the stream future was cancelled
+/// mid-turn (the composer's stop), and the sidecar would otherwise keep
+/// generating — and paying — for an answer nobody will hear. Disarmed on
+/// every ordinary exit, where the query is already over. Either way, the
+/// drop clears the routing entry, so a cancelled stream leaks nothing.
+struct CancelOnDrop {
+    link: Arc<SidecarLink>,
+    id: String,
+    armed: bool,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.link.pending.lock() {
+            pending.remove(&self.id);
+        }
+        if !self.armed {
+            return;
+        }
+        let link = Arc::clone(&self.link);
+        let id = std::mem::take(&mut self.id);
+        tauri::async_runtime::spawn(async move { link.cancel(&id).await });
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "event", rename_all = "camelCase")]
 enum SidecarEvent {
@@ -158,16 +193,25 @@ struct SidecarHandle {
     stdin: ChildStdin,
 }
 
-pub(crate) struct ClaudeProvider {
+/// The pipe to the sidecar: the child and its stdin, plus the routing table
+/// from request id to the stream waiting on it. Shared, so a stream being
+/// dropped mid-turn can still reach the child to say so.
+struct SidecarLink {
     handle: Mutex<Option<SidecarHandle>>,
     pending: PendingMap,
+}
+
+pub(crate) struct ClaudeProvider {
+    link: Arc<SidecarLink>,
 }
 
 impl Default for ClaudeProvider {
     fn default() -> Self {
         Self {
-            handle: Mutex::new(None),
-            pending: Arc::new(StdMutex::new(HashMap::new())),
+            link: Arc::new(SidecarLink {
+                handle: Mutex::new(None),
+                pending: Arc::new(StdMutex::new(HashMap::new())),
+            }),
         }
     }
 }
@@ -218,7 +262,23 @@ fn usable_sidecar(candidate: &Path) -> Option<PathBuf> {
     dir.join("index.mjs").is_file().then_some(dir)
 }
 
-impl ClaudeProvider {
+impl SidecarLink {
+    /// Tell the sidecar to abandon `id`. Only a LIVE sidecar is told — a dead
+    /// one has nothing to abandon, and respawning it to say so would be absurd.
+    async fn cancel(&self, id: &str) {
+        let Ok(line) = serde_json::to_string(&SidecarCancel { kind: "cancel", id }) else {
+            return;
+        };
+        let mut guard = self.handle.lock().await;
+        let Some(handle) = guard.as_mut() else {
+            return;
+        };
+        if handle.child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        let _ = handle.stdin.write_all(format!("{line}\n").as_bytes()).await;
+    }
+
     /// Write one protocol line to the sidecar, spawning (or respawning after
     /// a crash) as needed.
     async fn write_line(&self, line: String) -> Result<(), StreamError> {
@@ -418,15 +478,22 @@ impl InferenceProvider for ClaudeProvider {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         {
             let mut pending = self
+                .link
                 .pending
                 .lock()
                 .map_err(|_| StreamError::new("the sidecar routing table was poisoned"))?;
             pending.insert(request.id.clone(), sender);
         }
-        // Deregister on every exit path — a leaked entry would route a later
-        // duplicate id into a dead channel.
+        // Deregisters on every exit path — a leaked entry would route a later
+        // duplicate id into a dead channel — and, if this future is dropped
+        // mid-query, tells the sidecar to stop.
+        let mut cancel = CancelOnDrop {
+            link: Arc::clone(&self.link),
+            id: request.id.clone(),
+            armed: true,
+        };
         let result = async {
-            self.write_line(format!("{line}\n")).await?;
+            self.link.write_line(format!("{line}\n")).await?;
             loop {
                 let Some(event) = receiver.recv().await else {
                     return Err(StreamError::new(
@@ -484,7 +551,7 @@ impl InferenceProvider for ClaudeProvider {
                         .map_err(|error| {
                             StreamError::new(format!("tool result failed to encode: {error}"))
                         })?;
-                        self.write_line(format!("{reply}\n")).await?;
+                        self.link.write_line(format!("{reply}\n")).await?;
                     }
                     SidecarEvent::Usage {
                         input_tokens,
@@ -507,9 +574,9 @@ impl InferenceProvider for ClaudeProvider {
             }
         }
         .await;
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(&request.id);
-        }
+        // The query ended on its own terms — done, errored, or the sidecar
+        // dropped it. There is nothing left to cancel.
+        cancel.armed = false;
         result
     }
 }

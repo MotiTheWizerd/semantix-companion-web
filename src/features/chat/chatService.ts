@@ -39,6 +39,13 @@ export function submitMessage(
   return invoke<AcceptedMessage>("submit_message", { input, onEvent });
 }
 
+/** The composer's stop square: end the turn running in this conversation
+ *  where it stands. What the companion had said stays as its answer. False
+ *  when nothing of ours was running there — already landed, or never sent. */
+export function stopTurn(conversationId: string): Promise<boolean> {
+  return invoke<boolean>("stop_turn", { conversationId });
+}
+
 /** Woken-lane chat events, app-wide. A window showing a thread a companion
  *  was woken in folds these to see the turn happen live instead of on the
  *  next reload. */

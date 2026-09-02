@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
@@ -24,6 +25,7 @@ import type {
 import { CompanionSelect } from "../features/companions/CompanionSelect";
 import { companionLabel, type Companion } from "../features/companions/types";
 import type { MemoryRecallChipData } from "../features/memory";
+import { CompanionMark } from "./CompanionMark";
 import { EmptyState } from "./EmptyState";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import {
@@ -54,11 +56,23 @@ function SendIcon() {
   );
 }
 
+/** The stop square — the same orb as send, carrying a stop while the
+ * companion works. */
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="5.75" y="5.75" width="8.5" height="8.5" rx="2" />
+    </svg>
+  );
+}
+
 interface ChatSurfaceProps {
   activeConversationId: string | null;
   messages: ChatMessage[];
   isLoading: boolean;
   isSending: boolean;
+  /** A memory tool is running — the presence line says "remembering". */
+  isRemembering: boolean;
   error: string | null;
   notice: string | null;
   /** 🧠 chip data per sent user message — live-session only. */
@@ -76,6 +90,8 @@ interface ChatSurfaceProps {
   onContentChange: (content: string) => void;
   onCompanionChange: (companionId: string) => void;
   onSend: (content: string) => Promise<void>;
+  /** The stop square: end the turn in flight where it stands. */
+  onStop: () => void;
   onAttachFiles: (files: File[]) => void;
   onRemoveAttachment: (attachmentId: string) => void;
 }
@@ -157,6 +173,75 @@ interface ChatThreadProps {
   replyingByCallId: ReadonlyMap<string, string>;
   callsError: string | null;
   companions: Companion[];
+  /** A turn is in flight — the presence line sits at the thread's end. */
+  isSending: boolean;
+  isRemembering: boolean;
+  /** Who is working, for the presence line's sentence. */
+  companionName: string;
+}
+
+/** How long after the last streamed token the companion still counts as
+ * writing. Past it the pause reads as thought — which is what it is. */
+const WRITING_GRACE_MS = 1500;
+
+type PresenceVerb = "thinking" | "remembering" | "working" | "writing";
+
+interface PresenceLineProps {
+  name: string;
+  isRemembering: boolean;
+  messages: ChatMessage[];
+  toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
+}
+
+/** What kind of work the companion is doing right now, from what the store
+ * can see. Remembering outranks everything (memory tools never light a chip,
+ * so this verb is the only place a person sees the companion remember); a
+ * running tool is working; fresh text is writing; the rest is thinking. */
+function presenceVerb({
+  isRemembering,
+  messages,
+  toolCallsByMessageId,
+  now,
+}: PresenceLineProps & { now: number }): PresenceVerb {
+  if (isRemembering) return "remembering";
+  const working = Object.values(toolCallsByMessageId).some((calls) =>
+    calls.some((call) => call.status === "running"),
+  );
+  if (working) return "working";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant" || message.status !== "streaming") continue;
+    // updatedAt is stamped by the store on every delta, so this is "how long
+    // since the last token" — not the row's age.
+    if (message.content.length > 0 && now - message.updatedAt < WRITING_GRACE_MS) {
+      return "writing";
+    }
+    break;
+  }
+  return "thinking";
+}
+
+/** The companion, visibly at work: one line at the thread's end for the
+ * whole of a turn, saying what kind of work. It is the answer to "is it
+ * still going?" — while this is here, it is; the moment the turn lands, it
+ * is gone. The clock ticks only while the line is mounted. */
+function PresenceLine({ name, isRemembering, messages, toolCallsByMessageId }: PresenceLineProps) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, []);
+  const verb = presenceVerb({ name, isRemembering, messages, toolCallsByMessageId, now });
+  return (
+    <article className={`chat-message chat-message--assistant chat-presence chat-presence--${verb}`}>
+      <span className="chat-presence__orb">
+        <CompanionMark />
+      </span>
+      <span className="chat-presence__text">
+        {name} is {verb}…
+      </span>
+    </article>
+  );
 }
 
 /** The transcript, behind memo. Typing routes every keystroke through the
@@ -178,6 +263,9 @@ const ChatThread = memo(function ChatThread({
   replyingByCallId,
   callsError,
   companions,
+  isSending,
+  isRemembering,
+  companionName,
 }: ChatThreadProps) {
   const contentRef = useRef<HTMLDivElement>(null);
   // Calls anchor against the same filtered list the reader sees, so a card
@@ -342,6 +430,14 @@ const ChatThread = memo(function ChatThread({
             </Fragment>
           );
         })}
+        {isSending ? (
+          <PresenceLine
+            name={companionName}
+            isRemembering={isRemembering}
+            messages={messages}
+            toolCallsByMessageId={toolCallsByMessageId}
+          />
+        ) : null}
         {callsError ? <CallTranscriptError error={callsError} /> : null}
       </div>
     </section>
@@ -353,6 +449,7 @@ export function ChatSurface({
   messages,
   isLoading,
   isSending,
+  isRemembering,
   error,
   notice,
   recallByMessageId,
@@ -365,6 +462,7 @@ export function ChatSurface({
   onContentChange,
   onCompanionChange,
   onSend,
+  onStop,
   onAttachFiles,
   onRemoveAttachment,
 }: ChatSurfaceProps) {
@@ -384,6 +482,14 @@ export function ChatSurface({
     isInitialLoading: areCallsInitiallyLoading,
     error: callsError,
   } = useConversationCalls(activeConversationId, isSending);
+  // The presence line names who is working: the tab's companion, else the
+  // built-in one (an unpicked thread already answers to it).
+  const companionName = useMemo(() => {
+    const companion =
+      companions.find((candidate) => candidate.id === companionId) ??
+      companions.find((candidate) => candidate.isBuiltIn);
+    return companion ? companionLabel(companion) : "Companion";
+  }, [companions, companionId]);
   // A thread whose every row is backstage still shows its call cards — the
   // cards are the one surface a call is allowed to have.
   const hasMessages = messages.some(isUserFacing) || callThreads.length > 0;
@@ -563,6 +669,9 @@ export function ChatSurface({
           replyingByCallId={replyingByCallId}
           callsError={callsError}
           companions={companions}
+          isSending={isSending}
+          isRemembering={isRemembering}
+          companionName={companionName}
         />
       ) : (
         <EmptyState />
@@ -646,18 +755,29 @@ export function ChatSurface({
               disabled={isLoading || isSending}
               onChange={onCompanionChange}
             />
-            <button
-              className="composer-send"
-              type="submit"
-              aria-label="Send message"
-              disabled={
-                isLoading ||
-                isSending ||
-                (content.trim().length === 0 && pendingAttachments.length === 0)
-              }
-            >
-              <SendIcon />
-            </button>
+            {isSending ? (
+              <button
+                className="composer-send composer-send--stop"
+                type="button"
+                aria-label="Stop the companion"
+                title="Stop"
+                onClick={onStop}
+              >
+                <StopIcon />
+              </button>
+            ) : (
+              <button
+                className="composer-send"
+                type="submit"
+                aria-label="Send message"
+                disabled={
+                  isLoading ||
+                  (content.trim().length === 0 && pendingAttachments.length === 0)
+                }
+              >
+                <SendIcon />
+              </button>
+            )}
           </div>
         </form>
         <p

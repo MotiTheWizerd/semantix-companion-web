@@ -2,6 +2,8 @@ pub(crate) mod repository;
 mod tool_streaming;
 
 use std::{
+    collections::HashMap,
+    future::Future,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,6 +14,7 @@ use std::{
 use repository::{ChatRepository, CommitUserMessage};
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use tool_streaming::{completed_call_speech, CallSpeechProjector};
@@ -203,6 +206,15 @@ pub(crate) enum ChatEvent {
         #[serde(rename = "afterText")]
         after_text: bool,
     },
+    /// The companion is remembering — a memory tool is running. Never a chip
+    /// (Moti, s540: memory is invisible, let it feel like real memory), only
+    /// a presence: the thread may say "remembering…" while this is true and
+    /// nothing at all once it is false. Runtime-held, never persisted.
+    Remembering {
+        #[serde(rename = "conversationId")]
+        conversation_id: String,
+        active: bool,
+    },
     /// A transient, provider-independent piece of one companion's call line.
     /// It is never persisted; the completed tool execution remains the truth.
     CallSpeechDelta {
@@ -297,6 +309,12 @@ pub(crate) const CHAT_EVENT: &str = "chat://event";
 
 pub(crate) struct ChatState {
     service: Arc<ChatService>,
+    /// One stop signal per human-lane turn in flight, by conversation. The
+    /// composer's stop square finds its turn here. Armed for exactly the
+    /// span of the turn, so a stop can never outlive the turn it was meant
+    /// for and land on the next one. The waker's turns never register:
+    /// nobody is watching them with a button.
+    stops: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
 impl ChatState {
@@ -305,10 +323,44 @@ impl ChatState {
         Arc::clone(&self.service)
     }
 
+    fn arm_stop(&self, conversation_id: &str) -> Arc<Notify> {
+        let stop = Arc::new(Notify::new());
+        self.stops
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(conversation_id.to_owned(), Arc::clone(&stop));
+        stop
+    }
+
+    fn disarm_stop(&self, conversation_id: &str) {
+        self.stops
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(conversation_id);
+    }
+
+    /// Ask the turn running in `conversation_id` to stop where it stands.
+    /// False when no turn of ours is running there — already landed, or
+    /// never reached us.
+    pub(crate) fn request_stop(&self, conversation_id: &str) -> bool {
+        let stops = self
+            .stops
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match stops.get(conversation_id) {
+            Some(stop) => {
+                stop.notify_one();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub(crate) fn open(database_path: &Path) -> Result<Self, AppError> {
         let repository = ChatRepository::open(database_path)?;
         repository.fail_interrupted_streams(unix_timestamp_ms()?)?;
         Ok(Self {
+            stops: Mutex::new(HashMap::new()),
             service: Arc::new(ChatService::new(
                 repository,
                 ModelResolver::open(database_path)?,
@@ -816,6 +868,13 @@ impl ToolRunner for ChatToolRunner {
                 detail: None,
                 after_text,
             });
+        } else {
+            // Not a chip — a presence. The person sees the companion pause
+            // to remember, the way a person does, and nothing about how.
+            self.on_event.send(ChatEvent::Remembering {
+                conversation_id: self.conversation_id.clone(),
+                active: true,
+            });
         }
         let result = tools::execute(call, &self.context).await;
         if visible {
@@ -829,13 +888,20 @@ impl ToolRunner for ChatToolRunner {
                 detail: result.as_ref().err().cloned(),
                 after_text,
             });
-        } else if let Err(error) = &result {
-            // The model still reads the error and recovers; only the chip is
-            // withheld. The log keeps the trail a silent failure would lose.
-            eprintln!(
-                "[memory] {} failed quietly in {}: {error}",
-                call.name, self.conversation_id
-            );
+        } else {
+            self.on_event.send(ChatEvent::Remembering {
+                conversation_id: self.conversation_id.clone(),
+                active: false,
+            });
+            if let Err(error) = &result {
+                // The model still reads the error and recovers; only the chip
+                // is withheld. The log keeps the trail a silent failure would
+                // lose.
+                eprintln!(
+                    "[memory] {} failed quietly in {}: {error}",
+                    call.name, self.conversation_id
+                );
+            }
         }
         if let (Some((call_id, body)), Some(from_agent_id)) = (
             completed_call_speech(call),
@@ -1147,16 +1213,32 @@ pub(crate) async fn submit_message(
     if let Some(sleeper) = &sleeper {
         sleeper.turn_started(&conversation_id);
     }
-    let accepted = drive_turn(
+    // A turn a person can stop: the signal lives for exactly the turn's span.
+    let stop = state.arm_stop(&conversation_id);
+    let driven = drive_turn(
         service,
         prepared,
         Arc::new(WindowEventSink::new(on_event, app)),
+        Some(stop),
     )
-    .await?;
+    .await;
+    state.disarm_stop(&conversation_id);
+    let accepted = driven?;
     if let (Some(sleeper), Some(agent_id)) = (sleeper, sleep_into) {
         sleeper.turn_completed(conversation_id, agent_id);
     }
     Ok(accepted)
+}
+
+/// The composer's stop square. Asks the human-lane turn in this conversation
+/// to end where it stands; whatever the companion had said stays as its
+/// answer. False when nothing of ours was running there.
+#[tauri::command]
+pub(crate) async fn stop_turn(
+    state: State<'_, ChatState>,
+    conversation_id: String,
+) -> Result<bool, String> {
+    Ok(state.request_stop(&conversation_id))
 }
 
 /// One turn, start to finish, for whoever asked for it.
@@ -1167,10 +1249,16 @@ pub(crate) async fn submit_message(
 /// changes nothing for the human lane — `submit_message` is now four lines and
 /// a call — and it is the entire reason a companion can be woken by something
 /// other than its user.
+///
+/// `stop` is the person's hand on the turn: when it fires, whatever is in
+/// flight — a provider stream, a tool — is dropped where it stands and the
+/// open row closes with what the companion had said. `None` for turns nobody
+/// is watching (the waker's).
 pub(crate) async fn drive_turn(
     service: Arc<ChatService>,
     prepared: PreparedSubmission,
     on_event: Arc<dyn ChatEventSink>,
+    stop: Option<Arc<Notify>>,
 ) -> Result<AcceptedMessage, String> {
     let PreparedSubmission {
         accepted,
@@ -1241,7 +1329,12 @@ pub(crate) async fn drive_turn(
     let mut rounds = 0;
     loop {
         let tools_available = !execution.request.tools.is_empty();
-        if let Err(error) = service.streaming.stream(&execution, adapter.as_ref()).await {
+        let Some(streamed) =
+            until_stopped(&stop, service.streaming.stream(&execution, adapter.as_ref())).await
+        else {
+            return close_stopped_turn(service, &on_event, adapter.as_ref(), accepted).await;
+        };
+        if let Err(error) = streamed {
             let message = error.to_string();
             return Err(fail_stream(
                 Arc::clone(&service),
@@ -1302,7 +1395,9 @@ pub(crate) async fn drive_turn(
             ));
 
         for call in calls {
-            let result = tool_runner.run(&call).await;
+            let Some(result) = until_stopped(&stop, tool_runner.run(&call)).await else {
+                return close_stopped_turn(service, &on_event, adapter.as_ref(), accepted).await;
+            };
             // A failed tool becomes a result the model reads and recovers
             // from — it never kills the stream.
             let text = result.unwrap_or_else(|error| format!("Tool error: {error}"));
@@ -1378,6 +1473,73 @@ async fn fail_stream(
         message: message.clone(),
     });
     message
+}
+
+/// Run `work` unless the stop fires first. `None` means stopped: the work is
+/// dropped where it stands — a provider stream closes its connection, the
+/// Claude sidecar is told to abandon its query, a tool in flight is left
+/// unfinished — and the caller closes the row. Biased toward the stop, so a
+/// press that landed a moment before the next await still wins.
+async fn until_stopped<T>(
+    stop: &Option<Arc<Notify>>,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    match stop {
+        None => Some(work.await),
+        Some(stop) => tokio::select! {
+            biased;
+            _ = stop.notified() => None,
+            result = work => Some(result),
+        },
+    }
+}
+
+/// The person stopped the turn. Whatever the companion had said on the open
+/// row stays as its answer — closed as completed, never marked failed: a stop
+/// is a choice, not a fault. A row that had said nothing closes empty, and
+/// the thread hides it the way it hides a woken turn that answered elsewhere.
+async fn close_stopped_turn(
+    service: Arc<ChatService>,
+    on_event: &Arc<dyn ChatEventSink>,
+    adapter: &ChatStreamAdapter,
+    accepted: AcceptedMessage,
+) -> Result<AcceptedMessage, String> {
+    let conversation_id = accepted.conversation.id.clone();
+    let message_id = adapter.message_id();
+    let content = match adapter.content() {
+        Ok(content) => content,
+        Err(error) => {
+            return Err(fail_stream(
+                service,
+                on_event,
+                &conversation_id,
+                &message_id,
+                error.to_string(),
+            )
+            .await);
+        }
+    };
+    let completion_service = Arc::clone(&service);
+    let completion_message_id = message_id.clone();
+    let closed = tauri::async_runtime::spawn_blocking(move || {
+        completion_service.complete_assistant(&completion_message_id, &content)
+    })
+    .await
+    .map_err(|error| format!("Assistant completion task failed: {error}"))?;
+    match closed {
+        Ok(message) => {
+            on_event.send(ChatEvent::AssistantCompleted { message });
+            Ok(accepted)
+        }
+        Err(error) => Err(fail_stream(
+            service,
+            on_event,
+            &conversation_id,
+            &message_id,
+            error.to_string(),
+        )
+        .await),
+    }
 }
 
 /// What a named companion is told about its own name.
@@ -1614,6 +1776,8 @@ mod tests {
 
     use async_trait::async_trait;
     use uuid::Uuid;
+
+    use tokio::sync::Notify;
 
     use super::{
         canonical_messages, companion_identity, conversation_title, drive_turn,
@@ -1993,6 +2157,7 @@ mod tests {
             service.clone(),
             prepared,
             Arc::new(RecordingEvents::default()),
+            None,
         )
         .await
         .expect("the tool loop should close successfully");
@@ -2026,6 +2191,129 @@ mod tests {
             assistant.content,
             "One clean answer after the work is done."
         );
+
+        for path in [
+            database_path.clone(),
+            database_path.with_extension("db-wal"),
+            database_path.with_extension("db-shm"),
+        ] {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    /// Speaks once, then never finishes — the shape of a provider mid-answer
+    /// when the person reaches for the stop square.
+    #[derive(Default)]
+    struct SpeaksThenHangs;
+
+    #[async_trait]
+    impl InferenceProvider for SpeaksThenHangs {
+        fn id(&self) -> &'static str {
+            "test"
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::TEXT_STREAMING
+        }
+
+        async fn stream(
+            &self,
+            _request: &InferenceRequest,
+            _credential: &ProviderCredential,
+            _tools: Option<&dyn ToolRunner>,
+            sink: &dyn DeltaSink<InferenceDelta>,
+        ) -> Result<(), StreamError> {
+            sink.emit_delta(InferenceDelta::Text {
+                text: "I was about to say".to_owned(),
+            })?;
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turn_keeps_what_was_said_and_closes_the_row() {
+        let database_path = std::env::temp_dir().join(format!(
+            "semantix-companion-stop-turn-test-{}.db",
+            Uuid::new_v4()
+        ));
+        database::initialise(&database_path).expect("test database should initialise");
+        let service = Arc::new(ChatService::new(
+            ChatRepository::open(&database_path).expect("chat repository should open"),
+            ModelResolver::open(&database_path).expect("model resolver should open"),
+            CompanionResolver::open(&database_path).expect("companion resolver should open"),
+            StyleRepository::open(&database_path).expect("style repository should open"),
+            PreferenceRepository::open(&database_path).expect("preference repository should open"),
+            StreamingService::new(Arc::new(InferenceGateway::for_test(Arc::new(
+                SpeaksThenHangs,
+            )))),
+            database_path.clone(),
+        ));
+        let prepared = service
+            .submit(
+                SubmitMessageInput {
+                    conversation_id: None,
+                    companion_id: None,
+                    content: "Tell me everything.".to_owned(),
+                    memory_context: None,
+                    memory_agent_id: None,
+                    auto_sleep_agent_id: None,
+                    attachments: Vec::new(),
+                },
+                "user",
+            )
+            .expect("message should prepare");
+        let conversation_id = prepared.accepted.conversation.id.clone();
+        let events = Arc::new(RecordingEvents::default());
+        let stop = Arc::new(Notify::new());
+
+        // The person: waits for the first word to land, then stops.
+        let stopper = {
+            let events = Arc::clone(&events);
+            let stop = Arc::clone(&stop);
+            async move {
+                for _ in 0..500 {
+                    let spoke = events
+                        .0
+                        .lock()
+                        .expect("recording event sink should lock")
+                        .iter()
+                        .any(|event| matches!(event, ChatEvent::AssistantDelta { .. }));
+                    if spoke {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                stop.notify_one();
+            }
+        };
+        let (driven, ()) = tokio::join!(
+            drive_turn(
+                service.clone(),
+                prepared,
+                Arc::clone(&events) as Arc<dyn ChatEventSink>,
+                Some(stop),
+            ),
+            stopper
+        );
+        driven.expect("a stopped turn is not a failed one");
+
+        let thread = service
+            .get_thread(&conversation_id)
+            .expect("stopped thread should reload");
+        let assistant = thread
+            .messages
+            .last()
+            .expect("the row the companion was speaking on persists");
+        assert_eq!(assistant.role, "assistant");
+        assert_eq!(assistant.status, "completed", "a stop is a choice, not a fault");
+        assert_eq!(assistant.content, "I was about to say");
+        let recorded = events.0.lock().expect("recording event sink should lock");
+        assert!(
+            matches!(recorded.last(), Some(ChatEvent::AssistantCompleted { .. })),
+            "the window hears the row close"
+        );
+        drop(recorded);
 
         for path in [
             database_path.clone(),

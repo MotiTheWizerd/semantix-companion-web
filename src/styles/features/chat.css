@@ -88,6 +88,110 @@
   margin-top: -8px;
 }
 
+/* ── the presence line ── the companion, visibly at work. One small glass
+   pill at the thread's end for the whole of a turn: the companion's mark
+   breathes in it, and the sentence says what kind of work — thinking,
+   remembering, working, writing. Gone the moment the turn lands, so "is it
+   still going?" is answered by whether this is here at all (s542). The tint
+   follows the verb, in the sky's own colours. */
+.chat-presence {
+  --tint: var(--glow-blue);
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 13px 5px 6px;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  animation: presence-in 220ms ease-out;
+}
+
+.chat-presence--remembering {
+  --tint: var(--glow-violet);
+}
+
+.chat-presence--working {
+  --tint: var(--glow-cyan);
+}
+
+.chat-presence--writing {
+  --tint: var(--glow-ice);
+}
+
+.chat-presence__orb {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(var(--tint), 0.07);
+  border: 1px solid rgba(var(--tint), 0.16);
+  transition: background 300ms ease, border-color 300ms ease;
+}
+
+.chat-presence__orb::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  box-shadow: 0 0 12px rgba(var(--tint), 0.45);
+  animation: presence-halo 1.8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.chat-presence__orb .companion-mark {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-presence__orb .companion-mark__core {
+  animation: presence-breathe 1.8s ease-in-out infinite;
+}
+
+.chat-presence__text {
+  white-space: nowrap;
+}
+
+@keyframes presence-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes presence-breathe {
+  0%,
+  100% {
+    transform: scale(0.82);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+}
+
+@keyframes presence-halo {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 .chat-message__error {
   display: block;
   margin-top: 7px;
@@ -267,6 +371,46 @@
 .composer-send:disabled {
   cursor: not-allowed;
   opacity: 0.36;
+}
+
+/* While the companion works, the charge becomes the stop: the same orb with
+   a square in it, its halo breathing in time with the presence line. Hover
+   warms the halo toward rose — a stop is a choice, and the colour says so
+   before the click. */
+.composer-send--stop {
+  animation: charge-breathe 1.8s ease-in-out infinite;
+}
+
+.composer-send.composer-send--stop svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  stroke: none;
+}
+
+.composer-send--stop:hover {
+  background: var(--charge-hover);
+  box-shadow: 0 0 20px rgba(var(--glow-rose), 0.5);
+  animation: none;
+}
+
+@keyframes charge-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 10px rgba(var(--glow-blue), 0.3);
+  }
+  50% {
+    box-shadow: 0 0 22px rgba(var(--glow-blue), 0.65);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-presence,
+  .chat-presence__orb::after,
+  .chat-presence__orb .companion-mark__core,
+  .composer-send--stop {
+    animation: none;
+  }
 }
 
 .composer-note {

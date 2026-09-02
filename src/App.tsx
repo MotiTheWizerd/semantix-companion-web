@@ -32,6 +32,7 @@ export function App() {
     setDraft,
     setTabCompanion,
     sendMessage,
+    stopTurn,
     attachFiles,
     removeAttachment,
   } = useCompanionStore(
@@ -51,6 +52,7 @@ export function App() {
       setDraft: state.setDraft,
       setTabCompanion: state.setTabCompanion,
       sendMessage: state.sendMessage,
+      stopTurn: state.stopTurn,
       attachFiles: state.attachFiles,
       removeAttachment: state.removeAttachment,
     })),
@@ -124,6 +126,7 @@ export function App() {
             messages={runtime?.messages ?? []}
             isLoading={isInitialising || Boolean(runtime?.isLoading)}
             isSending={isSending}
+            isRemembering={Boolean(runtime?.isRemembering)}
             error={activeTab?.error ?? runtime?.error ?? null}
             notice={activeTab?.notice ?? null}
             recallByMessageId={runtime?.recallByMessageId ?? {}}
@@ -141,6 +144,9 @@ export function App() {
             }}
             onSend={async (content) => {
               if (activeTabId) await sendMessage(activeTabId, content);
+            }}
+            onStop={() => {
+              if (activeTabId) void stopTurn(activeTabId);
             }}
             onAttachFiles={(files) => {
               if (activeTabId) void attachFiles(activeTabId, files);

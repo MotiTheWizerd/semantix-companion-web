@@ -102,6 +102,15 @@ export interface ToolCallEvent {
   afterText: boolean;
 }
 
+/** The companion is remembering — a memory tool is running. Never a chip
+ *  (remembering is not tool use); the thread's presence line is the only
+ *  place a person sees it. Runtime-held, never persisted. */
+export interface RememberingEvent {
+  kind: "remembering";
+  conversationId: string;
+  active: boolean;
+}
+
 /** Transient call speech rides the app event bus. It is deliberately part of
  * the canonical chat event vocabulary even though the call feature, not the
  * conversation store, owns its UI state. */
@@ -151,4 +160,5 @@ export type ChatEvent =
       message: string;
     }
   | ToolCallEvent
+  | RememberingEvent
   | CallSpeechEvent;

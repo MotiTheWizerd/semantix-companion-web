@@ -5,6 +5,7 @@ import {
   getConversationThread,
   listConversations,
   onWokenChatEvent,
+  stopTurn as requestStopTurn,
   submitMessage,
   updateConversationCompanion,
 } from "../chat/chatService";
@@ -64,6 +65,9 @@ interface ConversationRuntime {
   messages: ChatMessage[];
   isLoading: boolean;
   isStreaming: boolean;
+  /** The companion is remembering — a memory tool runs. Never a chip; the
+   *  thread's presence line is where a person sees it. */
+  isRemembering: boolean;
   error: string | null;
   /** 🧠 chip per sent user message — live-session instrument, not persisted,
    *  so it dies with the runtime entry (reload = no chips, by design). */
@@ -107,6 +111,8 @@ interface CompanionStore {
     preference: Exclude<ModelPreference, { mode: "inherit" }>,
   ) => Promise<void>;
   sendMessage: (tabId: string, content: string) => Promise<void>;
+  /** The composer's stop square: end the tab's turn where it stands. */
+  stopTurn: (tabId: string) => Promise<void>;
   /** The /sleep pass: distill the tab's conversation into long-term memory. */
   sleepActiveConversation: (tabId: string) => Promise<void>;
 }
@@ -117,6 +123,11 @@ const EMPTY_USER_PREFERENCES: UserPreferences = {
 };
 
 let unlisteners: UnlistenFn[] = [];
+
+/** Tabs whose person pressed stop while their send was still on its way to
+ *  Rust (the memory pass runs first). sendMessage honours the wish before it
+ *  submits; the turn's end clears it. */
+const stopRequests = new Set<string>();
 
 function createTabId(prefix: "new" | "conversation", id?: string): string {
   return id ? `${prefix}:${id}` : `${prefix}:${crypto.randomUUID()}`;
@@ -155,6 +166,7 @@ function emptyRuntime(isLoading = false): ConversationRuntime {
     messages: [],
     isLoading,
     isStreaming: false,
+    isRemembering: false,
     error: null,
     recallByMessageId: {},
     toolCallsByMessageId: {},
@@ -182,6 +194,29 @@ function reconcileToolCall(
       elapsedMs: landed ? Math.max(0, now - call.startedAt) : null,
     };
   });
+}
+
+/** The turn is over, whatever ended it. A chip still "running" now never
+ *  landed — a stop mid-tool drops the call with the turn — and closes as an
+ *  error that says so; a remembering that never said it finished has
+ *  finished (its "done" was dropped with the same turn). */
+function settleRuntime(runtime: ConversationRuntime, now: number): ConversationRuntime {
+  const toolCallsByMessageId = Object.fromEntries(
+    Object.entries(runtime.toolCallsByMessageId).map(([messageId, calls]) => [
+      messageId,
+      calls.map((call) =>
+        call.status === "running"
+          ? {
+              ...call,
+              status: "error" as const,
+              detail: "stopped",
+              elapsedMs: Math.max(0, now - call.startedAt),
+            }
+          : call,
+      ),
+    ]),
+  );
+  return { ...runtime, isStreaming: false, isRemembering: false, toolCallsByMessageId };
 }
 
 function errorMessage(error: unknown): string {
@@ -487,6 +522,8 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
               messages: thread.messages,
               isLoading: false,
               isStreaming: thread.messages.some((message) => message.status === "streaming"),
+              isRemembering:
+                state.runtimeByConversationId[conversationId]?.isRemembering ?? false,
               error: null,
               recallByMessageId:
                 state.runtimeByConversationId[conversationId]?.recallByMessageId ?? {},
@@ -778,6 +815,42 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
       autoSleepAgent(tab.companionId),
     ]);
 
+    if (stopRequests.has(tabId)) {
+      // Stopped before Rust ever saw it: the words go back into the
+      // composer, the echo comes down, and nothing was sent.
+      stopRequests.delete(tabId);
+      set((state) => {
+        const currentTab = state.tabsById[tabId];
+        const runtimeState = conversationId
+          ? state.runtimeByConversationId[conversationId]
+          : undefined;
+        const submittingByTabId = { ...state.submittingByTabId };
+        delete submittingByTabId[tabId];
+        return {
+          submittingByTabId,
+          runtimeByConversationId:
+            conversationId && runtimeState && optimisticId
+              ? {
+                  ...state.runtimeByConversationId,
+                  [conversationId]: {
+                    ...runtimeState,
+                    messages: runtimeState.messages.filter(
+                      (item) => item.id !== optimisticId,
+                    ),
+                  },
+                }
+              : state.runtimeByConversationId,
+          tabsById: currentTab
+            ? {
+                ...state.tabsById,
+                [tabId]: { ...currentTab, draft: message, attachments, notice: "Stopped." },
+              }
+            : state.tabsById,
+        };
+      });
+      return;
+    }
+
     let wasAccepted = false;
     const handleChatEvent = (event: ChatEvent) => {
       // Call cards own their transient speech through the app-wide event bus;
@@ -859,6 +932,14 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
             },
           };
         }
+        if (event.kind === "remembering") {
+          return {
+            runtimeByConversationId: {
+              ...state.runtimeByConversationId,
+              [conversationId]: { ...runtimeState, isRemembering: event.active },
+            },
+          };
+        }
         if (event.kind === "assistantStarted") {
           return {
             runtimeByConversationId: {
@@ -931,6 +1012,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                 ...runtimeState,
                 messages: reconcileMessage(runtimeState.messages, event.message),
                 isStreaming: false,
+                isRemembering: false,
                 error: null,
               },
             },
@@ -943,6 +1025,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
             [conversationId]: {
               ...runtimeState,
               isStreaming: false,
+              isRemembering: false,
               error: event.message,
               messages: event.messageId
                 ? runtimeState.messages.map((item) =>
@@ -1012,10 +1095,57 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           : { runtimeByConversationId };
       });
     } finally {
+      stopRequests.delete(tabId);
       set((state) => {
         const submittingByTabId = { ...state.submittingByTabId };
         delete submittingByTabId[tabId];
-        return { submittingByTabId };
+        // A brand-new conversation only learns its id on accept — read the
+        // tab, not the id this send started with.
+        const settledId = state.tabsById[tabId]?.conversationId ?? conversationId;
+        const runtimeState = settledId ? state.runtimeByConversationId[settledId] : undefined;
+        if (!settledId || !runtimeState) return { submittingByTabId };
+        return {
+          submittingByTabId,
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [settledId]: settleRuntime(runtimeState, Date.now()),
+          },
+        };
+      });
+    }
+  },
+
+  stopTurn: async (tabId) => {
+    const tab = get().tabsById[tabId];
+    if (!tab) return;
+    const runtime = tab.conversationId
+      ? get().runtimeByConversationId[tab.conversationId]
+      : undefined;
+    if (!get().submittingByTabId[tabId] && !runtime?.isStreaming) return;
+    // The send may not have reached Rust yet (the memory pass runs first):
+    // note the wish, and sendMessage honours it before submitting.
+    stopRequests.add(tabId);
+    if (!tab.conversationId) return;
+    try {
+      const stopped = await requestStopTurn(tab.conversationId);
+      if (!stopped) return;
+      set((state) => {
+        const currentTab = state.tabsById[tabId];
+        return currentTab
+          ? { tabsById: { ...state.tabsById, [tabId]: { ...currentTab, notice: "Stopped." } } }
+          : state;
+      });
+    } catch (error) {
+      set((state) => {
+        const currentTab = state.tabsById[tabId];
+        return currentTab
+          ? {
+              tabsById: {
+                ...state.tabsById,
+                [tabId]: { ...currentTab, error: errorMessage(error) },
+              },
+            }
+          : state;
       });
     }
   },
