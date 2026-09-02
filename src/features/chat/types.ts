@@ -63,6 +63,9 @@ export interface SubmitMessageInput {
   memoryContext?: string | null;
   /** The memory agent backing the recall_memory tool; null = tool undeclared. */
   memoryAgentId?: string | null;
+  /** The brain the sleeper may distil this thread into once the turn lands;
+   *  null = leave the turn for a manual /sleep. */
+  autoSleepAgentId?: string | null;
   /** Images riding with the message — already downscaled by the composer. */
   attachments?: { mediaType: string; data: string }[];
 }

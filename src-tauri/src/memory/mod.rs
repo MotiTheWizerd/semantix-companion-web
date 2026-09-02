@@ -7,9 +7,13 @@
 // while /sleep stays a full backend pass because it distills on the USER'S
 // model key, which never leaves the vault.
 
+pub(crate) mod sleeper;
+
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, AppHandle, State};
+
+use sleeper::Sleeper;
 
 use crate::{
     app_error::AppError,
@@ -98,17 +102,21 @@ fn provider_base_url(provider_id: &str) -> Result<&'static str, AppError> {
 
 pub(crate) struct MemoryState {
     service: Arc<MemoryService>,
+    /// The pass that runs itself — and the lock a manual /sleep shares with it.
+    sleeper: Arc<Sleeper>,
 }
 
 impl MemoryState {
-    pub(crate) fn open(database_path: &Path) -> Result<Self, AppError> {
+    pub(crate) fn open(database_path: &Path, app: AppHandle) -> Result<Self, AppError> {
+        let service = Arc::new(MemoryService {
+            chats: ChatRepository::open(database_path)?,
+            preferences: PreferenceRepository::open(database_path)?,
+            models: ModelResolver::open(database_path)?,
+            companions: CompanionResolver::open(database_path)?,
+        });
         Ok(Self {
-            service: Arc::new(MemoryService {
-                chats: ChatRepository::open(database_path)?,
-                preferences: PreferenceRepository::open(database_path)?,
-                models: ModelResolver::open(database_path)?,
-                companions: CompanionResolver::open(database_path)?,
-            }),
+            sleeper: Sleeper::new(app, Arc::clone(&service)),
+            service,
         })
     }
 
@@ -116,6 +124,11 @@ impl MemoryState {
     /// the same seam, never around it.
     pub(crate) fn service(&self) -> Arc<MemoryService> {
         Arc::clone(&self.service)
+    }
+
+    /// The chat lane tells the sleeper when turns start and land.
+    pub(crate) fn sleeper(&self) -> Arc<Sleeper> {
+        Arc::clone(&self.sleeper)
     }
 }
 
@@ -939,6 +952,63 @@ pub(crate) async fn sleep_via_post(
         .map_err(|error| format!("The sleep result could not be read: {error}"))
 }
 
+/// One sleep pass, start to finish: prepare (ledger + vault, blocking), fetch
+/// the dedupe index, distil through the organ, stamp the ledger. The /sleep
+/// command and the sleeper run THIS — two lanes, one pass; the command only
+/// differs in holding a channel to watch the stages through.
+///
+/// `Ok(None)` = the ledger already claims every turn; no organ call was made.
+pub(crate) async fn run_sleep_pass(
+    service: Arc<MemoryService>,
+    conversation_id: String,
+    agent_id: String,
+    on_progress: Option<&Channel<serde_json::Value>>,
+) -> Result<Option<SleepOutcome>, String> {
+    let prepare_service = Arc::clone(&service);
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        prepare_service.prepare_sleep(&conversation_id, &agent_id)
+    })
+    .await
+    .map_err(|error| format!("Sleep task failed: {error}"))?
+    .map_err(String::from)?;
+
+    let Some(mut prepared) = prepared else {
+        return Ok(None);
+    };
+
+    prepared.body.existing = fetch_existing_index(&prepared.bearer, &prepared.agent_id).await;
+
+    let streamed = match on_progress {
+        Some(channel) => sleep_via_stream(&prepared, channel).await?,
+        None => None,
+    };
+    let mut outcome = match streamed {
+        Some(outcome) => outcome,
+        None => sleep_via_post(&prepared.bearer, &prepared.agent_id, &prepared.body).await?,
+    };
+    // Whose hand wrote them, when it wasn't the companion's own model.
+    outcome.scribe_note = prepared.scribe_note.take();
+
+    // Stamp the ledger only now that the organ confirmed the pass landed.
+    let stamped_ids = prepared.fresh_message_ids;
+    let stamp_result = tauri::async_runtime::spawn_blocking(move || {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        service.chats.mark_messages_slept(&stamped_ids, timestamp)
+    })
+    .await
+    .map_err(|error| format!("Sleep ledger task failed: {error}"))?;
+    if let Err(error) = stamp_result {
+        // The memories landed; a failed stamp only means a benign re-distill
+        // next pass (writes upsert by name). Surface it without failing.
+        eprintln!("[memory] sleep ledger stamp failed: {error}");
+    }
+
+    Ok(Some(outcome))
+}
+
 #[tauri::command]
 pub(crate) async fn sleep_conversation(
     state: State<'_, MemoryState>,
@@ -961,55 +1031,32 @@ pub(crate) async fn sleep_conversation(
         );
     }
 
-    let service = Arc::clone(&state.service);
-    let prepare_conversation_id = conversation_id.clone();
-    let prepared = tauri::async_runtime::spawn_blocking(move || {
-        service.prepare_sleep(&prepare_conversation_id, &agent_id)
-    })
-    .await
-    .map_err(|error| format!("Sleep task failed: {error}"))?
-    .map_err(String::from)?;
+    // One pass per conversation at a time, shared with the sleeper: if it is
+    // already distilling this thread on its own, say so instead of running
+    // the same turns twice.
+    let Some(guard) = state.sleeper.begin(&conversation_id) else {
+        return Err(
+            "This conversation is already being slept on — give it a moment.".to_owned(),
+        );
+    };
+    let outcome = run_sleep_pass(
+        Arc::clone(&state.service),
+        conversation_id,
+        agent_id,
+        Some(&on_progress),
+    )
+    .await;
+    drop(guard);
 
     // The ledger already claims every turn — honest no-op, no organ call.
-    let Some(mut prepared) = prepared else {
-        return Ok(SleepOutcome {
-            created: 0,
-            updated: 0,
-            dropped: 0,
-            memories: Vec::new(),
-            nothing_new: true,
-            scribe_note: None,
-        });
-    };
-
-    prepared.body.existing = fetch_existing_index(&prepared.bearer, &prepared.agent_id).await;
-
-    let mut outcome = match sleep_via_stream(&prepared, &on_progress).await? {
-        Some(outcome) => outcome,
-        None => sleep_via_post(&prepared.bearer, &prepared.agent_id, &prepared.body).await?,
-    };
-    // Whose hand wrote them, when it wasn't the companion's own model.
-    outcome.scribe_note = prepared.scribe_note.take();
-
-    // Stamp the ledger only now that the organ confirmed the pass landed.
-    let service = Arc::clone(&state.service);
-    let stamped_ids = prepared.fresh_message_ids;
-    let stamp_result = tauri::async_runtime::spawn_blocking(move || {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or_default();
-        service.chats.mark_messages_slept(&stamped_ids, timestamp)
-    })
-    .await
-    .map_err(|error| format!("Sleep ledger task failed: {error}"))?;
-    if let Err(error) = stamp_result {
-        // The memories landed; a failed stamp only means a benign re-distill
-        // next pass (writes upsert by name). Surface it without failing.
-        eprintln!("[memory] sleep ledger stamp failed: {error}");
-    }
-
-    Ok(outcome)
+    Ok(outcome?.unwrap_or(SleepOutcome {
+        created: 0,
+        updated: 0,
+        dropped: 0,
+        memories: Vec::new(),
+        nothing_new: true,
+        scribe_note: None,
+    }))
 }
 
 #[cfg(test)]

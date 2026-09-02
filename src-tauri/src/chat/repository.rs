@@ -609,6 +609,26 @@ impl ChatRepository {
     /// Stamp the sleep ledger: these messages were distilled into memory, so
     /// the next /sleep pass skips them. Called only after the organ confirms
     /// the pass landed — a failed pass leaves the rows free for retry.
+    /// How many conversational turns the sleep ledger has not claimed yet —
+    /// the sleeper's ripeness read, same filter `prepare_sleep` distils by,
+    /// without loading the thread.
+    pub(crate) fn count_unslept(&self, conversation_id: &str) -> Result<usize, AppError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE conversation_id = ?1
+                   AND slept_at IS NULL
+                   AND status = 'completed'
+                   AND role IN ('user', 'assistant')
+                   AND length(trim(content)) > 0",
+                [conversation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count.max(0) as usize)
+            .map_err(AppError::database)
+    }
+
     pub(crate) fn mark_messages_slept(
         &self,
         message_ids: &[String],
@@ -827,6 +847,46 @@ mod tests {
             .search_messages("\"serpent\"", None, 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 3, "both conversations, completed messages only");
+
+        drop(repository);
+        let _ = fs::remove_file(path);
+    }
+
+    /// The sleeper's ripeness read counts exactly what a pass would distil:
+    /// completed, non-empty user/assistant turns the ledger has not claimed.
+    /// A streaming reply is not a turn yet; a stamped one is not fresh.
+    #[test]
+    fn the_sleeper_counts_only_fresh_finished_turns() {
+        let (repository, path) = open_repository("ripeness");
+        let companion_id = built_in_id(&path);
+        let conversation = seed_conversation(
+            &repository,
+            &companion_id,
+            "ripe",
+            "Remember that the harbour freezes in January.",
+            "Noted — January, the harbour.",
+        );
+        assert_eq!(repository.count_unslept(&conversation).unwrap(), 2);
+
+        // A reply still streaming does not count until it lands.
+        repository
+            .begin_assistant_message(&conversation, "message-ripe-open", "test", "test-model", 1_755_800_003_000)
+            .expect("streaming message should begin");
+        assert_eq!(repository.count_unslept(&conversation).unwrap(), 2);
+        repository
+            .complete_assistant_message("message-ripe-open", "And the fjord in February.", 1_755_800_004_000)
+            .expect("assistant message should complete");
+        assert_eq!(repository.count_unslept(&conversation).unwrap(), 3);
+
+        // Stamped turns leave the count; the ledger is the truth.
+        repository
+            .mark_messages_slept(
+                &["message-ripe-user".to_owned(), "message-ripe-assistant".to_owned()],
+                1_755_800_005_000,
+            )
+            .expect("ledger should stamp");
+        assert_eq!(repository.count_unslept(&conversation).unwrap(), 1);
+        assert_eq!(repository.count_unslept("conversation-nowhere").unwrap(), 0);
 
         drop(repository);
         let _ = fs::remove_file(path);

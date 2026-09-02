@@ -10,8 +10,10 @@ import {
   saveAccountToken,
 } from "./organService";
 import {
+  isAutoSleepEnabled,
   isMemoryEnabled,
   memoryPrefs,
+  PREF_AUTO_SLEEP,
   PREF_MEMORY_ENABLED,
   reflexPrefKey,
   reflexSetting,
@@ -90,7 +92,8 @@ export function MemorySettingsSection() {
           <h2 id="memory-settings-title">Semantix Memory</h2>
           <p>
             Give Companion a long-term memory: recall rides ahead of every message,
-            and <code>/sleep</code> distills a conversation into memories.
+            and a conversation is distilled into memories as it grows — or on
+            demand with <code>/sleep</code>.
           </p>
         </div>
       </div>
@@ -162,6 +165,24 @@ export function MemorySettingsSection() {
             <span>
               <strong>Memory</strong>
               <small>The master switch — off means the organ is never spoken to</small>
+            </span>
+          </label>
+          <label className="credential-field memory-settings__toggle">
+            <input
+              type="checkbox"
+              disabled={!memoryOn}
+              checked={isAutoSleepEnabled(prefs)}
+              onChange={(event) => {
+                setMemoryPref(PREF_AUTO_SLEEP, event.target.checked);
+                refreshPrefs();
+              }}
+            />
+            <span>
+              <strong>Sleep on its own</strong>
+              <small>
+                Distil a conversation once it has a dozen new turns, or a few and three
+                quiet minutes — nothing to remember to do. Off leaves it to <code>/sleep</code>.
+              </small>
             </span>
           </label>
           {memoryReflexes.map((reflex) => (

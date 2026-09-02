@@ -120,7 +120,7 @@ pub fn run() {
             let model_state = ModelState::open(&database_path)?;
             let preference_state = PreferenceState::open(&database_path)?;
             let chat_state = ChatState::open(&database_path)?;
-            let memory_state = MemoryState::open(&database_path)?;
+            let memory_state = MemoryState::open(&database_path, app.handle().clone())?;
             // The import worker distills through the memory seam, so it opens
             // on the same service — and parks any job a dead process left
             // `running`, so the UI offers resume instead of a phantom run.

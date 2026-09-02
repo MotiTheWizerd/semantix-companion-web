@@ -7,6 +7,9 @@
 const STORAGE_PREFIX = "companion.";
 
 export const PREF_MEMORY_ENABLED = "memory.enabled";
+/** The sleeper: distil a conversation on its own once it is ripe, instead of
+ *  waiting for /sleep. Under the master switch; default ON. */
+export const PREF_AUTO_SLEEP = "memory.autoSleep";
 
 export type MemoryPrefs = Record<string, unknown>;
 
@@ -21,7 +24,10 @@ function read(key: string): unknown {
 
 /** Snapshot of every memory pref the reflex registry reads. */
 export function memoryPrefs(reflexIds: string[]): MemoryPrefs {
-  const prefs: MemoryPrefs = { [PREF_MEMORY_ENABLED]: read(PREF_MEMORY_ENABLED) };
+  const prefs: MemoryPrefs = {
+    [PREF_MEMORY_ENABLED]: read(PREF_MEMORY_ENABLED),
+    [PREF_AUTO_SLEEP]: read(PREF_AUTO_SLEEP),
+  };
   for (const id of reflexIds) {
     const key = reflexPrefKey(id);
     prefs[key] = read(key);
@@ -41,6 +47,11 @@ export function setMemoryPref(key: string, value: boolean): void {
  *  so the organ is inert until memories exist). */
 export function isMemoryEnabled(prefs: MemoryPrefs): boolean {
   return prefs[PREF_MEMORY_ENABLED] !== false;
+}
+
+/** The sleeper is on unless turned off — and never while memory itself is off. */
+export function isAutoSleepEnabled(prefs: MemoryPrefs): boolean {
+  return isMemoryEnabled(prefs) && prefs[PREF_AUTO_SLEEP] !== false;
 }
 
 export interface ReflexSetting {

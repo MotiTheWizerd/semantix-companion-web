@@ -28,8 +28,10 @@ export {
   type MemoryRide,
 } from "./preSend";
 export {
+  isAutoSleepEnabled,
   isMemoryEnabled,
   memoryPrefs,
+  PREF_AUTO_SLEEP,
   PREF_MEMORY_ENABLED,
   reflexPrefKey,
   reflexSetting,
@@ -38,4 +40,10 @@ export {
 } from "./prefs";
 export { memoryReflexes } from "./reflexes/registry";
 export type { MemoryReflex, ReflexRunReport } from "./reflexes/types";
-export { sleepConversation, type SleepOutcome } from "./sleepService";
+export {
+  autoSleepAgent,
+  onMemorySlept,
+  sleepConversation,
+  type MemorySleptEvent,
+  type SleepOutcome,
+} from "./sleepService";

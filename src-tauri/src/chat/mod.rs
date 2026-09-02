@@ -11,7 +11,7 @@ use std::{
 
 use repository::{ChatRepository, CommitUserMessage};
 use serde::{Deserialize, Serialize};
-use tauri::{ipc::Channel, AppHandle, Emitter, State};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use tool_streaming::{completed_call_speech, CallSpeechProjector};
@@ -24,6 +24,7 @@ use crate::{
         InferenceDelta, InferenceExecution, InferenceGateway, InferenceMessage, InferenceRequest,
         ModelTarget, ProviderCredential, Role, ToolCall, ToolRunner,
     },
+    memory::MemoryState,
     models::ModelResolver,
     preferences::{PreferenceRepository, ResolvedVoice},
     streaming::{StreamError, StreamEvent, StreamSink, StreamingService},
@@ -119,6 +120,11 @@ pub(crate) struct SubmitMessageInput {
     /// memory off for this send, so the tool is never declared.
     #[serde(default)]
     memory_agent_id: Option<String>,
+    /// The brain the sleeper may distil this thread into once the turn lands.
+    /// None = the user turned the sleeper off, or memory is off — either way
+    /// the turn is left for a manual /sleep.
+    #[serde(default)]
+    auto_sleep_agent_id: Option<String>,
     /// Images riding with this message — already downscaled by the composer.
     #[serde(default)]
     attachments: Vec<AttachmentInput>,
@@ -616,6 +622,7 @@ impl ChatService {
                 // its tools, which is what it needs to answer a call.
                 memory_context: None,
                 memory_agent_id: None,
+                auto_sleep_agent_id: None,
                 attachments: Vec::new(),
             },
             "system",
@@ -1076,16 +1083,29 @@ pub(crate) async fn submit_message(
 ) -> Result<AcceptedMessage, String> {
     let service = Arc::clone(&state.service);
     let submit_service = Arc::clone(&service);
+    let sleep_into = input.auto_sleep_agent_id.clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || submit_service.submit(input, "user"))
         .await
         .map_err(|error| format!("Message task failed: {error}"))?
         .map_err(String::from)?;
-    drive_turn(
+
+    // The sleeper watches the human lane only: a woken turn persists into the
+    // thread like any other and the next human turn's pass claims it.
+    let sleeper = app.try_state::<MemoryState>().map(|memory| memory.sleeper());
+    let conversation_id = prepared.accepted.conversation.id.clone();
+    if let Some(sleeper) = &sleeper {
+        sleeper.turn_started(&conversation_id);
+    }
+    let accepted = drive_turn(
         service,
         prepared,
         Arc::new(WindowEventSink::new(on_event, app)),
     )
-    .await
+    .await?;
+    if let (Some(sleeper), Some(agent_id)) = (sleeper, sleep_into) {
+        sleeper.turn_completed(conversation_id, agent_id);
+    }
+    Ok(accepted)
 }
 
 /// One turn, start to finish, for whoever asked for it.
@@ -1721,6 +1741,7 @@ mod tests {
                     content: "Please inspect everything, then answer.".to_owned(),
                     memory_context: None,
                     memory_agent_id: None,
+                    auto_sleep_agent_id: None,
                     attachments: Vec::new(),
                 },
                 "user",
@@ -2007,6 +2028,7 @@ mod tests {
                         content: "Remember that my favorite ship is the Long Serpent.".to_owned(),
                         memory_context: None,
                         memory_agent_id: None,
+                        auto_sleep_agent_id: None,
                         attachments: Vec::new(),
                     },
                     "user",

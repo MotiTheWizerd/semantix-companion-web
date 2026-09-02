@@ -33,7 +33,7 @@ import {
 } from "../models/configuredModels/modelService";
 import type { ConfiguredModel } from "../models/configuredModels/types";
 import { runMemoryPreSend, type MemoryRecallChipData } from "../memory/preSend";
-import { sleepConversation } from "../memory/sleepService";
+import { autoSleepAgent, onMemorySlept, sleepConversation } from "../memory/sleepService";
 import { useNotificationsStore } from "../notifications/notificationsStore";
 import {
   getUserPreferences,
@@ -312,7 +312,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
         get().openNewConversation();
       }
 
-      const [stopModels, stopPreferences, stopCompanions, stopWokenEvents] = await Promise.all([
+      const [stopModels, stopPreferences, stopCompanions, stopWokenEvents, stopSlept] = await Promise.all([
         onModelsChanged(() => {
           void Promise.all([
             listConfiguredModels(),
@@ -378,8 +378,33 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
             requestConversationScrollToEnd(event.message.conversationId);
           }
         }),
+        // The sleeper's report: a quiet note when it kept something, silence
+        // when the distiller read the turns and kept nothing — that is the
+        // common case and not news. A failure is said once (the backend backs
+        // off for ten minutes after one).
+        onMemorySlept((event) => {
+          const { notify } = useNotificationsStore.getState();
+          if (event.kind === "failed") {
+            notify({
+              title: "💤 The sleeper",
+              text: `Couldn't sleep on this conversation — ${event.message}`,
+              status: "error",
+            });
+            return;
+          }
+          if (event.created + event.updated === 0) return;
+          const names = event.memories.length ? ` — ${event.memories.join(", ")}` : "";
+          const scribe = event.scribeNote ? ` · ${event.scribeNote}` : "";
+          notify({
+            title: "💤 Slept on its own",
+            text:
+              `${event.created} carved, ${event.updated} updated` +
+              `${event.dropped ? `, ${event.dropped} dropped` : ""}${names}${scribe}`,
+            status: "success",
+          });
+        }),
       ]);
-      unlisteners = [stopModels, stopPreferences, stopCompanions, stopWokenEvents];
+      unlisteners = [stopModels, stopPreferences, stopCompanions, stopWokenEvents, stopSlept];
       set({ isInitialised: true, isInitialising: false });
     } catch (error) {
       const tab = newConversationTab();
@@ -730,12 +755,17 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     }
 
     // Memory rides ahead of the message — fail-open, never blocks the send.
-    const memory = await runMemoryPreSend({
-      conversationId: tab.conversationId,
-      companionId: tab.companionId,
-      text: message,
-      messages: runtime?.messages ?? [],
-    });
+    // The sleeper's consent rides beside it: which brain may sleep on this
+    // thread once the turn lands (null = leave it for a manual /sleep).
+    const [memory, autoSleepAgentId] = await Promise.all([
+      runMemoryPreSend({
+        conversationId: tab.conversationId,
+        companionId: tab.companionId,
+        text: message,
+        messages: runtime?.messages ?? [],
+      }),
+      autoSleepAgent(tab.companionId),
+    ]);
 
     let wasAccepted = false;
     const handleChatEvent = (event: ChatEvent) => {
@@ -944,6 +974,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           content: message,
           memoryContext: memory?.injection || null,
           memoryAgentId: memory?.agentId ?? null,
+          autoSleepAgentId,
           attachments: attachments.map((attachment) => ({
             mediaType: attachment.mediaType,
             data: attachment.data,
