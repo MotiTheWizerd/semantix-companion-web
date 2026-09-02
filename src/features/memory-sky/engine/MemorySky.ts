@@ -112,8 +112,6 @@ const BOLT_HALF_WIDTH_PX = 2.4;
 const ORB_MAX_PX = 150;
 /** Edge count at which additive stacking starts to wash out; intensity sinks past it. */
 const DENSE_EDGES = 1500;
-/** Frames after a new graph during which long frames are the layout's, not the GPU's. */
-const SETTLE_GRACE_MS = 2500;
 
 interface Tween {
   start: number;
@@ -184,7 +182,6 @@ export class MemorySky {
   private hovered: SkyNode | null = null;
   private lastInteractionAt = performance.now();
   private nextFireAt = performance.now() + 2500;
-  private graphLoadedAt = 0;
   private disposed = false;
   private readonly resizeObserver: ResizeObserver;
 
@@ -306,8 +303,14 @@ export class MemorySky {
     this.buildBolts();
     this.buildSimulation();
     this.settled = false;
-    this.graphLoadedAt = performance.now();
+    // A new mind gets a fresh reading at full scale — the last mind's verdict
+    // says nothing about this one.
     this.slowFrames = 0;
+    this.calmFrames = 0;
+    if (this.renderScaleIndex !== 0) {
+      this.renderScaleIndex = 0;
+      this.resize();
+    }
     // 14k bolts stacked additively wash to white at the intensity that makes
     // 300 read as lightning. Sink the resting intensity with density; pulses
     // and the spell keep most of their light so they still stand out.
@@ -920,9 +923,15 @@ export class MemorySky {
   /** Step the render scale down when frames run long for a while, and back
    *  up after a long calm. Pixels are the bill on a weak GPU. */
   private guardPerformance(dt: number): void {
-    // The first frames after a load are shader compiles and a hot layout —
-    // long by nature, and not evidence about the GPU. Don't step down on them.
-    if (performance.now() - this.graphLoadedAt < SETTLE_GRACE_MS) return;
+    // While the layout settles, the long frames are d3's — 2,400 nodes of
+    // force ticks and 14k endpoint writes on the CPU. Fewer pixels can't
+    // shorten them, so a step-down taken now is a step-down for nothing (s537
+    // measured Studio pinned at 60% by exactly this). Judge only settled frames.
+    if (!this.settled) {
+      this.slowFrames = 0;
+      this.calmFrames = 0;
+      return;
+    }
     if (dt > 40) {
       this.slowFrames += 1;
       this.calmFrames = 0;
