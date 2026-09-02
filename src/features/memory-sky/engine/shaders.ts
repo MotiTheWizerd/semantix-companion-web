@@ -107,6 +107,7 @@ export const BOLT_VERTEX = /* glsl */ `
   uniform float uFocus;
   uniform float uFlicker;   // re-rolls per second
   uniform float uDensity;   // 1 for a sparse mind, sinks as edges pile up (additive saturation)
+  uniform float uTravel;    // seconds a strike's leader takes to cross a bolt
   attribute vec3 aSrc;
   attribute vec3 aDst;
   attribute float aT;
@@ -116,6 +117,7 @@ export const BOLT_VERTEX = /* glsl */ `
   attribute float aWeight;
   attribute float aLit;
   attribute float aPulse;
+  attribute float aFrom;    // 0: the strike leaves aSrc · 1: it leaves aDst
   attribute vec3 aColorA;
   attribute vec3 aColorB;
   varying float vSide;
@@ -133,7 +135,17 @@ export const BOLT_VERTEX = /* glsl */ `
     vec3 n1 = normalize(cross(dir, up));
     vec3 n2 = cross(dir, n1);
 
-    float pulse = uTime >= aPulse ? exp(-(uTime - aPulse) * 1.8) : 0.0;
+    // A strike in two acts, like the real thing: a thin LEADER runs from the
+    // firing end to the far end over uTravel, then the RETURN STROKE lights
+    // the whole channel at once and decays. Before the leader reaches a
+    // station the station is dark; behind it a short tail glows.
+    float age = uTime - aPulse;
+    float tt = mix(aT, 1.0 - aT, aFrom);          // distance from the firing end
+    float front = age / uTravel;
+    float leader = smoothstep(0.14, 0.0, abs(tt - front)) * 0.85
+                 + step(tt, front) * 0.3 * exp(-(front - tt) * 5.0);
+    float stroke = exp(-(age - uTravel) * 1.8);
+    float pulse = age < 0.0 ? 0.0 : (age < uTravel ? leader : stroke);
     float energy = max(aLit, pulse);
     float spell = step(1.5, aKind);
     // A written link crackles; a semantic neighbour barely stirs unless lit.

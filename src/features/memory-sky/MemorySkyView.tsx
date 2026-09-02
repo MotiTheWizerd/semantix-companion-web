@@ -179,6 +179,27 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     skyRef.current?.setHits([]);
   };
 
+  // Esc steps back one layer at a time: the open memory closes first, then
+  // the spell lifts and the sky rests. Bound on the window — the sky owns the
+  // whole screen while it is up, and the exit should not depend on focus.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (selected) {
+        event.preventDefault();
+        void openMemory(null);
+      } else if (hits || query) {
+        event.preventDefault();
+        clearSearch();
+        (document.activeElement as HTMLElement | null)?.blur?.();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // clearSearch is recreated each render; the listener is rebound with it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, hits, query, openMemory]);
+
   const typeCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const n of graph?.nodes ?? []) counts.set(n.mem_type, (counts.get(n.mem_type) ?? 0) + 1);

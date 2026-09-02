@@ -106,6 +106,9 @@ const IDLE_RESUME_MS = 7000;
 const FIRE_EVERY_MS: [number, number] = [2200, 4600];
 
 const RENDER_SCALES = [1, 0.8, 0.6];
+/** A strike's leader takes this long to cross a bolt (any length — long bolts
+ *  move faster, so a spell's arms all connect on the same beat). Seconds. */
+const STRIKE_TRAVEL_S = 0.22;
 /** A resting semantic bolt's half-width on screen; links and lit bolts widen from here. */
 const BOLT_HALF_WIDTH_PX = 2.4;
 /** An orb flown into fills a hand, not the window. */
@@ -122,6 +125,26 @@ interface Tween {
 
 function easeInOut(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/** A memory's own dice: FNV-1a of its name seeding a tiny mulberry32, so the
+ *  jitter that places it is the SAME on every visit. A mind should be the
+ *  same constellation each time you look up — the layout is deterministic
+ *  from here (d3-force-3d's jiggle is a seeded LCG), and the meaning-space
+ *  hints anchor the clusters, so only new memories move the sky. */
+function diceFor(name: string): () => number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i += 1) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  let a = h >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 export class MemorySky {
@@ -156,6 +179,7 @@ export class MemorySky {
   private boltDst!: InstancedBufferAttribute;
   private boltLit!: InstancedBufferAttribute;
   private boltPulse!: InstancedBufferAttribute;
+  private boltFrom!: InstancedBufferAttribute; // 0: the strike leaves aSrc · 1: leaves aDst
   private boltWeight!: InstancedBufferAttribute;
 
   // dust
@@ -246,6 +270,7 @@ export class MemorySky {
         uFocus: { value: 0 },
         uFlicker: { value: 11 },
         uDensity: { value: 1 },
+        uTravel: { value: STRIKE_TRAVEL_S },
       },
       blending: AdditiveBlending,
       transparent: true,
@@ -344,18 +369,25 @@ export class MemorySky {
       return;
     }
     this.focusTarget = 1;
+    // The charge leaves the hand: the query orb flashes, each spell-bolt's
+    // leader runs out to its hit one beat apart, and the hit lights when the
+    // strike LANDS — then its own bolts catch, a beat later still.
     const now = this.now();
+    this.orbPulse.setX(this.nodes.length, now);
     this.hitNodes.forEach((node, rank) => {
-      this.orbPulse.setX(node.index, now + 0.12 * rank);
+      const leaves = now + 0.12 * rank;
+      const lands = leaves + STRIKE_TRAVEL_S;
+      this.boltPulse.setX(this.edges.length + rank, leaves);
+      this.boltFrom.setX(this.edges.length + rank, 0); // src is always the query
+      this.orbPulse.setX(node.index, lands);
       for (const edgeIndex of this.adjacency[node.index]) {
-        this.boltPulse.setX(edgeIndex, now + 0.12 * rank + 0.08);
+        this.boltPulse.setX(edgeIndex, lands + 0.08);
+        this.boltFrom.setX(edgeIndex, this.edges[edgeIndex].source === node ? 0 : 1);
       }
     });
-    for (let i = 0; i < this.hitNodes.length; i += 1) {
-      this.boltPulse.setX(this.edges.length + i, now + 0.12 * i);
-    }
     this.orbPulse.needsUpdate = true;
     this.boltPulse.needsUpdate = true;
+    this.boltFrom.needsUpdate = true;
     this.flyToCentroid(this.hitNodes);
   }
 
@@ -416,14 +448,15 @@ export class MemorySky {
   private seedPositions(): void {
     const r = this.radius;
     for (const node of this.nodes) {
+      const dice = diceFor(node.name);
       if (node.hint) {
-        node.x = node.hint[0] * r * 0.85 + (Math.random() - 0.5) * r * 0.2;
-        node.y = node.hint[1] * r * 0.85 + (Math.random() - 0.5) * r * 0.2;
-        node.z = node.hint[2] * r * 0.85 + (Math.random() - 0.5) * r * 0.2;
+        node.x = node.hint[0] * r * 0.85 + (dice() - 0.5) * r * 0.2;
+        node.y = node.hint[1] * r * 0.85 + (dice() - 0.5) * r * 0.2;
+        node.z = node.hint[2] * r * 0.85 + (dice() - 0.5) * r * 0.2;
       } else {
-        const u = Math.random() * 2 - 1;
-        const phi = Math.random() * Math.PI * 2;
-        const rr = r * 0.6 * Math.cbrt(Math.random());
+        const u = dice() * 2 - 1;
+        const phi = dice() * Math.PI * 2;
+        const rr = r * 0.6 * Math.cbrt(dice());
         const s = Math.sqrt(1 - u * u);
         node.x = rr * s * Math.cos(phi);
         node.y = rr * s * Math.sin(phi);
@@ -520,6 +553,7 @@ export class MemorySky {
     const weight = new Float32Array(count);
     const lit = new Float32Array(count);
     const pulse = new Float32Array(count).fill(NEVER);
+    const from = new Float32Array(count);
     const colorA = new Float32Array(count * 3);
     const colorB = new Float32Array(count * 3);
     for (const e of this.edges) {
@@ -544,6 +578,7 @@ export class MemorySky {
     this.boltDst = new InstancedBufferAttribute(dst, 3);
     this.boltLit = new InstancedBufferAttribute(lit, 1);
     this.boltPulse = new InstancedBufferAttribute(pulse, 1);
+    this.boltFrom = new InstancedBufferAttribute(from, 1);
     this.boltWeight = new InstancedBufferAttribute(weight, 1);
     geometry.setAttribute("aSrc", this.boltSrc);
     geometry.setAttribute("aDst", this.boltDst);
@@ -552,6 +587,7 @@ export class MemorySky {
     geometry.setAttribute("aWeight", this.boltWeight);
     geometry.setAttribute("aLit", this.boltLit);
     geometry.setAttribute("aPulse", this.boltPulse);
+    geometry.setAttribute("aFrom", this.boltFrom);
     geometry.setAttribute("aColorA", new InstancedBufferAttribute(colorA, 3));
     geometry.setAttribute("aColorB", new InstancedBufferAttribute(colorB, 3));
     geometry.instanceCount = this.edges.length;
@@ -792,11 +828,17 @@ export class MemorySky {
     for (const ei of this.adjacency[node.index]) {
       const e = this.edges[ei];
       this.boltPulse.setX(ei, t + 0.1);
+      this.boltFrom.setX(ei, e.source === node ? 0 : 1);
       const other = e.source === node ? e.target : e.source;
-      this.orbPulse.setX(other.index, Math.max(this.orbPulse.getX(other.index), t + 0.28));
+      // the neighbour catches when the strike lands, not when it leaves
+      this.orbPulse.setX(
+        other.index,
+        Math.max(this.orbPulse.getX(other.index), t + 0.1 + STRIKE_TRAVEL_S),
+      );
     }
     this.orbPulse.needsUpdate = true;
     this.boltPulse.needsUpdate = true;
+    this.boltFrom.needsUpdate = true;
   }
 
   // ── camera ────────────────────────────────────────────────────────────
