@@ -238,15 +238,15 @@
    halo, the query orb of the memory sky at button size. */
 .composer-send {
   margin-left: auto;
-  background: linear-gradient(145deg, #f2f7ff, #b7dcff);
-  color: #0b1030;
-  box-shadow: 0 0 14px rgba(var(--glow-blue), 0.35);
+  background: var(--charge);
+  color: var(--charge-text);
+  box-shadow: var(--charge-glow);
   transition: background 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
 .composer-send:hover {
-  background: linear-gradient(145deg, #ffffff, #cfe8ff);
-  box-shadow: 0 0 20px rgba(var(--glow-blue), 0.55);
+  background: var(--charge-hover);
+  box-shadow: var(--charge-glow-hover);
 }
 
 .composer-send:disabled {

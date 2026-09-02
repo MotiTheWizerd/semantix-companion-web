@@ -12,7 +12,7 @@
 
 .model-store__header h2 {
   margin: 0;
-  color: #dedede;
+  color: var(--text);
   font-size: 15px;
   font-weight: 610;
   letter-spacing: -0.012em;
@@ -33,7 +33,7 @@
   min-width: 0;
   margin: 0;
   padding: 17px;
-  background: rgba(12, 12, 12, 0.48);
+  background: var(--glass-soft);
   border: 1px solid var(--border-subtle);
   border-radius: 9px;
 }
@@ -48,8 +48,8 @@
 .model-credential-source__switch {
   display: inline-flex;
   padding: 3px;
-  background: #101010;
-  border: 1px solid #292929;
+  background: var(--surface-input);
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
 }
 
@@ -71,8 +71,8 @@
 
 .model-credential-source__switch button.is-active {
   background: var(--surface-active);
-  color: #d9d9d9;
-  box-shadow: inset 0 0 0 1px #303030;
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--glass-border);
 }
 
 .model-credential-source__field,
@@ -93,8 +93,8 @@
   justify-content: space-between;
   gap: 14px;
   padding: 0 11px;
-  background: #111;
-  border: 1px dashed #303030;
+  background: var(--surface-input);
+  border: 1px dashed var(--glass-border);
   border-radius: 8px;
   color: var(--text-faint);
   font-size: 10.5px;
@@ -113,7 +113,7 @@
   min-height: 146px;
   margin-top: 22px;
   overflow: hidden;
-  background: rgba(17, 17, 17, 0.52);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 11px;
 }
@@ -142,10 +142,10 @@
   height: 36px;
   flex: none;
   place-items: center;
-  background: linear-gradient(145deg, #292d30, #202326);
-  border: 1px solid #33383b;
+  background: linear-gradient(145deg, rgba(var(--glow-blue), 0.2), rgba(var(--glow-violet), 0.14));
+  border: 1px solid var(--glass-border-strong);
   border-radius: 10px;
-  color: #c0d3df;
+  color: var(--accent-text);
   font-size: 12px;
   font-weight: 680;
 }
@@ -159,7 +159,7 @@
 
 .model-list__identity strong {
   overflow: hidden;
-  color: #d8d8d8;
+  color: var(--text);
   font-size: 12px;
   font-weight: 610;
   text-overflow: ellipsis;
@@ -197,13 +197,13 @@
 }
 
 .model-list__source.is-saved {
-  background: rgba(118, 184, 146, 0.1);
-  color: #7da58e;
+  background: rgba(var(--glow-cyan), 0.1);
+  color: var(--success);
 }
 
 .model-list__source.is-manual {
-  background: rgba(143, 182, 212, 0.1);
-  color: #809daf;
+  background: rgba(var(--glow-blue), 0.1);
+  color: var(--accent-muted);
 }
 
 .model-list__empty,

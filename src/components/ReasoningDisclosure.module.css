@@ -90,7 +90,7 @@
 .panel {
   margin: 4px 0 2px 8px;
   padding: 9px 12px;
-  border-left: 1px solid rgba(143, 182, 212, 0.3);
+  border-left: 1px solid rgba(var(--glow-blue), 0.3);
   animation: reasoning-reveal 160ms ease-out;
 }
 
@@ -125,11 +125,11 @@
 
 @keyframes reasoning-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(143, 182, 212, 0.28);
+    box-shadow: 0 0 0 0 rgba(var(--glow-blue), 0.28);
   }
   70%,
   100% {
-    box-shadow: 0 0 0 5px rgba(143, 182, 212, 0);
+    box-shadow: 0 0 0 5px rgba(var(--glow-blue), 0);
   }
 }
 

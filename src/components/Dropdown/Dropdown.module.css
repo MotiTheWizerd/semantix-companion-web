@@ -15,11 +15,11 @@
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent),
-    #131313;
-  border: 1px solid #2d2d2d;
+    var(--surface-raised);
+  border: 1px solid var(--glass-border);
   border-radius: 10px;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    inset 0 1px 0 var(--glass-highlight),
     0 8px 20px -18px rgba(0, 0, 0, 0.9);
   color: var(--text);
   font: inherit;
@@ -37,26 +37,26 @@
 .trigger:hover:not(:disabled) {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent),
-    #161616;
-  border-color: #383838;
+    var(--surface-raised-hover);
+  border-color: var(--glass-border-strong);
 }
 
 .trigger:focus-visible {
   outline: none;
-  border-color: rgba(143, 182, 212, 0.48);
+  border-color: rgba(var(--glow-blue), 0.48);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
-    0 0 0 3px rgba(143, 182, 212, 0.075);
+    inset 0 1px 0 var(--glass-highlight),
+    0 0 0 3px rgba(var(--glow-blue), 0.075);
 }
 
 .trigger.open {
   background:
-    linear-gradient(180deg, rgba(143, 182, 212, 0.04), transparent),
-    #161616;
-  border-color: rgba(143, 182, 212, 0.4);
+    linear-gradient(180deg, rgba(var(--glow-blue), 0.04), transparent),
+    var(--surface-raised-hover);
+  border-color: rgba(var(--glow-blue), 0.4);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
-    0 0 0 3px rgba(143, 182, 212, 0.055);
+    inset 0 1px 0 var(--glass-highlight),
+    0 0 0 3px rgba(var(--glow-blue), 0.055);
 }
 
 .trigger:disabled {
@@ -92,7 +92,7 @@
 
 .trigger:hover:not(:disabled) .chevronWrap,
 .trigger.open .chevronWrap {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-hover);
   color: var(--text-secondary);
 }
 
@@ -122,12 +122,14 @@
   padding: 6px;
   overflow: hidden;
   background:
-    linear-gradient(145deg, rgba(143, 182, 212, 0.035), transparent 38%),
-    rgba(24, 24, 24, 0.985);
-  border: 1px solid #323232;
+    linear-gradient(145deg, rgba(var(--glow-blue), 0.035), transparent 38%),
+    var(--glass-strong);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
   border-radius: 14px;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    inset 0 1px 0 var(--glass-highlight),
     0 22px 60px -18px rgba(0, 0, 0, 0.88),
     0 8px 18px -12px rgba(0, 0, 0, 0.78);
   z-index: 1000;
@@ -198,8 +200,8 @@
   height: 34px;
   padding: 0 11px 0 34px;
   outline: none;
-  background: rgba(10, 10, 10, 0.64);
-  border: 1px solid #2c2c2c;
+  background: var(--surface-input);
+  border: 1px solid var(--glass-border);
   border-radius: 9px;
   color: var(--text);
   font: inherit;
@@ -208,13 +210,13 @@
 }
 
 .searchInput::placeholder {
-  color: #575757;
+  color: var(--text-faint);
 }
 
 .searchInput:focus {
-  background: rgba(12, 12, 12, 0.84);
-  border-color: rgba(143, 182, 212, 0.34);
-  box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.05);
+  background: var(--surface-input-focus);
+  border-color: rgba(var(--glow-blue), 0.34);
+  box-shadow: 0 0 0 3px rgba(var(--glow-blue), 0.05);
 }
 
 .itemsContainer {
@@ -223,7 +225,7 @@
   padding: 2px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: #353535 transparent;
+  scrollbar-color: var(--glass-border-strong) transparent;
 }
 
 .itemsContainer::-webkit-scrollbar {
@@ -235,14 +237,14 @@
 }
 
 .itemsContainer::-webkit-scrollbar-thumb {
-  background: #353535;
+  background: var(--glass-border-strong);
   border: 2px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
 }
 
 .itemsContainer::-webkit-scrollbar-thumb:hover {
-  background: #494949;
+  background: var(--glass-border-strong);
   background-clip: padding-box;
 }
 
@@ -276,18 +278,18 @@
 
 .item:hover,
 .item.highlighted {
-  background: rgba(255, 255, 255, 0.038);
-  border-color: rgba(255, 255, 255, 0.035);
+  background: var(--surface-hover);
+  border-color: var(--glass-border);
 }
 
 .item.selected {
-  background: rgba(143, 182, 212, 0.075);
-  border-color: rgba(143, 182, 212, 0.12);
+  background: rgba(var(--glow-blue), 0.075);
+  border-color: rgba(var(--glow-blue), 0.12);
 }
 
 .item.selected.highlighted {
-  background: rgba(143, 182, 212, 0.1);
-  border-color: rgba(143, 182, 212, 0.16);
+  background: rgba(var(--glow-blue), 0.1);
+  border-color: rgba(var(--glow-blue), 0.16);
 }
 
 .checkmark {
@@ -297,7 +299,7 @@
   display: grid;
   place-items: center;
   background: var(--accent-soft);
-  border: 1px solid rgba(143, 182, 212, 0.16);
+  border: 1px solid rgba(var(--glow-blue), 0.16);
   border-radius: 7px;
   color: var(--accent-hover);
 }

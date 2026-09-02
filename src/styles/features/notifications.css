@@ -69,7 +69,7 @@
 }
 
 .notification-card--error .notification-card__dot {
-  background: #c98787;
+  background: var(--danger);
 }
 
 .notification-card__title {

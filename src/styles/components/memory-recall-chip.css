@@ -10,7 +10,7 @@
 .memory-chip--failed {
   display: flex;
   gap: 5px;
-  color: #c9a487;
+  color: var(--warn);
 }
 
 .memory-chip__toggle {
@@ -54,5 +54,5 @@
 }
 
 .memory-chip__error {
-  color: #c9a487;
+  color: var(--warn);
 }

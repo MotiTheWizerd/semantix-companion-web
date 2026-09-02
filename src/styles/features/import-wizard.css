@@ -6,7 +6,7 @@
 .import-wizard {
   margin-top: 22px;
   padding: 20px;
-  background: rgba(22, 22, 22, 0.8);
+  background: var(--glass);
   border: 1px solid var(--border);
   border-radius: 12px;
   display: flex;

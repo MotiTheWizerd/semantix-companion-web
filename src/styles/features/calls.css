@@ -19,18 +19,18 @@
 .calls__row {
   overflow: hidden;
   background:
-    linear-gradient(135deg, rgba(143, 182, 212, 0.045), transparent 42%),
-    rgba(20, 20, 20, 0.94);
-  border: 1px solid #2b2b2b;
+    linear-gradient(135deg, rgba(var(--glow-blue), 0.045), transparent 42%),
+    var(--surface-raised);
+  border: 1px solid var(--glass-border);
   border-radius: 14px;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    inset 0 1px 0 var(--glass-highlight),
     0 14px 34px -26px rgba(0, 0, 0, 0.95);
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .calls__row:hover {
-  border-color: #363636;
+  border-color: var(--glass-border-strong);
 }
 
 .calls__summary {
@@ -49,11 +49,11 @@
 }
 
 .calls__summary:hover {
-  background: rgba(255, 255, 255, 0.022);
+  background: var(--surface-hover);
 }
 
 .calls__summary:focus-visible {
-  outline: 2px solid rgba(143, 182, 212, 0.55);
+  outline: 2px solid rgba(var(--glow-blue), 0.55);
   outline-offset: -3px;
 }
 
@@ -65,7 +65,7 @@
   display: grid;
   place-items: center;
   background: var(--accent-soft);
-  border: 1px solid rgba(143, 182, 212, 0.16);
+  border: 1px solid rgba(var(--glow-blue), 0.16);
   border-radius: 11px;
   color: var(--call-accent);
 }
@@ -88,7 +88,7 @@
   width: 7px;
   height: 7px;
   background: var(--success);
-  border: 2px solid #151515;
+  border: 2px solid var(--void);
   border-radius: 50%;
 }
 
@@ -111,7 +111,7 @@
 
 .calls__title {
   overflow: hidden;
-  color: #d9d9d9;
+  color: var(--text);
   font-size: 13px;
   font-weight: 590;
   line-height: 1.35;
@@ -132,9 +132,9 @@
   align-items: center;
   min-height: 22px;
   padding: 0 8px;
-  border: 1px solid #2d2d2d;
+  border: 1px solid var(--glass-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.018);
+  background: rgba(var(--glow-edge), 0.04);
   color: var(--text-muted);
   font-size: 9.5px;
   font-variant-numeric: tabular-nums;
@@ -158,23 +158,23 @@
 
 .calls__status--open {
   color: var(--success);
-  border-color: rgba(118, 184, 146, 0.2);
-  background: rgba(118, 184, 146, 0.06);
+  border-color: rgba(var(--glow-cyan), 0.2);
+  background: rgba(var(--glow-cyan), 0.06);
 }
 
 /* Something is happening inside RIGHT NOW — the summary row is the only part
    of a collapsed card that exists, so the live pulse lives here. */
 .calls__status--live > span {
-  box-shadow: 0 0 0 3px rgba(118, 184, 146, 0.08);
+  box-shadow: 0 0 0 3px rgba(var(--glow-cyan), 0.08);
   animation: calls-live-pulse 1.4s ease-in-out infinite;
 }
 
 /* Woken, and nothing came back. Amber, not red: a silence to act on, not a
    failure to fear — the "ring again" door sits right under it. */
 .calls__status--silent {
-  color: #c9b98f;
-  border-color: rgba(183, 166, 126, 0.22);
-  background: rgba(183, 166, 126, 0.06);
+  color: var(--warn);
+  border-color: rgba(var(--glow-gold), 0.22);
+  background: rgba(var(--glow-gold), 0.06);
 }
 
 .calls__meter strong {
@@ -194,7 +194,7 @@
 }
 
 .calls__summary:hover .calls__chevron {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-hover);
   color: var(--text-muted);
 }
 
@@ -216,8 +216,8 @@
   display: flex;
   flex-direction: column;
   padding: 2px 16px 8px;
-  background: rgba(7, 7, 7, 0.22);
-  border-top: 1px solid #272727;
+  background: rgba(3, 2, 17, 0.25);
+  border-top: 1px solid var(--glass-border);
 }
 
 .calls__turn {
@@ -229,7 +229,7 @@
 }
 
 .calls__turn + .calls__turn {
-  border-top: 1px solid rgba(255, 255, 255, 0.045);
+  border-top: 1px solid var(--glass-border);
 }
 
 .calls__avatar {
@@ -237,8 +237,8 @@
   height: 28px;
   display: grid;
   place-items: center;
-  background: rgba(143, 182, 212, 0.09);
-  border: 1px solid rgba(143, 182, 212, 0.16);
+  background: rgba(var(--glow-blue), 0.09);
+  border: 1px solid rgba(var(--glow-blue), 0.16);
   border-radius: 9px;
   color: var(--accent-hover);
   font-size: 10px;
@@ -247,9 +247,9 @@
 }
 
 .calls__turn--recipient .calls__avatar {
-  background: rgba(183, 166, 126, 0.09);
-  border-color: rgba(183, 166, 126, 0.17);
-  color: #c9b98f;
+  background: rgba(var(--glow-gold), 0.09);
+  border-color: rgba(var(--glow-gold), 0.17);
+  color: var(--warn);
 }
 
 .calls__turn-content {
@@ -272,14 +272,14 @@
 }
 
 .calls__turn-meta time {
-  color: #4e4e4e;
+  color: var(--text-faint);
   font-size: 9.5px;
   font-variant-numeric: tabular-nums;
 }
 
 .calls__body {
   margin: 0;
-  color: #c9c9c9;
+  color: var(--text);
   font-size: 12.5px;
   line-height: 1.62;
   white-space: pre-wrap;
@@ -289,7 +289,7 @@
 .calls__turn--streaming {
   margin-inline: -8px;
   padding-inline: 8px;
-  background: linear-gradient(90deg, rgba(143, 182, 212, 0.035), transparent 75%);
+  background: linear-gradient(90deg, rgba(var(--glow-blue), 0.035), transparent 75%);
   border-radius: 8px;
 }
 
@@ -309,7 +309,7 @@
   height: 5px;
   background: currentColor;
   border-radius: 50%;
-  box-shadow: 0 0 0 3px rgba(118, 184, 146, 0.08);
+  box-shadow: 0 0 0 3px rgba(var(--glow-cyan), 0.08);
   animation: calls-live-pulse 1.4s ease-in-out infinite;
 }
 
@@ -359,7 +359,7 @@
 }
 
 .calls__live--ringing > span {
-  box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.1);
+  box-shadow: 0 0 0 3px rgba(var(--glow-blue), 0.1);
 }
 
 .calls__ring-pulse {
@@ -395,14 +395,14 @@
   gap: 10px;
   margin: 8px 0 6px;
   padding: 10px 12px;
-  background: rgba(183, 166, 126, 0.05);
-  border: 1px solid rgba(183, 166, 126, 0.16);
+  background: rgba(var(--glow-gold), 0.05);
+  border: 1px solid rgba(var(--glow-gold), 0.16);
   border-radius: 10px;
 }
 
 .calls__silence-word {
   margin: 0;
-  color: #c9b98f;
+  color: var(--warn);
   font-size: 11.5px;
   line-height: 1.5;
 }
@@ -411,10 +411,10 @@
   flex: 0 0 auto;
   min-height: 24px;
   padding: 0 11px;
-  background: rgba(183, 166, 126, 0.1);
-  border: 1px solid rgba(183, 166, 126, 0.28);
+  background: rgba(var(--glow-gold), 0.1);
+  border: 1px solid rgba(var(--glow-gold), 0.28);
   border-radius: 999px;
-  color: #d6c69c;
+  color: #ffe3b0;
   font: inherit;
   font-size: 10px;
   font-weight: 650;
@@ -425,12 +425,12 @@
 }
 
 .calls__redial:hover:not(:disabled) {
-  background: rgba(183, 166, 126, 0.16);
-  border-color: rgba(183, 166, 126, 0.4);
+  background: rgba(var(--glow-gold), 0.16);
+  border-color: rgba(var(--glow-gold), 0.4);
 }
 
 .calls__redial:focus-visible {
-  outline: 2px solid rgba(183, 166, 126, 0.55);
+  outline: 2px solid rgba(var(--glow-gold), 0.55);
   outline-offset: 2px;
 }
 
@@ -448,10 +448,10 @@
 .calls__error {
   margin: 0;
   padding: 13px 16px;
-  background: rgba(201, 135, 135, 0.055);
-  border: 1px solid rgba(201, 135, 135, 0.18);
+  background: rgba(var(--glow-rose), 0.055);
+  border: 1px solid rgba(var(--glow-rose), 0.18);
   border-radius: 12px;
-  color: #c98787;
+  color: var(--danger);
 }
 
 @keyframes calls-caret {

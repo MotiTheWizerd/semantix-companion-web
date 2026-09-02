@@ -3,9 +3,9 @@
   gap: 10px;
   padding: 12px;
   background:
-    linear-gradient(145deg, rgba(143, 182, 212, 0.035), transparent 42%),
-    rgba(12, 12, 12, 0.42);
-  border: 1px solid #292929;
+    linear-gradient(145deg, rgba(var(--glow-blue), 0.035), transparent 42%),
+    var(--glass-soft);
+  border: 1px solid var(--glass-border);
   border-radius: 12px;
 }
 
@@ -54,8 +54,8 @@
   align-items: center;
   gap: 10px;
   padding: 10px 11px;
-  background: rgba(255, 255, 255, 0.016);
-  border: 1px dashed #2c2c2c;
+  background: rgba(var(--glow-edge), 0.035);
+  border: 1px dashed var(--glass-border);
   border-radius: 9px;
 }
 
@@ -64,7 +64,7 @@
   height: 30px;
   display: grid;
   place-items: center;
-  background: rgba(143, 182, 212, 0.045);
+  background: rgba(var(--glow-blue), 0.045);
   border-radius: 8px;
   filter: grayscale(0.35);
   font-size: 13px;
@@ -90,15 +90,15 @@
   align-items: end;
   gap: 9px;
   padding: 9px;
-  background: rgba(20, 20, 20, 0.74);
-  border: 1px solid #2b2b2b;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
   border-radius: 10px;
   transition: border-color 140ms ease, background 140ms ease;
 }
 
 .item:focus-within {
-  background: rgba(22, 22, 22, 0.82);
-  border-color: rgba(143, 182, 212, 0.2);
+  background: var(--glass);
+  border-color: rgba(var(--glow-blue), 0.2);
 }
 
 .index {
@@ -107,10 +107,10 @@
   align-self: center;
   display: grid;
   place-items: center;
-  background: rgba(143, 182, 212, 0.055);
-  border: 1px solid rgba(143, 182, 212, 0.08);
+  background: rgba(var(--glow-blue), 0.055);
+  border: 1px solid rgba(var(--glow-blue), 0.08);
   border-radius: 8px;
-  color: #8099ab;
+  color: var(--accent-muted);
   font-size: 9px;
   font-variant-numeric: tabular-nums;
   font-weight: 680;
@@ -137,8 +137,8 @@
   height: 32px;
   padding: 0 9px;
   outline: none;
-  background: #111;
-  border: 1px solid #2d2d2d;
+  background: var(--surface-input);
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
   color: var(--text-secondary);
   font: inherit;
@@ -147,8 +147,8 @@
 }
 
 .editor .nameField input:focus {
-  border-color: rgba(143, 182, 212, 0.45);
-  box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.06);
+  border-color: rgba(var(--glow-blue), 0.45);
+  box-shadow: 0 0 0 3px rgba(var(--glow-blue), 0.06);
 }
 
 .pathBlock code {
@@ -156,10 +156,10 @@
   display: block;
   padding: 8px 9px 0;
   overflow: hidden;
-  background: rgba(8, 8, 8, 0.46);
-  border: 1px solid #272727;
+  background: var(--surface-input);
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
-  color: #8fa6b6;
+  color: var(--accent-muted);
   direction: rtl;
   font-size: 9.5px;
   text-overflow: ellipsis;
@@ -195,21 +195,21 @@
 
 .orderButton:hover:not(:disabled),
 .textButton:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.035);
-  border-color: rgba(255, 255, 255, 0.045);
+  background: var(--surface-hover);
+  border-color: var(--glass-border);
   color: var(--text-secondary);
 }
 
 .orderButton:focus-visible,
 .textButton:focus-visible {
-  outline: 1px solid rgba(143, 182, 212, 0.44);
+  outline: 1px solid rgba(var(--glow-blue), 0.44);
   outline-offset: -1px;
 }
 
 .removeButton:hover:not(:disabled) {
-  background: rgba(198, 101, 101, 0.06);
-  border-color: rgba(198, 101, 101, 0.1);
-  color: #c98787;
+  background: rgba(var(--glow-rose), 0.06);
+  border-color: rgba(var(--glow-rose), 0.1);
+  color: var(--danger);
 }
 
 .orderButton:disabled,
@@ -222,7 +222,7 @@
 .validation {
   margin: 0;
   padding: 2px 3px 0;
-  color: #c98787;
+  color: var(--danger);
   font-size: 9.5px;
 }
 

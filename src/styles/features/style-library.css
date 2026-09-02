@@ -54,7 +54,7 @@
   align-items: flex-start;
   gap: 10px;
   padding: 8px 10px;
-  background: rgba(22, 22, 22, 0.6);
+  background: var(--surface);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
 }
@@ -112,7 +112,7 @@
 
 .style-library__manual {
   padding: 10px 14px;
-  background: rgba(22, 22, 22, 0.6);
+  background: var(--surface);
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
 }
@@ -148,7 +148,7 @@
   flex-direction: column;
   gap: 14px;
   padding: 14px;
-  background: rgba(22, 22, 22, 0.8);
+  background: var(--glass);
   border: 1px solid var(--border);
   border-radius: 10px;
 }

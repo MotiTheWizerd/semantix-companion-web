@@ -19,7 +19,7 @@
 
 .trigger:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(143, 182, 212, 0.16);
+  box-shadow: 0 0 0 2px rgba(var(--glow-blue), 0.16);
 }
 
 .trigger:disabled {
@@ -44,12 +44,14 @@
   flex-direction: column;
   overflow: hidden;
   background:
-    linear-gradient(145deg, rgba(143, 182, 212, 0.04), transparent 38%),
-    rgba(24, 24, 24, 0.99);
-  border: 1px solid #323232;
+    linear-gradient(145deg, rgba(var(--glow-blue), 0.04), transparent 38%),
+    var(--glass-strong);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
   border-radius: 15px;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 1px 0 var(--glass-highlight),
     0 24px 64px -18px rgba(0, 0, 0, 0.9),
     0 8px 18px -12px rgba(0, 0, 0, 0.82);
   z-index: 1100;
@@ -104,7 +106,7 @@
 }
 
 .header > strong {
-  color: #d9d9d9;
+  color: var(--text);
   font-size: 12.5px;
   font-weight: 610;
 }
@@ -121,8 +123,8 @@
   padding: 0 11px 0 35px;
   outline: none;
   appearance: none;
-  background: rgba(9, 9, 9, 0.62);
-  border: 1px solid #2c2c2c;
+  background: var(--surface-input);
+  border: 1px solid var(--glass-border);
   border-radius: 9px;
   color: var(--text);
   font-size: 11.5px;
@@ -134,13 +136,13 @@
 }
 
 .searchBox input::placeholder {
-  color: #575757;
+  color: var(--text-faint);
 }
 
 .searchBox input:focus {
-  background: rgba(12, 12, 12, 0.84);
-  border-color: rgba(143, 182, 212, 0.34);
-  box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.05);
+  background: var(--surface-input-focus);
+  border-color: rgba(var(--glow-blue), 0.34);
+  box-shadow: 0 0 0 3px rgba(var(--glow-blue), 0.05);
 }
 
 .searchIcon {
@@ -171,7 +173,7 @@
   padding: 2px 8px 10px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: #363636 transparent;
+  scrollbar-color: var(--glass-border-strong) transparent;
 }
 
 .scroller::-webkit-scrollbar {
@@ -179,7 +181,7 @@
 }
 
 .scroller::-webkit-scrollbar-thumb {
-  background: #383838;
+  background: var(--glass-border-strong);
   border: 2px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
@@ -219,7 +221,7 @@
 .sectionHeading small {
   min-width: 20px;
   padding: 2px 5px;
-  background: rgba(255, 255, 255, 0.035);
+  background: var(--surface-hover);
   border-radius: 6px;
   color: var(--text-faint);
   font-size: 8.5px;
@@ -254,8 +256,8 @@
 .emojiButton:hover,
 .emojiButton:focus-visible {
   outline: none;
-  background: rgba(143, 182, 212, 0.085);
-  border-color: rgba(143, 182, 212, 0.13);
+  background: rgba(var(--glow-blue), 0.085);
+  border-color: rgba(var(--glow-blue), 0.13);
   transform: translateY(-1px) scale(1.04);
 }
 
@@ -280,8 +282,8 @@
 .emptyRecent {
   min-height: 48px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.018);
-  border: 1px dashed rgba(255, 255, 255, 0.055);
+  background: rgba(var(--glow-edge), 0.035);
+  border: 1px dashed var(--glass-border);
   border-radius: 9px;
 }
 

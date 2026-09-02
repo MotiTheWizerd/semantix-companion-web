@@ -20,7 +20,7 @@
 .memory-settings__toggle input[type="checkbox"] {
   width: auto;
   margin-top: 3px;
-  accent-color: var(--accent, #7c6cff);
+  accent-color: var(--accent);
 }
 
 .memory-settings__toggle span {

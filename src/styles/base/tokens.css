@@ -28,6 +28,7 @@
   --glow-ice: 207, 228, 255; /* #cfe4ff episodic */
   --glow-magenta: 255, 122, 217; /* #ff7ad9 feedback */
   --glow-gold: 255, 213, 138; /* #ffd58a user */
+  --glow-rose: 255, 143, 177; /* #ff8fb1 danger — a rose inside the family, not IDE red */
   --glow-edge: 150, 160, 255; /* the light on a glass edge */
 
   /* ── glass ── panels float on the void; the border is light catching the rim */
@@ -44,7 +45,9 @@
   /* ── surfaces ── the app's old names, now tints of the same glass */
   --surface: rgba(10, 8, 34, 0.55);
   --surface-raised: rgba(16, 13, 52, 0.62);
+  --surface-raised-hover: rgba(20, 17, 62, 0.74);
   --surface-input: rgba(5, 4, 22, 0.55);
+  --surface-input-focus: rgba(5, 4, 22, 0.78);
   --surface-hover: rgba(var(--glow-edge), 0.07);
   --surface-active: rgba(var(--glow-edge), 0.12);
   --border: rgba(var(--glow-edge), 0.16);
@@ -62,10 +65,32 @@
   --accent-hover: #7fcaff;
   --accent-soft: rgba(var(--glow-blue), 0.12);
   --accent-glow: 0 0 10px rgba(var(--glow-blue), 0.45);
+  --accent-text: #bfe0ff; /* text tinted toward the accent: badges, provider marks */
+  --accent-muted: #7ea8d4; /* the same, sunk: indices, paths, secondary marks */
+  /* The charge — a primary button is the sky's query orb at button size:
+     an ice-white gradient, dark ink, a blue halo. Send, Save, Confirm. */
+  --charge: linear-gradient(145deg, #f2f7ff, #b7dcff);
+  --charge-hover: linear-gradient(145deg, #ffffff, #cfe8ff);
+  --charge-text: #0b1030;
+  --charge-glow: 0 0 14px rgba(var(--glow-blue), 0.35);
+  --charge-glow-hover: 0 0 20px rgba(var(--glow-blue), 0.55);
   --success: #5ff0e4;
   --success-soft: rgba(var(--glow-cyan), 0.1);
   --warn: #ffd58a;
   --warn-soft: rgba(var(--glow-gold), 0.12);
   --danger: #ff8fb1;
   --danger-soft: rgba(255, 143, 177, 0.1);
+
+  /* ── code ── syntax.css reads these (atom-one-dark fallbacks); the same
+     voices as the UI: violet keywords, blue functions, cyan literals, gold
+     strings, rose tags. */
+  --syntax-text: #dfe6ff;
+  --syntax-comment: #6b73a6;
+  --syntax-keyword: #c9a3ff;
+  --syntax-tag: #ff8fb1;
+  --syntax-literal: #5ff0e4;
+  --syntax-string: #ffd58a;
+  --syntax-number: #ffc48f;
+  --syntax-function: #56b8ff;
+  --syntax-class: #9fdcff;
 }

@@ -18,7 +18,7 @@
 
 .preference-store h2 {
   margin: 0;
-  color: #dedede;
+  color: var(--text);
   font-size: 15px;
   font-weight: 610;
 }
@@ -45,7 +45,7 @@
 }
 
 .preference-store__field small {
-  color: #c98787;
+  color: var(--danger);
   font-size: 10.5px;
   line-height: 1.4;
 }
@@ -64,7 +64,7 @@
 .credential-store__header h2,
 .credential-form__heading h3 {
   margin: 0;
-  color: #dedede;
+  color: var(--text);
   font-size: 15px;
   font-weight: 610;
   letter-spacing: -0.012em;
@@ -87,9 +87,9 @@
   padding: 0 11px;
   cursor: pointer;
   background: var(--surface-raised);
-  border: 1px solid #303030;
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
-  color: #d8d8d8;
+  color: var(--text);
   font-size: 11.5px;
   font-weight: 610;
   transition: background 140ms ease, border-color 140ms ease;
@@ -97,7 +97,7 @@
 
 .credential-store__add-button:hover {
   background: var(--surface-hover);
-  border-color: #3a3a3a;
+  border-color: var(--glass-border-strong);
 }
 
 .credential-store__add-button svg,
@@ -116,7 +116,7 @@
 .credential-form {
   margin-top: 22px;
   padding: 20px;
-  background: rgba(22, 22, 22, 0.8);
+  background: var(--glass);
   border: 1px solid var(--border);
   border-radius: 12px;
 }
@@ -185,10 +185,10 @@
   width: 100%;
   height: 38px;
   outline: none;
-  background: #111;
-  border: 1px solid #2d2d2d;
+  background: var(--surface-input);
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
-  color: #d5d5d5;
+  color: var(--text);
   font-size: 12px;
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
@@ -203,13 +203,13 @@
 }
 
 .credential-field input::placeholder {
-  color: #555;
+  color: var(--text-faint);
 }
 
 .credential-field input:focus,
 .credential-field select:focus {
-  border-color: rgba(143, 182, 212, 0.5);
-  box-shadow: 0 0 0 3px rgba(143, 182, 212, 0.07);
+  border-color: rgba(var(--glow-blue), 0.5);
+  box-shadow: 0 0 0 3px rgba(var(--glow-blue), 0.07);
 }
 
 .credential-form__actions {
@@ -239,12 +239,14 @@
 }
 
 .credential-button--primary {
-  background: #d6e2ea;
-  color: #111;
+  background: var(--charge);
+  color: var(--charge-text);
+  box-shadow: var(--charge-glow);
 }
 
 .credential-button--primary:hover:not(:disabled) {
-  background: #e7eef3;
+  background: var(--charge-hover);
+  box-shadow: var(--charge-glow-hover);
 }
 
 .credential-button:disabled {
@@ -255,10 +257,10 @@
 .credential-store__error {
   margin: 14px 0 0;
   padding: 10px 12px;
-  background: rgba(180, 77, 77, 0.08);
-  border: 1px solid rgba(199, 91, 91, 0.18);
+  background: rgba(var(--glow-rose), 0.08);
+  border: 1px solid rgba(var(--glow-rose), 0.18);
   border-radius: 8px;
-  color: #c98787;
+  color: var(--danger);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -269,7 +271,7 @@
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 11px;
-  background: rgba(17, 17, 17, 0.52);
+  background: var(--surface);
 }
 
 .credential-list ul {
@@ -297,9 +299,9 @@
   flex: none;
   place-items: center;
   background: var(--surface-active);
-  border: 1px solid #303030;
+  border: 1px solid var(--glass-border);
   border-radius: 9px;
-  color: #b9cbd8;
+  color: var(--accent-text);
   font-size: 12px;
   font-weight: 680;
 }
@@ -312,7 +314,7 @@
 
 .credential-list__identity strong {
   overflow: hidden;
-  color: #d6d6d6;
+  color: var(--text);
   font-size: 12px;
   font-weight: 590;
   text-overflow: ellipsis;
@@ -348,13 +350,13 @@
   cursor: pointer;
   background: transparent;
   border-radius: 7px;
-  color: #606060;
+  color: var(--text-faint);
   transition: background 140ms ease, color 140ms ease;
 }
 
 .credential-list__edit:hover {
   background: var(--surface-hover);
-  color: #879eae;
+  color: var(--accent-muted);
 }
 
 .credential-list__edit svg {
@@ -376,13 +378,13 @@
   cursor: pointer;
   background: transparent;
   border-radius: 7px;
-  color: #606060;
+  color: var(--text-faint);
   transition: background 140ms ease, color 140ms ease;
 }
 
 .credential-list__delete:hover {
   background: var(--surface-hover);
-  color: #ad7777;
+  color: var(--danger);
 }
 
 .credential-list__delete:disabled {
@@ -430,15 +432,15 @@
 }
 
 .credential-list__delete-confirm {
-  background: rgba(180, 77, 77, 0.12);
-  border: 1px solid rgba(199, 91, 91, 0.24);
-  color: #c98787;
+  background: rgba(var(--glow-rose), 0.12);
+  border: 1px solid rgba(var(--glow-rose), 0.24);
+  color: var(--danger);
 }
 
 .credential-list__delete-confirm:hover {
-  background: rgba(180, 77, 77, 0.2);
-  border-color: rgba(199, 91, 91, 0.36);
-  color: #dda0a0;
+  background: rgba(var(--glow-rose), 0.2);
+  border-color: rgba(var(--glow-rose), 0.36);
+  color: #ffb3cb;
 }
 
 .credential-list__delete-cancel:disabled,
@@ -502,7 +504,7 @@
   height: 15px;
   flex: none;
   margin-top: 1px;
-  color: #6f8da2;
+  color: var(--accent-muted);
 }
 
 @media (max-width: 720px) {

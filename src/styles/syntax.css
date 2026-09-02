@@ -19,7 +19,7 @@ code.hljs {
 
 .hljs {
   color: var(--syntax-text, #abb2bf);
-  background: #282c34;
+  background: var(--surface-input, #282c34);
 }
 .hljs-comment,
 .hljs-quote {

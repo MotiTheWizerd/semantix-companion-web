@@ -69,5 +69,5 @@
 }
 
 .tool-chip__error {
-  color: #c98787;
+  color: var(--danger);
 }
