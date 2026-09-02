@@ -7,7 +7,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { MarkdownRenderer } from "../../components/MarkdownRenderer";
-import { companionLabel, type Companion } from "../companions/types";
+import { CompanionSelect } from "../companions/CompanionSelect";
+import { type Companion } from "../companions/types";
 import { companionMemoryAgent } from "../memory/baseAgent";
 import {
   loadMemoryGraph,
@@ -272,18 +273,15 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
         </form>
 
         {companions.length > 1 ? (
-          <select
+          <CompanionSelect
+            companions={companions}
+            value={companion?.id ?? null}
+            onChange={setCompanionId}
+            variant="pill"
+            eyebrow="Whose mind"
+            ariaLabel="Whose mind"
             className="memory-sky__companion"
-            value={companion?.id ?? ""}
-            onChange={(event) => setCompanionId(event.target.value || null)}
-            aria-label="Whose mind"
-          >
-            {companions.map((c) => (
-              <option key={c.id} value={c.id}>
-                {companionLabel(c)}
-              </option>
-            ))}
-          </select>
+          />
         ) : null}
       </div>
 

@@ -176,14 +176,12 @@
   color: rgba(220, 226, 255, 0.8);
 }
 
+/* Whose mind: the composer's own CompanionSelect worn as a glass pill
+   (variant="pill" styles the control itself); here it only takes its place
+   in the HUD row and keeps its width from the search. */
 .memory-sky__companion {
-  padding: 8px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(150, 160, 255, 0.22);
-  background: rgba(10, 8, 34, 0.62);
-  color: #dfe6ff;
-  font-size: 13px;
-  backdrop-filter: blur(10px);
+  flex: none;
+  max-width: 220px;
 }
 
 .memory-sky__note {

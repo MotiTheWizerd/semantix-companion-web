@@ -60,13 +60,21 @@
 .chat-message--user {
   margin-left: auto;
   padding: 10px 14px;
-  /* The user's words wear the sky's gold — the same tint a `user` memory
-     carries in the memory sky, so a message and what it becomes match. */
-  background: rgba(var(--glow-gold), 0.075);
-  border: 1px solid rgba(var(--glow-gold), 0.2);
+  /* Glass, in the same grammar as the tool pills and the composer: the
+     afterglow shows through a tinted pane, the rim catches the light, a
+     highlight sits along the top edge. The sky's `user` gold — the tint a
+     `user` memory carries — is a whisper across the pane, not the pane
+     itself: gold at any alpha over the void mixes to brown, and brown is
+     the old app (s542). */
+  background:
+    linear-gradient(145deg, rgba(var(--glow-gold), 0.085), transparent 62%),
+    var(--glass);
+  border: 1px solid rgba(var(--glow-edge), 0.2);
   border-radius: 14px 14px 4px 14px;
-  box-shadow: inset 0 1px 0 rgba(var(--glow-gold), 0.08);
-  color: #f3ecdc;
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 10px 28px -18px rgba(0, 0, 0, 0.85);
+  color: var(--text);
 }
 
 .chat-message--assistant {

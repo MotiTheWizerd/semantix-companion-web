@@ -1,11 +1,14 @@
-// The composer's picker. Where a model list used to sit, the roster sits:
+// The companion picker. Where a model list used to sit, the roster sits:
 // you choose WHO you are talking to, and the companion brings its own voice
-// and its own memory with it.
+// and its own memory with it. Two faces, one control: the compact one in
+// the composer dock, and a glass pill in the memory sky's HUD (s542).
 
 import { CompanionMark } from "../../components/CompanionMark";
 import { Dropdown } from "../../components/Dropdown/Dropdown";
 import { companionLabel, type Companion } from "./types";
 import styles from "./CompanionSelect.module.css";
+
+type CompanionSelectVariant = "composer" | "pill";
 
 interface CompanionSelectProps {
   companions: Companion[];
@@ -15,6 +18,13 @@ interface CompanionSelectProps {
   id?: string;
   className?: string;
   onChange: (companionId: string) => void;
+  /** "composer" (default): the compact control in the chat dock, opening
+   *  upward. "pill": the sky HUD's glass pill beside the search, opening
+   *  downward. */
+  variant?: CompanionSelectVariant;
+  /** The small line above the menu's title — what choosing here means. */
+  eyebrow?: string;
+  ariaLabel?: string;
 }
 
 export function CompanionSelect({
@@ -24,6 +34,9 @@ export function CompanionSelect({
   id,
   className,
   onChange,
+  variant = "composer",
+  eyebrow = "Conversation partner",
+  ariaLabel = "Companion",
 }: CompanionSelectProps) {
   const builtIn = companions.find((companion) => companion.isBuiltIn);
   // An unpicked thread already answers to the built-in companion in Rust;
@@ -31,6 +44,7 @@ export function CompanionSelect({
   const selected = value ?? builtIn?.id ?? "";
   const selectedCompanion =
     companions.find((companion) => companion.id === selected) ?? builtIn ?? null;
+  const isPill = variant === "pill";
 
   return (
     <Dropdown
@@ -55,10 +69,16 @@ export function CompanionSelect({
       )}
       renderTrigger={() => (
         <span className={styles.selectedCompanion}>
-          <span className={`${styles.companionMark} ${styles.selectedMark}`}>
+          <span
+            className={`${styles.companionMark} ${styles.selectedMark} ${
+              isPill ? styles.selectedMarkPill : ""
+            }`}
+          >
             <CompanionMark />
           </span>
-          <span className={styles.selectedName}>
+          <span
+            className={`${styles.selectedName} ${isPill ? styles.selectedNamePill : ""}`}
+          >
             {selectedCompanion
               ? companionLabel(selectedCompanion)
               : "Loading companions…"}
@@ -68,19 +88,19 @@ export function CompanionSelect({
       placeholder="Loading companions…"
       disabled={disabled || companions.length === 0}
       id={id}
-      ariaLabel="Companion"
+      ariaLabel={ariaLabel}
       menuLabel="Available companions"
       className={`${styles.dropdown} ${className ?? ""}`}
-      triggerClassName={styles.trigger}
+      triggerClassName={`${styles.trigger} ${isPill ? styles.triggerPill : ""}`}
       menuClassName={styles.menu}
-      direction="up"
+      direction={isPill ? "down" : "up"}
       searchable
       searchPlaceholder="Search companions..."
       emptyMessage="No companions available"
       getSearchText={companionLabel}
       menuHeader={
         <div className={styles.menuHeading}>
-          <span>Conversation partner</span>
+          <span>{eyebrow}</span>
           <strong>Choose a companion</strong>
         </div>
       }
