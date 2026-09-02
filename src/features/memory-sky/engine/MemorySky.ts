@@ -996,7 +996,9 @@ export class MemorySky {
       const x = Math.round(sx + orbPx * 0.5 + 6);
       const y = Math.round(sy - LABEL_HEIGHT_PX / 2);
       const w = this.labelWidths[k];
-      if (x > width || x + w < 0 || y > height || y + LABEL_HEIGHT_PX < 0) {
+      // whole or not at all — a name clipped by the edge reads as a
+      // different name ("…-close" at the left border, s539 screenshot)
+      if (x < 0 || x + w > width || y < 0 || y + LABEL_HEIGHT_PX > height) {
         tag.style.opacity = "0";
         continue;
       }
