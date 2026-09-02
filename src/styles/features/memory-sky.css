@@ -13,6 +13,9 @@
   background: #06051a;
   color: #dfe6ff;
   user-select: none;
+  /* The canvas runs under the floating sidebar (layout.css); the chrome does
+     not — everything anchored left or centred is offset by the pane's width. */
+  --sky-left: var(--sidebar-w, 0px);
 }
 
 .memory-sky__canvas {
@@ -60,7 +63,7 @@
 .memory-sky__hud {
   position: absolute;
   top: 18px;
-  left: 50%;
+  left: calc(50% + var(--sky-left) / 2);
   transform: translateX(-50%);
   display: flex;
   align-items: center;
@@ -152,7 +155,7 @@
 .memory-sky__note {
   position: absolute;
   top: 74px;
-  left: 50%;
+  left: calc(50% + var(--sky-left) / 2);
   transform: translateX(-50%);
   margin: 0;
   padding: 6px 14px;
@@ -174,7 +177,7 @@
 .memory-sky__hits {
   position: absolute;
   top: 76px;
-  left: 22px;
+  left: calc(var(--sky-left) + 22px);
   margin: 0;
   padding: 8px;
   list-style: none;
@@ -226,7 +229,7 @@
 
 .memory-sky__stats {
   position: absolute;
-  left: 22px;
+  left: calc(var(--sky-left) + 22px);
   right: 22px;
   bottom: 16px;
   display: flex;

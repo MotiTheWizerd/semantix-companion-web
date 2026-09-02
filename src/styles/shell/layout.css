@@ -1,11 +1,20 @@
+/* The afterglow — the memory sky with the lightning gone out. Three blooms in
+   the sky's own colours on the void, static and cheap (plain gradients, no
+   compositing), sitting BEHIND every panel so the glass has something to be
+   glass over: translucent tints only read as glass when light comes through
+   them. Violet high and right like the spell's fringe, electric blue low and
+   left where the work sits, a whisper of gold near the middle for the people. */
 .app-shell {
+  --sidebar-w: 252px;
   display: grid;
-  grid-template-columns: 252px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   height: 100vh;
   min-height: 100vh;
   background:
-    radial-gradient(circle at 70% 35%, rgba(143, 182, 212, 0.035), transparent 32rem),
-    #0a0a0a;
+    radial-gradient(ellipse 58% 52% at 82% 12%, rgba(var(--glow-violet), 0.17), transparent 68%),
+    radial-gradient(ellipse 52% 46% at 12% 88%, rgba(var(--glow-blue), 0.13), transparent 68%),
+    radial-gradient(ellipse 36% 30% at 56% 58%, rgba(var(--glow-gold), 0.045), transparent 70%),
+    radial-gradient(ellipse 70% 60% at 50% 50%, var(--void), var(--void-deep));
 }
 
 .app-workspace {
@@ -16,18 +25,42 @@
   min-height: 100vh;
 }
 
+/* In the memory view the sky takes the whole shell and the sidebar floats on
+   it as glass — here, and only here, the blur is earned: lightning moves
+   under the pane, and a frosted bolt is the whole point. The sky's chrome
+   keeps clear of the pane through --sidebar-w (memory-sky.css). */
+.app-shell.is-sky .app-workspace {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.app-shell.is-sky .app-sidebar {
+  grid-column: 1;
+  grid-row: 1;
+  z-index: 2;
+  background: rgba(8, 6, 30, 0.36);
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
+}
+
+/* The pane is already frosted, so its sticky label needs only a light tint —
+   the near-opaque one it wears elsewhere would read as a dark band here. */
+.app-shell.is-sky .sidebar-section-label {
+  background: rgba(8, 6, 30, 0.5);
+}
+
 .app-workspace.has-conversation-tabs {
   grid-template-rows: 58px 40px minmax(0, 1fr);
 }
 
 @media (max-width: 820px) {
   .app-shell {
-    grid-template-columns: 210px minmax(0, 1fr);
+    --sidebar-w: 210px;
   }
 }
 
 @media (max-width: 720px) {
   .app-shell {
-    grid-template-columns: 64px minmax(0, 1fr);
+    --sidebar-w: 64px;
   }
 }

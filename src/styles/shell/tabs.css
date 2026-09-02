@@ -4,8 +4,8 @@
   align-items: stretch;
   padding: 5px 12px 0;
   overflow: hidden;
-  background: rgba(12, 12, 12, 0.92);
-  border-bottom: 1px solid var(--border-subtle);
+  background: var(--glass-soft);
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .conversation-tabs__track {
@@ -35,13 +35,14 @@
 }
 
 .conversation-tab:hover {
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--surface-hover);
   color: var(--text-secondary);
 }
 
 .conversation-tab.is-active {
-  background: var(--surface);
-  border-color: var(--border);
+  background: var(--surface-raised);
+  border-color: var(--glass-border-strong);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
   color: var(--text);
 }
 
@@ -74,7 +75,7 @@
   flex: none;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 7px rgba(143, 182, 212, 0.42);
+  box-shadow: var(--accent-glow);
 }
 
 .conversation-tab__close,

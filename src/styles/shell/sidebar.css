@@ -7,8 +7,12 @@
   min-height: 0;
   overflow: hidden;
   padding: 16px 12px 12px;
+  /* A glass column: the afterglow shows through the tint, and the right edge
+     is the light catching the rim. No backdrop blur — nothing moves under a
+     static glow, so blur here would cost frames and change nothing. */
   background: var(--surface);
-  border-right: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--glass-border);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.015);
 }
 
 .sidebar-brand {
@@ -17,7 +21,7 @@
   gap: 10px;
   height: 34px;
   padding: 0 8px;
-  color: #e2e2e2;
+  color: var(--text);
   font-size: 14px;
   font-weight: 650;
   letter-spacing: -0.01em;
@@ -37,14 +41,14 @@
   width: 38%;
   height: 38%;
   border-radius: 50%;
-  background: linear-gradient(145deg, #c5dae9, #6c94b2);
-  box-shadow: 0 0 14px rgba(143, 182, 212, 0.35);
+  background: linear-gradient(145deg, #eef4ff, var(--accent));
+  box-shadow: 0 0 14px rgba(var(--glow-blue), 0.5);
 }
 
 .companion-mark__orbit {
   position: absolute;
   inset: 4%;
-  border: 1px solid rgba(143, 182, 212, 0.38);
+  border: 1px solid rgba(var(--glow-edge), 0.5);
   border-radius: 48% 52% 46% 54%;
   transform: rotate(-28deg) scaleY(0.62);
 }
@@ -59,18 +63,20 @@
   padding: 0 11px;
   cursor: pointer;
   background: var(--surface-raised);
-  border: 1px solid var(--border);
+  border: 1px solid var(--glass-border);
   border-radius: 9px;
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
   color: var(--text);
   font-size: 13px;
   font-weight: 550;
   text-align: left;
-  transition: background 140ms ease, border-color 140ms ease;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
 .new-chat-button:hover {
   background: var(--surface-hover);
-  border-color: #323232;
+  border-color: var(--glass-border-strong);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glow);
 }
 
 .new-chat-button svg,
@@ -157,7 +163,11 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--surface);
+  /* Sticky over a scrolling list: the one place in the sidebar where glass
+     must actually frost, or the items slide through the label. */
+  background: var(--glass-strong);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   margin: 0 10px 8px;
   color: var(--text-faint);
   font-size: 10px;
@@ -245,10 +255,10 @@
   width: 28px;
   height: 28px;
   place-items: center;
-  border: 1px solid #303030;
+  border: 1px solid var(--glass-border-strong);
   border-radius: 8px;
   background: var(--surface-active);
-  color: #d8d8d8;
+  color: var(--text);
   font-size: 11px;
   font-weight: 650;
 }
@@ -276,7 +286,7 @@
   margin-left: auto;
   border-radius: 50%;
   background: var(--success);
-  box-shadow: 0 0 8px rgba(118, 184, 146, 0.35);
+  box-shadow: 0 0 8px rgba(var(--glow-cyan), 0.5);
 }
 
 @media (max-width: 720px) {

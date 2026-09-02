@@ -25,7 +25,7 @@
   overflow-y: auto;
   padding: 22px 20px 48px;
   scrollbar-width: thin;
-  scrollbar-color: #303030 transparent;
+  scrollbar-color: var(--border) transparent;
 }
 
 /* One element whose height IS the transcript's height, so a ResizeObserver can
@@ -46,7 +46,7 @@
   width: fit-content;
   max-width: min(620px, 88%);
   margin: 0 0 20px;
-  color: #d8d8d8;
+  color: var(--text);
   font-size: 14px;
   line-height: 1.65;
 }
@@ -60,10 +60,13 @@
 .chat-message--user {
   margin-left: auto;
   padding: 10px 14px;
-  background: var(--surface-active);
-  border: 1px solid #303030;
+  /* The user's words wear the sky's gold — the same tint a `user` memory
+     carries in the memory sky, so a message and what it becomes match. */
+  background: rgba(var(--glow-gold), 0.075);
+  border: 1px solid rgba(var(--glow-gold), 0.2);
   border-radius: 14px 14px 4px 14px;
-  color: #e4e4e4;
+  box-shadow: inset 0 1px 0 rgba(var(--glow-gold), 0.08);
+  color: #f3ecdc;
 }
 
 .chat-message--assistant {
@@ -73,7 +76,7 @@
 .chat-message__error {
   display: block;
   margin-top: 7px;
-  color: #c98787;
+  color: var(--danger);
   font-size: 11px;
 }
 
@@ -89,7 +92,7 @@
   max-width: 260px;
   max-height: 200px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--glass-border);
   object-fit: contain;
 }
 
@@ -111,7 +114,7 @@
   height: 52px;
   object-fit: cover;
   border-radius: 9px;
-  border: 1px solid #2d2d2d;
+  border: 1px solid var(--glass-border-strong);
 }
 
 .composer-attachment button {
@@ -123,10 +126,10 @@
   display: grid;
   place-items: center;
   padding: 0;
-  background: #1c1c1c;
-  border: 1px solid #3a3a3a;
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-border-strong);
   border-radius: 50%;
-  color: #b5b5b5;
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
@@ -134,7 +137,7 @@
 
 .composer-attachment button:hover {
   color: #fff;
-  border-color: #555;
+  border-color: var(--accent);
 }
 
 /* The dock floats the composer + its note over the thread, so messages frost
@@ -155,37 +158,39 @@
   pointer-events: auto;
 }
 
-/* The composer plate — Semantix's `glass-dark` recipe (styles/effects.css
-   there): a black gradient over blur+saturate, so the input sits BELOW the
-   page instead of floating above it. The alpha is the dial — opaque enough to
-   read as near-black, sheer enough that a message passing under it registers
-   as a moving smear rather than vanishing. */
+/* The composer plate — the sky's glass (memory-sky.css search bar), by way of
+   Semantix's `glass-dark` recipe: an indigo gradient over blur+saturate, so the
+   input sits BELOW the page instead of floating above it. The alpha is the
+   dial — opaque enough to read as a plate, sheer enough that a message passing
+   under it registers as a moving smear rather than vanishing. Focus is a charge:
+   the rim brightens and the plate takes a faint blue halo. */
 .chat-composer {
   width: 100%;
   padding: 13px 13px 10px;
   background: linear-gradient(
     180deg,
-    rgba(0, 0, 0, 0.52) 0%,
-    rgba(0, 0, 0, 0.64) 100%
+    rgba(8, 6, 30, 0.58) 0%,
+    rgba(6, 5, 26, 0.72) 100%
   );
   backdrop-filter: blur(24px) saturate(140%);
   -webkit-backdrop-filter: blur(24px) saturate(140%);
-  border: 1px solid #232323;
+  border: 1px solid var(--glass-border);
   border-radius: 15px;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    inset 0 1px 0 var(--glass-highlight),
     0 8px 40px rgba(0, 0, 0, 0.5),
     0 18px 42px -22px rgba(0, 0, 0, 0.9);
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .chat-composer:focus-within {
-  border-color: rgba(143, 182, 212, 0.42);
+  border-color: rgba(var(--glow-blue), 0.45);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    inset 0 1px 0 var(--glass-highlight),
     0 8px 40px rgba(0, 0, 0, 0.5),
     0 18px 42px -22px rgba(0, 0, 0, 0.9),
-    0 0 0 3px rgba(143, 182, 212, 0.07);
+    0 0 0 3px rgba(var(--glow-blue), 0.08),
+    0 0 28px rgba(var(--glow-blue), 0.12);
 }
 
 .chat-composer textarea {
@@ -204,7 +209,7 @@
 }
 
 .chat-composer textarea::placeholder {
-  color: #686868;
+  color: var(--text-faint);
 }
 
 .chat-composer__toolbar {
@@ -229,14 +234,19 @@
   max-width: 260px;
 }
 
+/* The send button is the charge in the hand — an ice-white orb with a blue
+   halo, the query orb of the memory sky at button size. */
 .composer-send {
   margin-left: auto;
-  background: #d6e2ea;
-  color: #111;
+  background: linear-gradient(145deg, #f2f7ff, #b7dcff);
+  color: #0b1030;
+  box-shadow: 0 0 14px rgba(var(--glow-blue), 0.35);
+  transition: background 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
 .composer-send:hover {
-  background: #e7eef3;
+  background: linear-gradient(145deg, #ffffff, #cfe8ff);
+  box-shadow: 0 0 20px rgba(var(--glow-blue), 0.55);
 }
 
 .composer-send:disabled {
@@ -246,7 +256,7 @@
 
 .composer-note {
   margin: 9px 0 0;
-  color: #4f4f4f;
+  color: var(--text-faint);
   font-size: 10px;
   text-align: center;
 }
@@ -254,7 +264,7 @@
 /* A failed send must not whisper: the error wears the app's error red and a
    readable size, and survives the short-viewport hide below. */
 .composer-note--error {
-  color: #c98787;
+  color: var(--danger);
   font-size: 11.5px;
 }
 

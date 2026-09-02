@@ -4,9 +4,10 @@
   justify-content: space-between;
   min-width: 0;
   padding: 0 20px 0 24px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: rgba(10, 10, 10, 0.82);
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-soft);
   backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
 
 .app-header__title {
@@ -18,7 +19,7 @@
 
 .app-header__title strong {
   overflow: hidden;
-  color: #dcdcdc;
+  color: var(--text);
   font-size: 13px;
   font-weight: 590;
   text-overflow: ellipsis;
@@ -53,7 +54,7 @@
   height: 5px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 8px rgba(143, 182, 212, 0.4);
+  box-shadow: var(--accent-glow);
 }
 
 @media (max-width: 720px) {

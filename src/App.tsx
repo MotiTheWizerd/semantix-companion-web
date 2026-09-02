@@ -87,7 +87,7 @@ export function App() {
   );
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isSky ? " is-sky" : ""}`}>
       {/* The notification pulse line — every view, above everything. */}
       <NotificationStack />
       <AppSidebar
