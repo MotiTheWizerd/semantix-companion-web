@@ -290,7 +290,7 @@ const ChatThread = memo(function ChatThread({
             <Fragment key={message.id}>
               {toolsBefore.length > 0 ? (
                 <article className="chat-message chat-message--assistant chat-message--tool-activity">
-                  <ToolCallChip calls={toolsBefore} />
+                  <ToolCallChip calls={toolsBefore} agentNames={callAgentNames} />
                 </article>
               ) : null}
               {showTextRow ? (
@@ -325,7 +325,7 @@ const ChatThread = memo(function ChatThread({
               ) : null}
               {toolsAfter.length > 0 ? (
                 <article className="chat-message chat-message--assistant chat-message--tool-activity">
-                  <ToolCallChip calls={toolsAfter} />
+                  <ToolCallChip calls={toolsAfter} agentNames={callAgentNames} />
                 </article>
               ) : null}
               {callsAfterMessage.map((thread) => (

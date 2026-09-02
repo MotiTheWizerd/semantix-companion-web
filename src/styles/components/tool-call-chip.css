@@ -1,13 +1,17 @@
-/* ── 📖 tool chip — tool calls made while composing an assistant reply ── */
+/* ── 📖 tool chip — glass pills, one per tool call the companion made ──
+   Each pill is a small glass object in the same grammar as the user's gold
+   bubble: a rim of light, an inset highlight, the afterglow showing through.
+   It wears its tool FAMILY's tint — the sky's own colours — and carries its
+   state in the orb at its end, never in opacity (s531: a working state that
+   renders dimmer than a finished one is invisible). */
 
 .tool-chip {
   margin-top: 7px;
   display: flex;
   flex-wrap: wrap;
-  gap: 5px 12px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-faint);
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
   user-select: none;
 }
 
@@ -18,56 +22,168 @@
 }
 
 .tool-chip__call {
+  --tint: var(--glow-blue);
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 9px 4px 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  color: var(--text-muted);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
 }
 
-/* A tool at work is the brightest thing on the row, not the dimmest — the
-   old opacity fade made "running" read as "disabled" and nobody ever saw a
-   working indicator at all. */
+.tool-chip__call:hover {
+  border-color: var(--glass-border-strong);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 0 14px rgba(var(--tint), 0.14);
+}
+
+/* The families: web is cyan like a reference memory, files violet like an
+   insight, mail and calls gold like a person. Anything unknown is the accent. */
+.tool-chip__call--web {
+  --tint: var(--glow-cyan);
+}
+
+.tool-chip__call--file {
+  --tint: var(--glow-violet);
+}
+
+.tool-chip__call--people {
+  --tint: var(--glow-gold);
+}
+
+.tool-chip__icon {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: rgb(var(--tint));
+  opacity: 0.9;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool-chip__verb {
+  white-space: nowrap;
+}
+
+.tool-chip__arg {
+  max-width: 26ch;
+  color: var(--text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-chip__time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+/* The orb — where the state lives. */
+.tool-chip__orb {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin-left: 2px;
+  border-radius: 50%;
+}
+
+.tool-chip__call--ok .tool-chip__orb {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(var(--glow-cyan), 0.55);
+}
+
+/* A tool at work is the brightest pill on the row: a blue rim, a breathing
+   orb, and a bolt running along its bottom edge. */
 .tool-chip__call--running {
+  border-color: rgba(var(--glow-blue), 0.35);
   color: var(--text-secondary);
 }
 
-.tool-chip__working {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  margin-left: 1px;
-}
-
-.tool-chip__working > span {
-  width: 4px;
-  height: 4px;
+.tool-chip__call--running .tool-chip__orb {
   background: var(--accent);
-  border-radius: 50%;
-  opacity: 0.35;
-  animation: tool-chip-working 1.2s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(var(--glow-blue), 0.8);
+  animation: tool-chip-breathe 1.4s ease-in-out infinite;
 }
 
-.tool-chip__working > span:nth-child(2) {
-  animation-delay: 0.15s;
+.tool-chip__call--running::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--glow-blue), 0.9), transparent);
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  animation: tool-chip-bolt 1.3s linear infinite;
 }
 
-.tool-chip__working > span:nth-child(3) {
-  animation-delay: 0.3s;
+/* A failed call keeps its pill and says why — rose rim, rose orb, the
+   error riding along, never vanishing. */
+.tool-chip__call--error {
+  border-color: rgba(var(--glow-rose), 0.35);
+  background: rgba(var(--glow-rose), 0.06);
 }
 
-@keyframes tool-chip-working {
-  30% {
+.tool-chip__call--error .tool-chip__orb {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(var(--glow-rose), 0.5);
+}
+
+.tool-chip__why {
+  max-width: 32ch;
+  color: var(--danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes tool-chip-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+
+  50% {
+    transform: scale(1.35);
     opacity: 1;
-    transform: translateY(-1.5px);
+  }
+}
+
+@keyframes tool-chip-bolt {
+  from {
+    background-position: -60% 0;
+  }
+
+  to {
+    background-position: 160% 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tool-chip__working > span {
+  .tool-chip__call--running .tool-chip__orb,
+  .tool-chip__call--running::after {
     animation: none;
-    opacity: 0.8;
   }
-}
 
-.tool-chip__error {
-  color: var(--danger);
+  .tool-chip__call--running::after {
+    background: rgba(var(--glow-blue), 0.6);
+  }
 }

@@ -80,6 +80,12 @@ export interface ToolCallChipItem {
   /** The row had already said something when this call was made — the chip
    *  sits below that text, not above it. */
   afterText: boolean;
+  /** When the store first saw this call (ms since epoch) — the clock the
+   *  chip's elapsed time runs from. Stamped here, not by the backend. */
+  startedAt: number;
+  /** How long the call ran, once it has landed (ok or error). null while it
+   *  runs, and for a call whose "running" event was never seen. */
+  elapsedMs: number | null;
 }
 
 /** One tool call's lifecycle on an assistant message — instrument data,

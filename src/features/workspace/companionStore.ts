@@ -163,14 +163,25 @@ function emptyRuntime(isLoading = false): ConversationRuntime {
 }
 
 /** Upsert one tool-call lifecycle event into a message's chip list —
- *  "running" appends, "ok"/"error" replaces the running entry in place. */
+ *  "running" appends, "ok"/"error" replaces the running entry in place and
+ *  closes its clock: the chip shows how long the call took, timed from the
+ *  moment the store first saw it (the backend sends no timestamps). */
 function reconcileToolCall(
   calls: ToolCallChipItem[],
-  event: ToolCallChipItem,
+  event: Omit<ToolCallChipItem, "startedAt" | "elapsedMs">,
+  now: number,
 ): ToolCallChipItem[] {
   const index = calls.findIndex((call) => call.callId === event.callId);
-  if (index < 0) return [...calls, event];
-  return calls.map((call, at) => (at === index ? event : call));
+  if (index < 0) return [...calls, { ...event, startedAt: now, elapsedMs: null }];
+  return calls.map((call, at) => {
+    if (at !== index) return call;
+    const landed = event.status !== "running";
+    return {
+      ...event,
+      startedAt: call.startedAt,
+      elapsedMs: landed ? Math.max(0, now - call.startedAt) : null,
+    };
+  });
 }
 
 function errorMessage(error: unknown): string {
@@ -841,6 +852,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                       detail: event.detail,
                       afterText: event.afterText,
                     },
+                    Date.now(),
                   ),
                 },
               },
