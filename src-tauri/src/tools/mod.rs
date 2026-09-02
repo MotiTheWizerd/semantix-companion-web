@@ -166,7 +166,10 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             }),
         });
     }
-    if context.database_path.is_some() {
+    // The drill rides only with an identity to scope it to: a companion
+    // searches ITS past, and a search with no owner would be a search of
+    // everyone's — so without a companion the model never sees the tool.
+    if context.database_path.is_some() && context.companion_id.is_some() {
         tools.push(ToolDeclaration {
             name: SEARCH_CONVERSATIONS.to_owned(),
             description: concat!(
@@ -628,6 +631,14 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
                 .database_path
                 .clone()
                 .ok_or_else(|| "the conversation archive is not available".to_owned())?;
+            // WHO is asking. From the resolved companion, never from the
+            // model's arguments — and without it the drill does not run at
+            // all. It fails CLOSED: the alternative is one companion reading
+            // every other companion's past (s541, found live).
+            let companion_id = context
+                .companion_id
+                .clone()
+                .ok_or_else(|| "the conversation archive needs to know who is asking".to_owned())?;
             let (query, limit) = parse_search_arguments(&call.arguments)?;
             let fts_query = fts_match_expression(&query)
                 .ok_or_else(|| "give at least one word to search for".to_owned())?;
@@ -635,7 +646,7 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
             let hits = tauri::async_runtime::spawn_blocking(move || {
                 let repository = ChatRepository::open(&path).map_err(String::from)?;
                 repository
-                    .search_messages(&fts_query, exclude.as_deref(), limit)
+                    .search_messages(&fts_query, &companion_id, exclude.as_deref(), limit)
                     .map_err(String::from)
             })
             .await
@@ -1400,6 +1411,38 @@ mod tests {
             .expect("the built-in companion should exist")
     }
 
+    /// The drill fails CLOSED: a context that knows the archive but not who
+    /// is asking gets an error, never everyone's past. (s541 — before this,
+    /// the search ran unscoped and Rook could read Hugin's conversations.)
+    #[tokio::test]
+    async fn the_drill_refuses_to_run_without_knowing_who_is_asking() {
+        let path = mail_fixture("drill-unowned");
+        let call = ToolCall {
+            id: "call-1".to_owned(),
+            name: super::SEARCH_CONVERSATIONS.to_owned(),
+            arguments: r#"{"query":"serpent"}"#.to_owned(),
+        };
+        let unowned = ToolContext {
+            database_path: Some(path.clone()),
+            ..ToolContext::default()
+        };
+        let refused = execute(&call, &unowned)
+            .await
+            .expect_err("an unowned drill must be refused");
+        assert!(refused.contains("who is asking"), "{refused}");
+
+        // The same call, signed, runs — and an empty past is an answer.
+        let owned = ToolContext {
+            database_path: Some(path.clone()),
+            companion_id: Some(built_in(&path)),
+            ..ToolContext::default()
+        };
+        let answered = execute(&call, &owned).await.expect("an owned drill runs");
+        assert!(answered.contains("nothing in your past conversations"), "{answered}");
+
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn an_empty_inbox_says_so_rather_than_failing() {
         let path = mail_fixture("empty");
@@ -1944,12 +1987,23 @@ mod tests {
             serde_json::json!(["name", "description", "body"])
         );
 
-        let archive_only = declarations(&ToolContext {
+        // The archive alone declares no drill: a search needs an owner.
+        let archive_unowned = declarations(&ToolContext {
             database_path: Some("companion.db".into()),
             ..ToolContext::default()
         });
-        assert_eq!(archive_only.len(), 2);
-        assert_eq!(archive_only[0].name, "search_conversations");
+        assert_eq!(archive_unowned.len(), 1);
+        assert_eq!(archive_unowned[0].name, "web_fetch");
+
+        // Signed, the drill leads — the mail and call tools ride on the same
+        // identity, so the count is theirs to assert, not this block's.
+        let archive_signed = declarations(&ToolContext {
+            database_path: Some("companion.db".into()),
+            companion_id: Some("companion-1".to_owned()),
+            ..ToolContext::default()
+        });
+        assert_eq!(archive_signed[0].name, "search_conversations");
+        assert!(archive_signed.iter().any(|declaration| declaration.name == "web_fetch"));
 
         let web_only = declarations(&ToolContext {
             serpapi_api_key: Some("a-key".to_owned()),

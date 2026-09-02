@@ -78,12 +78,18 @@ impl ChatRepository {
         })
     }
 
-    /// Full-text search over every completed user/assistant message, best
-    /// (bm25) matches first. The current conversation is excluded — the model
-    /// already holds it in context; this drill is for the OTHER conversations.
+    /// Full-text search over every completed user/assistant message the
+    /// given companion has had, best (bm25) matches first. The drill is ONE
+    /// companion's raw memory: a conversation belongs to the companion it was
+    /// had with, and no companion can read another's — the same wall the
+    /// UNIQUE memory_agent_name puts around their distilled memories (s491),
+    /// drawn here around the raw ones (s541: Rook could drill Hugin's past).
+    /// The current conversation is excluded — the model already holds it in
+    /// context; this drill is for the OTHER conversations.
     pub(crate) fn search_messages(
         &self,
         query: &str,
+        companion_id: &str,
         exclude_conversation_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<ArchiveHit>, AppError> {
@@ -97,16 +103,17 @@ impl ChatRepository {
                  JOIN messages m ON m.rowid = messages_fts.rowid
                  JOIN conversations c ON c.id = m.conversation_id
                  WHERE messages_fts MATCH ?1
+                   AND c.companion_id = ?2
                    AND m.status = 'completed'
                    AND m.role IN ('user', 'assistant')
-                   AND (?2 IS NULL OR m.conversation_id <> ?2)
+                   AND (?3 IS NULL OR m.conversation_id <> ?3)
                  ORDER BY bm25(messages_fts)
-                 LIMIT ?3",
+                 LIMIT ?4",
             )
             .map_err(AppError::database)?;
 
         let hits = statement
-            .query_map(params![query, exclude_conversation_id, limit], |row| {
+            .query_map(params![query, companion_id, exclude_conversation_id, limit], |row| {
                 Ok(ArchiveHit {
                     conversation_title: row.get(0)?,
                     role: row.get(1)?,
@@ -826,7 +833,7 @@ mod tests {
         );
 
         let hits = repository
-            .search_messages("\"serpent\"", Some(&current), 10)
+            .search_messages("\"serpent\"", &companion_id, Some(&current), 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 2, "only the OTHER conversation's messages match");
         assert!(hits.iter().all(|hit| hit.conversation_title == "Talk about ships"));
@@ -844,9 +851,80 @@ mod tests {
             .begin_assistant_message(&ships, "message-ships-streaming", "test", "test-model", 1_755_800_003_000)
             .expect("streaming message should begin");
         let hits = repository
-            .search_messages("\"serpent\"", None, 10)
+            .search_messages("\"serpent\"", &companion_id, None, 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 3, "both conversations, completed messages only");
+
+        drop(repository);
+        let _ = fs::remove_file(path);
+    }
+
+    /// A second companion on the roster, the way the app makes one: its own
+    /// memory agent, not built-in. Inserted raw because the chat repository
+    /// has no business creating companions.
+    fn companion(path: &std::path::Path, name: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        rusqlite::Connection::open(path)
+            .expect("test database should open")
+            .execute(
+                "INSERT INTO companions (
+                    id, name, memory_agent_name, is_built_in,
+                    model_preference_mode, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 0, 'inherit', 1, 1)",
+                rusqlite::params![id, name, format!("agent-{id}")],
+            )
+            .expect("the companion should insert");
+        id
+    }
+
+    /// The wall between companions, drawn around the RAW memory too: a
+    /// companion's drill reaches only the conversations it was part of.
+    /// s541 — Rook could search Hugin's past, word for word.
+    #[test]
+    fn the_drill_never_crosses_into_another_companions_past() {
+        let (repository, path) = open_repository("drill-walls");
+        let rook = built_in_id(&path);
+        let hugin = companion(&path, "Hugin");
+        seed_conversation(
+            &repository,
+            &rook,
+            "rook-ships",
+            "Rook, my favorite ship is the Long Serpent.",
+            "The Long Serpent — Olaf's flagship, sixty oars.",
+        );
+        seed_conversation(
+            &repository,
+            &hugin,
+            "hugin-ships",
+            "Hugin, between us: the Serpent's keel was rotten.",
+            "I will keep the Serpent's secret.",
+        );
+
+        let rook_hits = repository
+            .search_messages("\"serpent\"", &rook, None, 10)
+            .expect("search should succeed");
+        assert_eq!(rook_hits.len(), 2, "Rook sees exactly his own two turns");
+        assert!(
+            rook_hits.iter().all(|hit| hit.conversation_title == "Talk about rook-ships"),
+            "not one of Hugin's turns leaks into Rook's drill: {:?}",
+            rook_hits.iter().map(|hit| &hit.content).collect::<Vec<_>>()
+        );
+
+        let hugin_hits = repository
+            .search_messages("\"serpent\"", &hugin, None, 10)
+            .expect("search should succeed");
+        assert_eq!(hugin_hits.len(), 2, "Hugin sees exactly his own two turns");
+        assert!(hugin_hits
+            .iter()
+            .all(|hit| hit.conversation_title == "Talk about hugin-ships"));
+
+        // A companion nobody has talked to has nothing to find — not
+        // everyone's past, nothing.
+        let stranger = companion(&path, "Stranger");
+        let stranger_hits = repository
+            .search_messages("\"serpent\"", &stranger, None, 10)
+            .expect("search should succeed");
+        assert!(stranger_hits.is_empty(), "a fresh companion drills an empty past");
 
         drop(repository);
         let _ = fs::remove_file(path);
@@ -933,7 +1011,7 @@ mod tests {
         );
 
         let hits = repository
-            .search_messages("\"dmt\"", None, 10)
+            .search_messages("\"dmt\"", &companion_id, None, 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 2, "both imported turns are drillable");
         assert!(hits.iter().all(|hit| hit.source.as_deref() == Some("claude")));
@@ -945,7 +1023,7 @@ mod tests {
             .expect("the re-drop should succeed");
         assert_eq!(filed, (0, 0));
         let hits = repository
-            .search_messages("\"dmt\"", None, 10)
+            .search_messages("\"dmt\"", &companion_id, None, 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 2, "a re-drop never duplicates messages");
 
@@ -963,7 +1041,7 @@ mod tests {
             .expect("the newer drop should succeed");
         assert_eq!(filed, (0, 1));
         let hits = repository
-            .search_messages("\"dmt\"", None, 10)
+            .search_messages("\"dmt\"", &companion_id, None, 10)
             .expect("search should succeed");
         assert_eq!(hits.len(), 3, "the refreshed conversation carries its new turn");
 
