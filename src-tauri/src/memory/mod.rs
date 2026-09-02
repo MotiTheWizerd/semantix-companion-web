@@ -608,35 +608,116 @@ fn muninn_recall_as_organ(body: &serde_json::Value, channel: &str) -> serde_json
     let hits: Vec<serde_json::Value> = results
         .iter()
         .map(|hit| {
-            let text = |key: &str| {
-                hit.get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            };
-            let name = text("name");
             serde_json::json!({
-                "memory": {
-                    "id": name,
-                    "agent_id": channel,
-                    "name": name,
-                    "description": text("description"),
-                    "body": text("body"),
-                    "mem_type": text("type"),
-                    "importance": hit.get("importance").cloned().unwrap_or(serde_json::json!(0.5)),
-                    "project_tag": channel,
-                    "links": serde_json::Value::Array(Vec::new()),
-                    "access_count": hit.get("access_count").cloned().unwrap_or(serde_json::json!(0)),
-                    "archived_at": hit.get("archived_at").cloned().unwrap_or(serde_json::Value::Null),
-                    "created_at": text("created_at"),
-                    "updated_at": text("updated_at"),
-                },
+                "memory": muninn_memory_as_organ(hit, channel),
                 "score": hit.get("score").cloned().unwrap_or(serde_json::json!(0.0)),
             })
         })
         .collect();
 
     serde_json::json!({ "hits": hits, "vector_leg": vector_leg })
+}
+
+/// One flat Muninn memory in the organ's `MemoryRecord` shape — the per-row
+/// half of the translation above, shared with `read_memory` so a memory
+/// opened from the graph reads exactly like one that arrived through recall.
+/// Muninn's `--get` also answers `links`; carried when present.
+fn muninn_memory_as_organ(row: &serde_json::Value, channel: &str) -> serde_json::Value {
+    let text = |key: &str| {
+        row.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let name = text("name");
+    serde_json::json!({
+        "id": name,
+        "agent_id": channel,
+        "name": name,
+        "description": text("description"),
+        "body": text("body"),
+        "mem_type": text("type"),
+        "importance": row.get("importance").cloned().unwrap_or(serde_json::json!(0.5)),
+        "project_tag": channel,
+        "links": row
+            .get("links")
+            .filter(|links| links.is_array())
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        "access_count": row.get("access_count").cloned().unwrap_or(serde_json::json!(0)),
+        "archived_at": row.get("archived_at").cloned().unwrap_or(serde_json::Value::Null),
+        "created_at": text("created_at"),
+        "updated_at": text("updated_at"),
+    })
+}
+
+/// The whole mind as a graph — nodes, [[link]] edges, semantic edges, position
+/// hints — for the memory sky (s537). Both brains answer the SAME shape (the
+/// organ's `/agents/{id}/graph`, Muninn's `/graph?channel=`), so this is a
+/// pure pipe with no translation step: the frontend's `MemoryGraph` type is
+/// the contract, and the servers already speak it.
+#[tauri::command]
+pub(crate) async fn load_memory_graph(
+    state: State<'_, MemoryState>,
+    agent_id: String,
+    k: Option<u32>,
+    min_sim: Option<f64>,
+    include_archived: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let target = MemoryTarget::resolve(&state.service.companions, &agent_id)?;
+    let client = reqwest::Client::new();
+    let mut query: Vec<(&str, String)> = Vec::new();
+    if let Some(k) = k {
+        query.push(("k", k.to_string()));
+    }
+    if let Some(min_sim) = min_sim {
+        query.push(("min_sim", min_sim.to_string()));
+    }
+    if let Some(include_archived) = include_archived {
+        query.push(("include_archived", include_archived.to_string()));
+    }
+
+    let request = match &target {
+        MemoryTarget::Organ { agent_id } => client
+            .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/graph"))
+            .bearer_auth(organ_bearer().await?),
+        MemoryTarget::Muninn { channel, .. } => {
+            query.push(("channel", channel.clone()));
+            client.get(format!("{MUNINN_BASE}/graph"))
+        }
+    };
+    let response = request
+        .query(&query)
+        // A 2,400-memory mind takes ~2s to draw server-side; leave room.
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|error| format!("The memory organ could not be reached: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("memory graph failed: HTTP {}", status.as_u16()));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("The memory graph could not be read: {error}"))
+}
+
+/// One full memory by name, for the frontend — the graph's click-through.
+/// The same fetch the model's `recall_memory` tool makes, made a command, and
+/// normalised to the organ's shape so the panel reads one contract.
+#[tauri::command]
+pub(crate) async fn read_memory(
+    state: State<'_, MemoryState>,
+    agent_id: String,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let target = MemoryTarget::resolve(&state.service.companions, &agent_id)?;
+    let memory = fetch_memory(&target, name.trim()).await?;
+    Ok(match &target {
+        MemoryTarget::Organ { .. } => memory,
+        MemoryTarget::Muninn { channel, .. } => muninn_memory_as_organ(&memory, channel),
+    })
 }
 
 /// Write one memory into the organ — the pen behind the model's `carve_memory`

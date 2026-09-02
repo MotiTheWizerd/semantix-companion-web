@@ -1,5 +1,6 @@
 import { CompanionMark } from "./CompanionMark";
 import type { Conversation } from "../features/chat/types";
+import type { WorkspaceView } from "../features/workspace/companionStore";
 
 function PlusIcon() {
   return (
@@ -37,10 +38,10 @@ function SettingsIcon() {
 }
 
 interface AppSidebarProps {
-  activeView: "chat" | "settings";
+  activeView: WorkspaceView;
   conversations: Conversation[];
   activeConversationId: string | null;
-  onViewChange: (view: "chat" | "settings") => void;
+  onViewChange: (view: WorkspaceView) => void;
   onNewConversation: () => void;
   onConversationSelect: (conversationId: string) => void;
 }
@@ -75,11 +76,15 @@ export function AppSidebar({
           <ChatIcon />
           <span>Chat</span>
         </button>
-        <a className="sidebar-navigation__item" href="#memory">
+        <button
+          className={`sidebar-navigation__item ${activeView === "memory" ? "is-active" : ""}`}
+          type="button"
+          aria-current={activeView === "memory" ? "page" : undefined}
+          onClick={() => onViewChange("memory")}
+        >
           <MemoryIcon />
           <span>Memory</span>
-          <span className="sidebar-navigation__hint">Soon</span>
-        </a>
+        </button>
       </nav>
 
       {conversations.length > 0 ? (

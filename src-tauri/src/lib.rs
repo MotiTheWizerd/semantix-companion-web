@@ -179,6 +179,8 @@ pub fn run() {
             memory::clear_memory_account_token,
             memory::ensure_memory_agent,
             memory::recall_memories,
+            memory::load_memory_graph,
+            memory::read_memory,
             memory::sleep_conversation,
             import::inspect_import_source,
             import::worker::start_import,

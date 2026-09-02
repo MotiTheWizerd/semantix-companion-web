@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { AppHeader } from "./components/AppHeader";
@@ -8,6 +8,11 @@ import { NotificationStack } from "./components/NotificationStack";
 import { ConversationTabs } from "./components/ConversationTabs";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { bindImportNotifications } from "./features/import/importNotifications";
+
+// The sky carries three.js (~600 kB); the chat never pays for it.
+const MemorySkyView = lazy(() =>
+  import("./features/memory-sky/MemorySkyView").then((m) => ({ default: m.MemorySkyView })),
+);
 import { useCompanionStore } from "./features/workspace/companionStore";
 
 export function App() {
@@ -71,6 +76,7 @@ export function App() {
   }, []);
 
   const isSettings = activeView === "settings";
+  const isSky = activeView === "memory";
   const activeTab = activeTabId ? tabsById[activeTabId] : null;
   const activeConversationId = activeTab?.conversationId ?? null;
   const runtime = activeConversationId
@@ -92,14 +98,25 @@ export function App() {
         onNewConversation={openNewConversation}
         onConversationSelect={(conversationId) => void openConversation(conversationId)}
       />
-      <div className={`app-workspace ${isSettings ? "" : "has-conversation-tabs"}`}>
-        <AppHeader
-          eyebrow={isSettings ? "Companion" : "Conversation"}
-          title={isSettings ? "Settings" : (activeTab?.title ?? "New conversation")}
-          showOptions={!isSettings}
-        />
-        {isSettings ? null : <ConversationTabs />}
-        {isSettings ? (
+      <div
+        className={`app-workspace ${isSky ? "is-sky" : isSettings ? "" : "has-conversation-tabs"}`}
+      >
+        {isSky ? null : (
+          <AppHeader
+            eyebrow={isSettings ? "Companion" : "Conversation"}
+            title={isSettings ? "Settings" : (activeTab?.title ?? "New conversation")}
+            showOptions={!isSettings}
+          />
+        )}
+        {isSettings || isSky ? null : <ConversationTabs />}
+        {isSky ? (
+          <Suspense fallback={<div className="memory-sky" />}>
+            <MemorySkyView
+              companions={companions}
+              initialCompanionId={activeTab?.companionId ?? null}
+            />
+          </Suspense>
+        ) : isSettings ? (
           <SettingsScreen />
         ) : (
           <ChatSurface

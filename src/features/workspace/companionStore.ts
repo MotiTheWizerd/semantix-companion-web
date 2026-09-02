@@ -42,7 +42,7 @@ import {
 } from "../preferences/preferenceService";
 import type { ModelPreference, UserPreferences } from "../preferences/types";
 
-export type WorkspaceView = "chat" | "settings";
+export type WorkspaceView = "chat" | "memory" | "settings";
 
 export interface ConversationTab {
   id: string;
