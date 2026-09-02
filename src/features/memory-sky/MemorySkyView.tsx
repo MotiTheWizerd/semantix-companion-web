@@ -16,8 +16,10 @@ import {
   type MemoryGraph,
   type MemoryRecord,
 } from "../memory/organService";
-import { MemorySky, type SkyHit, type SkyStats } from "./engine/MemorySky";
+import { MemorySky, type SkyFilter, type SkyHit, type SkyStats } from "./engine/MemorySky";
 import { typeTintCss, TYPE_ORDER } from "./palette";
+
+const NO_TYPES: ReadonlySet<string> = new Set();
 
 interface MemorySkyViewProps {
   companions: Companion[];
@@ -35,6 +37,7 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const skyRef = useRef<MemorySky | null>(null);
   const labelRef = useRef<HTMLDivElement | null>(null);
+  const namesRef = useRef<HTMLDivElement | null>(null);
 
   const [companionId, setCompanionId] = useState<string | null>(initialCompanionId);
   const [agentId, setAgentId] = useState<string | null>(null);
@@ -47,6 +50,12 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
   const [isSearching, setIsSearching] = useState(false);
   const [searchNote, setSearchNote] = useState<string | null>(null);
   const [selected, setSelected] = useState<SelectedMemory | null>(null);
+  // The filter is a way of looking, not a property of one mind: it survives
+  // a companion switch. Archived is a reload (the door leaves them out by
+  // default); types and the floor are a lighting pass in the engine.
+  const [hiddenTypes, setHiddenTypes] = useState<ReadonlySet<string>>(NO_TYPES);
+  const [minImportance, setMinImportance] = useState(0);
+  const [showArchived, setShowArchived] = useState(false);
 
   const companion = useMemo(
     () =>
@@ -61,24 +70,28 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const sky = new MemorySky(canvas, {
-      onHover: (node, x, y) => {
-        const label = labelRef.current;
-        if (!label) return;
-        if (!node) {
-          label.hidden = true;
-          return;
-        }
-        label.hidden = false;
-        label.style.transform = `translate(${Math.round(x + 14)}px, ${Math.round(y - 10)}px)`;
-        label.dataset.type = node.memType;
-        label.textContent = node.name;
+    const sky = new MemorySky(
+      canvas,
+      {
+        onHover: (node, x, y) => {
+          const label = labelRef.current;
+          if (!label) return;
+          if (!node) {
+            label.hidden = true;
+            return;
+          }
+          label.hidden = false;
+          label.style.transform = `translate(${Math.round(x + 14)}px, ${Math.round(y - 10)}px)`;
+          label.dataset.type = node.memType;
+          label.textContent = node.name;
+        },
+        onSelect: (node) => {
+          void openMemory(node?.name ?? null);
+        },
+        onStats: setStats,
       },
-      onSelect: (node) => {
-        void openMemory(node?.name ?? null);
-      },
-      onStats: setStats,
-    });
+      namesRef.current,
+    );
     skyRef.current = sky;
     return () => {
       sky.dispose();
@@ -102,7 +115,7 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
         const agent = await companionMemoryAgent(companion?.id ?? null);
         if (cancelled) return;
         setAgentId(agent.agent_id);
-        const loaded = await loadMemoryGraph(agent.agent_id);
+        const loaded = await loadMemoryGraph(agent.agent_id, { includeArchived: showArchived });
         if (cancelled) return;
         setGraph(loaded);
         skyRef.current?.setGraph(loaded);
@@ -115,7 +128,30 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     return () => {
       cancelled = true;
     };
-  }, [companion?.id]);
+  }, [companion?.id, showArchived]);
+
+  useEffect(() => {
+    const filter: SkyFilter = { hiddenTypes, minImportance };
+    skyRef.current?.setFilter(filter);
+  }, [hiddenTypes, minImportance]);
+
+  const toggleType = (type: string) => {
+    setHiddenTypes((current) => {
+      const next = new Set(current);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
+
+  /** Double-click a chip: only that type — or, if it already stands alone,
+   *  everything back. The two clicks before it toggle twice and cancel. */
+  const soloType = (type: string, allTypes: string[]) => {
+    setHiddenTypes((current) => {
+      const alone = !current.has(type) && allTypes.every((t) => t === type || current.has(t));
+      return alone ? NO_TYPES : new Set(allTypes.filter((t) => t !== type));
+    });
+  };
 
   const agentIdRef = useRef<string | null>(null);
   agentIdRef.current = agentId;
@@ -212,6 +248,7 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     <div className="memory-sky">
       <canvas ref={canvasRef} className="memory-sky__canvas" />
       <div className="memory-sky__vignette" aria-hidden="true" />
+      <div ref={namesRef} className="memory-sky__names" aria-hidden="true" />
       <div ref={labelRef} className="memory-sky__label" hidden />
 
       <div className="memory-sky__hud">
@@ -270,7 +307,11 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
       <footer className="memory-sky__stats">
         {graph ? (
           <>
-            <span>{graph.stats.nodes.toLocaleString()} memories</span>
+            <span>
+              {stats && stats.visible < graph.stats.nodes
+                ? `${stats.visible.toLocaleString()} of ${graph.stats.nodes.toLocaleString()} memories`
+                : `${graph.stats.nodes.toLocaleString()} memories`}
+            </span>
             <span>{graph.stats.link_edges.toLocaleString()} links</span>
             <span>{graph.stats.semantic_edges.toLocaleString()} neighbours</span>
             {graph.stats.dangling_links ? (
@@ -278,13 +319,52 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
                 {graph.stats.dangling_links.toLocaleString()} promises
               </span>
             ) : null}
-            <span className="memory-sky__legend">
+            <span className="memory-sky__legend" role="group" aria-label="Show types">
               {typeCounts.map(([type, count]) => (
-                <i key={type} style={{ ["--tint" as string]: typeTintCss(type) }} title={`${count} ${type}`}>
+                <button
+                  key={type}
+                  type="button"
+                  className="memory-sky__chip"
+                  style={{ ["--tint" as string]: typeTintCss(type) }}
+                  aria-pressed={!hiddenTypes.has(type)}
+                  title={`${count} ${type} · click to toggle · double-click for only this`}
+                  onClick={() => toggleType(type)}
+                  onDoubleClick={() => soloType(type, typeCounts.map(([t]) => t))}
+                >
                   {type}
-                </i>
+                </button>
               ))}
+              {hiddenTypes.size ? (
+                <button
+                  type="button"
+                  className="memory-sky__chip is-reset"
+                  onClick={() => setHiddenTypes(NO_TYPES)}
+                  title="Show every type"
+                >
+                  all
+                </button>
+              ) : null}
             </span>
+            <label className="memory-sky__floor" title="Sink memories below this importance">
+              <span>≥ {minImportance.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0}
+                max={0.95}
+                step={0.05}
+                value={minImportance}
+                onChange={(event) => setMinImportance(Number(event.target.value))}
+                aria-label="Importance floor"
+              />
+            </label>
+            <label className="memory-sky__archived" title="Archived memories, drawn as ghosts">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />
+              archived
+            </label>
           </>
         ) : null}
         {stats ? (

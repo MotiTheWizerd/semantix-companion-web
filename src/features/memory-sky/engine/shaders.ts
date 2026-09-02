@@ -41,6 +41,7 @@ export const ORB_VERTEX = /* glsl */ `
   attribute float aLit;
   attribute float aPulse;
   attribute float aGhost;   // archived
+  attribute float aHide;    // the filter sank it (a hit or the open memory never is)
   varying vec3 vColor;
   varying float vHeat;
   varying float vEnergy;
@@ -50,7 +51,7 @@ export const ORB_VERTEX = /* glsl */ `
   void main() {
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     float pulse = uTime >= aPulse ? exp(-(uTime - aPulse) * 1.6) : 0.0;
-    float energy = max(aLit, pulse);
+    float energy = max(aLit, pulse) * (1.0 - aHide);
     float breathe = 1.0 + 0.06 * sin(uTime * 1.7 + aSeed * 6.2831);
     float world = aSize * breathe * (1.0 + 0.55 * energy);
     float depth = max(-mv.z, 1.0);
@@ -65,6 +66,8 @@ export const ORB_VERTEX = /* glsl */ `
     vGhost = aGhost;
     float dim = mix(1.0, 0.10, uFocus * (1.0 - max(aLit, pulse)));
     dim *= 0.15 + 0.85 * smoothstep(1800.0, 250.0, depth);
+    // sunk by the filter: a trace, so the shape of the mind stays legible
+    dim *= mix(1.0, 0.06, aHide);
     vDim = dim;
   }
 `;
@@ -118,6 +121,7 @@ export const BOLT_VERTEX = /* glsl */ `
   attribute float aLit;
   attribute float aPulse;
   attribute float aFrom;    // 0: the strike leaves aSrc · 1: it leaves aDst
+  attribute float aHide;    // the filter sank an end of it
   attribute vec3 aColorA;
   attribute vec3 aColorB;
   varying float vSide;
@@ -146,7 +150,7 @@ export const BOLT_VERTEX = /* glsl */ `
                  + step(tt, front) * 0.3 * exp(-(front - tt) * 5.0);
     float stroke = exp(-(age - uTravel) * 1.8);
     float pulse = age < 0.0 ? 0.0 : (age < uTravel ? leader : stroke);
-    float energy = max(aLit, pulse);
+    float energy = max(aLit, pulse) * (1.0 - aHide);
     float spell = step(1.5, aKind);
     // A written link crackles; a semantic neighbour barely stirs unless lit.
     float alive = mix(0.35 + 0.65 * aKind, 1.0, energy) + spell;
@@ -176,6 +180,7 @@ export const BOLT_VERTEX = /* glsl */ `
     vColor = mix(aColorA, aColorB, aT);
     float base = mix(0.26 * aWeight * aWeight, 0.7, min(aKind, 1.0)) * uDensity + 1.1 * spell;
     float dimmed = mix(1.0, 0.05, uFocus * (1.0 - max(aLit, spell)));
+    dimmed *= mix(1.0, 0.04, aHide);
     vIntensity = (base * dimmed + energy * (0.9 + 0.6 * uDensity))
                * (0.25 + 0.75 * smoothstep(2200.0, 200.0, depth));
   }

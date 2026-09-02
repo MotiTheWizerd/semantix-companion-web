@@ -39,7 +39,7 @@ import {
 } from "d3-force-3d";
 
 import type { MemoryGraph, MemoryGraphNode } from "../../memory/organService";
-import { typeColor, VOID_COLOR } from "../palette";
+import { typeColor, typeTintCss, VOID_COLOR } from "../palette";
 import {
   BOLT_FRAGMENT,
   BOLT_SEGMENTS,
@@ -84,10 +84,19 @@ export interface SkyHit {
 
 export interface SkyStats {
   nodes: number;
+  /** Nodes the filter leaves standing. */
+  visible: number;
   edges: number;
   fps: number;
   renderScale: number;
   settled: boolean;
+}
+
+/** What the sky shows at rest. Filtered-out memories sink to ghost (and
+ *  their bolts with them); a hit or the open memory always overrides. */
+export interface SkyFilter {
+  hiddenTypes: ReadonlySet<string>;
+  minImportance: number;
 }
 
 export interface SkyCallbacks {
@@ -104,6 +113,11 @@ const DUST_COUNT = 1800;
 const PICK_RADIUS_PX = 18;
 const IDLE_RESUME_MS = 7000;
 const FIRE_EVERY_MS: [number, number] = [2200, 4600];
+/** Named orbs: DOM tags projected each frame. At rest the most important
+ *  8–20 (scales with the mind); during a spell the hits; with a memory open,
+ *  it and its neighbours. Never more than this many elements exist. */
+const MAX_LABELS = 32;
+const LABEL_HEIGHT_PX = 18;
 
 const RENDER_SCALES = [1, 0.8, 0.6];
 /** A strike's leader takes this long to cross a bolt (any length — long bolts
@@ -125,6 +139,13 @@ interface Tween {
 
 function easeInOut(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/** GLSL's smoothstep, edges in either order — the shaders fade by depth
+ *  with the far edge first, and the labels must fade on the same curve. */
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
 }
 
 /** A memory's own dice: FNV-1a of its name seeding a tiny mulberry32, so the
@@ -159,6 +180,7 @@ export class MemorySky {
   private edges: SkyEdge[] = [];
   private byName = new Map<string, SkyNode>();
   private adjacency: number[][] = []; // node index → edge indices
+  private ranked: SkyNode[] = []; // by importance, then heat — the label order
   private simulation: Simulation<SkyNode> | null = null;
   private settled = false;
   private radius = 200;
@@ -170,6 +192,7 @@ export class MemorySky {
   private orbPosition!: Float32BufferAttribute;
   private orbLit!: Float32BufferAttribute;
   private orbPulse!: Float32BufferAttribute;
+  private orbHide!: Float32BufferAttribute;
 
   // bolts
   private boltGeometry: InstancedBufferGeometry | null = null;
@@ -181,10 +204,25 @@ export class MemorySky {
   private boltPulse!: InstancedBufferAttribute;
   private boltFrom!: InstancedBufferAttribute; // 0: the strike leaves aSrc · 1: leaves aDst
   private boltWeight!: InstancedBufferAttribute;
+  private boltHide!: InstancedBufferAttribute;
 
   // dust
   private dustMaterial: ShaderMaterial;
   private dust: Points | null = null;
+
+  // the filter
+  private filter: SkyFilter = { hiddenTypes: new Set(), minImportance: 0 };
+  private filteredOut = new Uint8Array(0); // per node: 1 = the filter sank it
+  private visible = 0;
+
+  // labels — DOM, owned by the view, driven from here
+  private labelSlots: HTMLDivElement[] = [];
+  private labelNames: string[] = []; // what each slot currently says
+  private labelWidths: number[] = []; // measured once per assignment
+  private labelNodes: SkyNode[] = []; // slot k names labelNodes[k]
+  private labelCount = 12; // how many at rest; set per mind
+  private readonly labelRects: number[] = []; // scratch: x0 y0 x1 y1 per placed label
+  private readonly scratch = new Vector3();
 
   // the spell
   private hits: SkyHit[] = [];
@@ -209,9 +247,22 @@ export class MemorySky {
   private disposed = false;
   private readonly resizeObserver: ResizeObserver;
 
-  constructor(canvas: HTMLCanvasElement, callbacks: SkyCallbacks = {}) {
+  /** `labelLayer` is an empty, absolutely-positioned element the view places
+   *  in its own stacking order (under the HUD, over the canvas); the engine
+   *  fills it with tags and moves them. Null draws no names. */
+  constructor(canvas: HTMLCanvasElement, callbacks: SkyCallbacks = {}, labelLayer: HTMLElement | null = null) {
     this.canvas = canvas;
     this.callbacks = callbacks;
+    if (labelLayer) {
+      for (let k = 0; k < MAX_LABELS; k += 1) {
+        const tag = document.createElement("div");
+        tag.className = "memory-sky__tag";
+        labelLayer.appendChild(tag);
+        this.labelSlots.push(tag);
+        this.labelNames.push("");
+        this.labelWidths.push(0);
+      }
+    }
 
     this.renderer = new WebGLRenderer({
       canvas,
@@ -320,6 +371,14 @@ export class MemorySky {
       this.adjacency[e.source.index].push(e.index);
       this.adjacency[e.target.index].push(e.index);
     }
+    this.ranked = [...nodes].sort(
+      (a, b) => b.importance - a.importance || b.accessCount - a.accessCount || a.name.localeCompare(b.name),
+    );
+    // 8 names on a small mind, 20 on a big one — enough to orient, never a
+    // wall. Studio (2,385) lands at 20; a 150-memory companion at 8.
+    this.labelCount = Math.min(20, Math.max(8, Math.round(0.4 * Math.sqrt(nodes.length))));
+    this.filteredOut = new Uint8Array(nodes.length);
+    this.computeFilter();
 
     // The sky's scale grows with the mind: ~40 units per cube-root memory.
     this.radius = Math.max(120, 40 * Math.cbrt(Math.max(nodes.length, 1)));
@@ -327,6 +386,7 @@ export class MemorySky {
     this.buildOrbs();
     this.buildBolts();
     this.buildSimulation();
+    this.applyLighting(); // nothing lit yet — this writes the filter and the names
     this.settled = false;
     // A new mind gets a fresh reading at full scale — the last mind's verdict
     // says nothing about this one.
@@ -391,6 +451,18 @@ export class MemorySky {
     this.flyToCentroid(this.hitNodes);
   }
 
+  /** Sink what the filter excludes. Cheap — one pass over the lighting
+   *  arrays, no geometry rebuilt — so a chip click is instant on any mind.
+   *  Kept across setGraph: a filter is a way of looking, not a property of
+   *  one mind. */
+  setFilter(filter: SkyFilter): void {
+    this.filter = filter;
+    if (!this.orbGeometry) return;
+    this.computeFilter();
+    this.applyLighting();
+    this.emitStats();
+  }
+
   select(name: string | null): void {
     if (!this.orbGeometry) return;
     const node = name ? (this.byName.get(name) ?? null) : null;
@@ -419,6 +491,8 @@ export class MemorySky {
     this.canvas.removeEventListener("click", this.onClick);
     this.controls.dispose();
     this.clearScene();
+    for (const tag of this.labelSlots) tag.remove();
+    this.labelSlots = [];
     this.dust?.geometry.dispose();
     this.orbMaterial.dispose();
     this.boltMaterial.dispose();
@@ -475,6 +549,7 @@ export class MemorySky {
     const lit = new Float32Array(count);
     const pulse = new Float32Array(count).fill(NEVER);
     const ghost = new Float32Array(count);
+    const hide = new Float32Array(count);
 
     const maxAccess = this.nodes.reduce((m, n) => Math.max(m, n.accessCount), 1);
     for (const n of this.nodes) {
@@ -502,6 +577,7 @@ export class MemorySky {
     this.orbPosition = new Float32BufferAttribute(position, 3);
     this.orbLit = new Float32BufferAttribute(lit, 1);
     this.orbPulse = new Float32BufferAttribute(pulse, 1);
+    this.orbHide = new Float32BufferAttribute(hide, 1);
     geometry.setAttribute("position", this.orbPosition);
     geometry.setAttribute("aColor", new Float32BufferAttribute(color, 3));
     geometry.setAttribute("aSize", new Float32BufferAttribute(size, 1));
@@ -510,6 +586,7 @@ export class MemorySky {
     geometry.setAttribute("aLit", this.orbLit);
     geometry.setAttribute("aPulse", this.orbPulse);
     geometry.setAttribute("aGhost", new Float32BufferAttribute(ghost, 1));
+    geometry.setAttribute("aHide", this.orbHide);
     geometry.setDrawRange(0, this.nodes.length);
     this.orbGeometry = geometry;
     this.orbs = new Points(geometry, this.orbMaterial);
@@ -554,6 +631,7 @@ export class MemorySky {
     const lit = new Float32Array(count);
     const pulse = new Float32Array(count).fill(NEVER);
     const from = new Float32Array(count);
+    const hide = new Float32Array(count);
     const colorA = new Float32Array(count * 3);
     const colorB = new Float32Array(count * 3);
     for (const e of this.edges) {
@@ -580,6 +658,7 @@ export class MemorySky {
     this.boltPulse = new InstancedBufferAttribute(pulse, 1);
     this.boltFrom = new InstancedBufferAttribute(from, 1);
     this.boltWeight = new InstancedBufferAttribute(weight, 1);
+    this.boltHide = new InstancedBufferAttribute(hide, 1);
     geometry.setAttribute("aSrc", this.boltSrc);
     geometry.setAttribute("aDst", this.boltDst);
     geometry.setAttribute("aSeed", new InstancedBufferAttribute(seed, 1));
@@ -588,6 +667,7 @@ export class MemorySky {
     geometry.setAttribute("aLit", this.boltLit);
     geometry.setAttribute("aPulse", this.boltPulse);
     geometry.setAttribute("aFrom", this.boltFrom);
+    geometry.setAttribute("aHide", this.boltHide);
     geometry.setAttribute("aColorA", new InstancedBufferAttribute(colorA, 3));
     geometry.setAttribute("aColorB", new InstancedBufferAttribute(colorB, 3));
     geometry.instanceCount = this.edges.length;
@@ -672,6 +752,8 @@ export class MemorySky {
     this.focus = 0;
     this.focusTarget = 0;
     this.tweens = [];
+    this.labelNodes = [];
+    for (const tag of this.labelSlots) tag.style.opacity = "0";
   }
 
   // ── per-frame ─────────────────────────────────────────────────────────
@@ -716,6 +798,9 @@ export class MemorySky {
     if (this.hitNodes.length === 0 && !this.selected && nowMs >= this.nextFireAt) this.fire(nowMs);
 
     this.renderer.render(this.scene, this.camera);
+    // after render: the camera's matrices are this frame's, so the names sit
+    // exactly on their orbs rather than one frame behind
+    if (this.labelSlots.length) this.writeLabels();
     if ((nowMs | 0) % 500 < dt) this.emitStats();
   };
 
@@ -800,6 +885,16 @@ export class MemorySky {
     this.orbLit.needsUpdate = true;
     this.boltLit.needsUpdate = true;
 
+    // The filter sinks what it excludes — unless the memory is a hit or the
+    // one open: you asked for it by name, so the chips do not get to hide it.
+    // A bolt sinks with either end.
+    const hide = this.orbHide.array as Float32Array;
+    for (const n of this.nodes) hide[n.index] = this.filteredOut[n.index] && lit[n.index] < 0.9 ? 1 : 0;
+    const bhide = this.boltHide.array as Float32Array;
+    for (const e of this.edges) bhide[e.index] = Math.max(hide[e.source.index], hide[e.target.index]);
+    this.orbHide.needsUpdate = true;
+    this.boltHide.needsUpdate = true;
+
     // spell bolts: weight = score, instance count = hits
     const weight = this.boltWeight.array as Float32Array;
     this.hits.forEach((h, k) => {
@@ -808,6 +903,117 @@ export class MemorySky {
     this.boltWeight.needsUpdate = true;
     if (this.boltGeometry) this.boltGeometry.instanceCount = this.edges.length + this.hitNodes.length;
     this.orbGeometry?.setDrawRange(0, this.nodes.length + (this.hitNodes.length ? 1 : 0));
+
+    this.chooseLabels();
+  }
+
+  private computeFilter(): void {
+    const { hiddenTypes, minImportance } = this.filter;
+    let visible = 0;
+    for (const n of this.nodes) {
+      const out = hiddenTypes.has(n.memType) || n.importance < minImportance;
+      this.filteredOut[n.index] = out ? 1 : 0;
+      if (!out) visible += 1;
+    }
+    this.visible = visible;
+  }
+
+  // ── names ─────────────────────────────────────────────────────────────
+
+  /** Which memories carry a name right now. At rest: the most important
+   *  ones the filter leaves. During a spell: the hits, in rank order. With a
+   *  memory open: it first, then its neighbours by importance. Text is set
+   *  (and measured) only when a slot's memory changes. */
+  private chooseLabels(): void {
+    if (!this.labelSlots.length) return;
+    let pool: SkyNode[] = [];
+    if (this.hitNodes.length) {
+      pool = this.selected && !this.hitNodes.includes(this.selected)
+        ? [this.selected, ...this.hitNodes]
+        : [...this.hitNodes];
+    } else if (this.selected) {
+      const node = this.selected;
+      const around = new Set<SkyNode>();
+      for (const ei of this.adjacency[node.index]) {
+        const e = this.edges[ei];
+        const other = e.source === node ? e.target : e.source;
+        if (!this.filteredOut[other.index]) around.add(other);
+      }
+      pool = [node, ...[...around].sort((a, b) => b.importance - a.importance).slice(0, 11)];
+    } else {
+      for (const n of this.ranked) {
+        if (pool.length >= this.labelCount) break;
+        if (!this.filteredOut[n.index]) pool.push(n);
+      }
+    }
+    this.labelNodes = pool.slice(0, MAX_LABELS);
+    this.labelNodes.forEach((node, k) => {
+      if (this.labelNames[k] === node.name) return;
+      const tag = this.labelSlots[k];
+      tag.textContent = node.name;
+      tag.dataset.type = node.memType;
+      tag.style.setProperty("--tint", typeTintCss(node.memType));
+      this.labelNames[k] = node.name;
+      this.labelWidths[k] = tag.offsetWidth;
+    });
+    for (let k = this.labelNodes.length; k < this.labelSlots.length; k += 1) {
+      this.labelSlots[k].style.opacity = "0";
+    }
+  }
+
+  /** Project each named orb and park its tag just right of the sprite.
+   *  Fades with depth on the orbs' own curve; sinks with the spell unless
+   *  lit; a tag that would sit on another is dropped (rank wins). ~20 DOM
+   *  writes a frame — nothing next to 14k bolts. */
+  private writeLabels(): void {
+    const count = this.labelNodes.length;
+    if (!count) return;
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    const proj = this.orbMaterial.uniforms.uProj.value as number;
+    const maxPoint = this.orbMaterial.uniforms.uMaxPoint.value as number;
+    const ratio = this.renderer.getPixelRatio();
+    const lit = this.orbLit.array as Float32Array;
+    const rects = this.labelRects;
+    rects.length = 0;
+    const v = this.scratch;
+
+    for (let k = 0; k < count; k += 1) {
+      const node = this.labelNodes[k];
+      const tag = this.labelSlots[k];
+      v.set(node.x, node.y, node.z).applyMatrix4(this.camera.matrixWorldInverse);
+      const depth = Math.max(-v.z, 1);
+      v.applyMatrix4(this.camera.projectionMatrix);
+      // behind the camera, or the hover label already says this name
+      if (v.z > 1 || v.z < -1 || node === this.hovered) {
+        tag.style.opacity = "0";
+        continue;
+      }
+      const sx = (v.x + 1) * 0.5 * width;
+      const sy = (1 - v.y) * 0.5 * height;
+      // the orb's on-screen diameter, in CSS px — same formula as the shader
+      const orbPx = Math.min(((7 + 17 * node.importance) * proj) / depth, maxPoint) / ratio;
+      const x = Math.round(sx + orbPx * 0.5 + 6);
+      const y = Math.round(sy - LABEL_HEIGHT_PX / 2);
+      const w = this.labelWidths[k];
+      if (x > width || x + w < 0 || y > height || y + LABEL_HEIGHT_PX < 0) {
+        tag.style.opacity = "0";
+        continue;
+      }
+      let covered = false;
+      for (let r = 0; r < rects.length && !covered; r += 4) {
+        covered = x < rects[r + 2] && x + w > rects[r] && y < rects[r + 3] && y + LABEL_HEIGHT_PX > rects[r + 1];
+      }
+      if (covered) {
+        tag.style.opacity = "0";
+        continue;
+      }
+      rects.push(x, y, x + w, y + LABEL_HEIGHT_PX);
+      let alpha = 0.3 + 0.7 * smoothstep(2400, 300, depth);
+      if (lit[node.index] < 0.9) alpha *= 1 - this.focus;
+      tag.style.transform = `translate(${x}px, ${y}px)`;
+      tag.style.opacity = alpha.toFixed(2);
+    }
   }
 
   /** A resting mind still fires: one memory lights, its bolts carry the
@@ -815,14 +1021,16 @@ export class MemorySky {
   private fire(nowMs: number): void {
     const [lo, hi] = FIRE_EVERY_MS;
     this.nextFireAt = nowMs + lo + Math.random() * (hi - lo);
-    if (!this.nodes.length) return;
-    // importance-weighted pick, cheap rejection sampling
+    if (!this.visible) return;
+    // importance-weighted pick, cheap rejection sampling; a sunk memory
+    // does not fire — the filter is what the sky IS right now
     let node: SkyNode | null = null;
-    for (let tries = 0; tries < 8 && !node; tries += 1) {
+    for (let tries = 0; tries < 12 && !node; tries += 1) {
       const candidate = this.nodes[(Math.random() * this.nodes.length) | 0];
+      if (this.filteredOut[candidate.index]) continue;
       if (Math.random() < 0.3 + 0.7 * candidate.importance) node = candidate;
     }
-    node ??= this.nodes[(Math.random() * this.nodes.length) | 0];
+    if (!node) return;
     const t = this.now();
     this.orbPulse.setX(node.index, t);
     for (const ei of this.adjacency[node.index]) {
@@ -922,8 +1130,9 @@ export class MemorySky {
     let bestD = PICK_RADIUS_PX * PICK_RADIUS_PX;
     const dimmed = this.focus > 0.5;
     const lit = this.orbLit.array as Float32Array;
+    const hide = this.orbHide.array as Float32Array;
     for (const n of this.nodes) {
-      if (dimmed && lit[n.index] < 0.3) continue; // sunk orbs are not there
+      if (hide[n.index] > 0 || (dimmed && lit[n.index] < 0.3)) continue; // sunk orbs are not there
       v.set(n.x, n.y, n.z).project(this.camera);
       if (v.z > 1) continue;
       const sx = (v.x + 1) * 0.5 * width;
@@ -996,6 +1205,7 @@ export class MemorySky {
   private emitStats(): void {
     this.callbacks.onStats?.({
       nodes: this.nodes.length,
+      visible: this.visible,
       edges: this.edges.length,
       fps: Math.round(this.fps),
       renderScale: RENDER_SCALES[this.renderScaleIndex],
