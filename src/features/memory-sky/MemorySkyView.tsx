@@ -12,15 +12,100 @@ import { type Companion } from "../companions/types";
 import { companionMemoryAgent } from "../memory/baseAgent";
 import {
   loadMemoryGraph,
+  loadMemoryNodes,
   readMemory,
   recallMemories,
   type MemoryGraph,
   type MemoryRecord,
 } from "../memory/organService";
-import { MemorySky, type SkyFilter, type SkyHit, type SkyStats } from "./engine/MemorySky";
+import { onMemorySlept } from "../memory/sleepService";
+import { edgeKey, MemorySky, type SkyFilter, type SkyHit, type SkyStats } from "./engine/MemorySky";
 import { typeTintCss, TYPE_ORDER } from "./palette";
 
 const NO_TYPES: ReadonlySet<string> = new Set();
+
+/** THE LIVING SKY (s545). The sleeper carves while the app is used, so the
+ *  mind on screen is only ever a photograph unless something tells it. Two
+ *  things do:
+ *
+ *  · a pass that lands WHILE the sky is up grows it — the newborn is appended
+ *    and struck, and the layout makes room;
+ *  · a pass that landed while it was NOT up arrives inside the graph itself,
+ *    so the memories carved since this mind was last looked at are struck on
+ *    arrival. Without this the beautiful moment would need him to be on the
+ *    right screen at the right second, which is almost never.
+ *
+ *  The watermark is the newest `created_at` already shown, per mind, for this
+ *  run of the app. A mind's FIRST look strikes nothing — 2,400 memories are
+ *  not news — it just sets the mark. */
+const SEEN_UNTIL = new Map<string, number>();
+/** A long absence is still one arrival, not a light show. */
+const MAX_REPLAY_STRIKES = 24;
+/** How long the sky says what it just learned. */
+const BIRTH_NOTE_MS = 7000;
+
+/** Fold a delta from `/graph/nodes` into the loaded graph, so the footer's
+ *  counts and the type chips stay true to what is on screen. `dangling_links`
+ *  adds: a promise a newborn makes is new, and one it FULFILS is only
+ *  subtracted on the next full draw. */
+function mergeDelta(base: MemoryGraph, delta: MemoryGraph): MemoryGraph {
+  const nodes = base.nodes.slice();
+  const at = new Map(base.nodes.map((node, index) => [node.name, index]));
+  for (const node of delta.nodes) {
+    const index = at.get(node.name);
+    if (index === undefined) {
+      at.set(node.name, nodes.length);
+      nodes.push(node);
+    } else {
+      nodes[index] = node;
+    }
+  }
+  const edges = base.edges.slice();
+  const drawn = new Set(base.edges.map((e) => edgeKey(e.kind, e.source, e.target)));
+  for (const edge of delta.edges) {
+    const key = edgeKey(edge.kind, edge.source, edge.target);
+    if (drawn.has(key)) continue;
+    drawn.add(key);
+    edges.push(edge);
+  }
+  return {
+    nodes,
+    edges,
+    stats: {
+      ...base.stats,
+      nodes: nodes.length,
+      link_edges: edges.reduce((n, e) => n + (e.kind === "link" ? 1 : 0), 0),
+      semantic_edges: edges.reduce((n, e) => n + (e.kind === "semantic" ? 1 : 0), 0),
+      dangling_links: base.stats.dangling_links + delta.stats.dangling_links,
+    },
+  };
+}
+
+/** Memories in this graph carved after `since` — oldest first, capped. */
+function bornSince(graph: MemoryGraph, since: number): string[] {
+  return graph.nodes
+    .filter((node) => Date.parse(node.created_at) > since)
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+    .slice(-MAX_REPLAY_STRIKES)
+    .map((node) => node.name);
+}
+
+function newestCarve(graph: MemoryGraph): number {
+  let newest = 0;
+  for (const node of graph.nodes) {
+    const at = Date.parse(node.created_at);
+    if (at > newest) newest = at;
+  }
+  return newest;
+}
+
+/** What the sky just learned, said in the chrome. One memory gets its NAME —
+ *  a birth on a 2,459-memory mind is unreadable otherwise, and the name is
+ *  also the way back to it after the hold lets go. */
+function bornNote(names: string[]): { text: string; open: string | null } {
+  if (names.length === 1) return { text: `Just carved · ${names[0]}`, open: names[0] };
+  return { text: `${names.length} memories were just carved.`, open: null };
+}
 
 interface MemorySkyViewProps {
   companions: Companion[];
@@ -57,6 +142,32 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
   const [hiddenTypes, setHiddenTypes] = useState<ReadonlySet<string>>(NO_TYPES);
   const [minImportance, setMinImportance] = useState(0);
   const [showArchived, setShowArchived] = useState(false);
+  /** What the mind just learned, said for a few seconds under the search. */
+  const [birthNote, setBirthNote] = useState<{ text: string; open: string | null } | null>(null);
+
+  const agentIdRef = useRef<string | null>(null);
+  agentIdRef.current = agentId;
+  const showArchivedRef = useRef(showArchived);
+  showArchivedRef.current = showArchived;
+  const birthTimerRef = useRef<number | null>(null);
+
+  const announceBirth = useCallback((names: string[]) => {
+    if (!names.length) return;
+    setBirthNote(bornNote(names));
+    if (birthTimerRef.current) window.clearTimeout(birthTimerRef.current);
+    birthTimerRef.current = window.setTimeout(() => setBirthNote(null), BIRTH_NOTE_MS);
+  }, []);
+  // The engine is built once and outlives every render; it reaches the current
+  // announcer through this rather than being rebuilt to capture a new one.
+  const announceBirthRef = useRef(announceBirth);
+  announceBirthRef.current = announceBirth;
+
+  useEffect(
+    () => () => {
+      if (birthTimerRef.current) window.clearTimeout(birthTimerRef.current);
+    },
+    [],
+  );
 
   const companion = useMemo(
     () =>
@@ -90,6 +201,7 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
           void openMemory(node?.name ?? null);
         },
         onStats: setStats,
+        onStruck: (names) => announceBirthRef.current?.(names),
       },
       namesRef.current,
     );
@@ -120,6 +232,12 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
         if (cancelled) return;
         setGraph(loaded);
         skyRef.current?.setGraph(loaded);
+        // What this mind learned since it was last looked at, struck on
+        // arrival. First look sets the mark and stays calm.
+        const since = SEEN_UNTIL.get(agent.agent_id);
+        SEEN_UNTIL.set(agent.agent_id, newestCarve(loaded));
+        // The strike waits for the layout to rest, and announces itself then.
+        if (since !== undefined) skyRef.current?.strike(bornSince(loaded, since));
       } catch (error: unknown) {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error));
       } finally {
@@ -154,8 +272,42 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     });
   };
 
-  const agentIdRef = useRef<string | null>(null);
-  agentIdRef.current = agentId;
+  // ── the living sky ────────────────────────────────────────────────────
+  // A pass that lands while this view is up grows the mind on screen: fetch
+  // only what was carved and its edges, append, strike. The whole graph is
+  // never refetched — that is 3.6MB and a lost layout on a big mind.
+  useEffect(() => {
+    if (!agentId) return;
+    let stopped = false;
+    let unlisten: (() => void) | undefined;
+    void onMemorySlept((event) => {
+      if (stopped || event.kind !== "carved") return;
+      if (event.agentId !== agentIdRef.current || !event.memories.length) return;
+      void (async () => {
+        const sky = skyRef.current;
+        const agent = agentIdRef.current;
+        if (!sky || !agent) return;
+        try {
+          const delta = await loadMemoryNodes(agent, event.memories, {
+            includeArchived: showArchivedRef.current,
+          });
+          if (stopped || !delta.nodes.length) return;
+          sky.addMemories(delta); // strikes, and announces through onStruck
+          setGraph((current) => (current ? mergeDelta(current, delta) : current));
+          SEEN_UNTIL.set(agent, Math.max(SEEN_UNTIL.get(agent) ?? 0, newestCarve(delta)));
+        } catch {
+          // The sky simply does not grow this time; the next full draw has it.
+        }
+      })();
+    }).then((fn) => {
+      if (stopped) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      stopped = true;
+      unlisten?.();
+    };
+  }, [agentId]);
 
   /** Open one memory by name: the sky flies there and lights it, the panel
    *  reads it. Null closes the panel and lets the sky rest. */
@@ -229,6 +381,9 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
         event.preventDefault();
         clearSearch();
         (document.activeElement as HTMLElement | null)?.blur?.();
+      } else if (skyRef.current?.rest()) {
+        // A birth was holding the sky; Esc lets it go early.
+        event.preventDefault();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -285,6 +440,20 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
         ) : null}
       </div>
 
+      {birthNote ? (
+        birthNote.open ? (
+          <button
+            type="button"
+            className="memory-sky__note is-born"
+            title="Open this memory"
+            onClick={() => void openMemory(birthNote.open)}
+          >
+            {birthNote.text}
+          </button>
+        ) : (
+          <p className="memory-sky__note is-born">{birthNote.text}</p>
+        )
+      ) : null}
       {searchNote ? <p className="memory-sky__note">{searchNote}</p> : null}
       {loadError ? <p className="memory-sky__note is-error">{loadError}</p> : null}
       {isLoading ? <p className="memory-sky__note">Drawing the mind…</p> : null}

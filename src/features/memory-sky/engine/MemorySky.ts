@@ -103,6 +103,10 @@ export interface SkyCallbacks {
   onHover?: (node: SkyNode | null, x: number, y: number) => void;
   onSelect?: (node: SkyNode | null) => void;
   onStats?: (stats: SkyStats) => void;
+  /** Newborn memories actually flashed — fired when the strike PLAYS, which
+   *  may be seconds after it was asked for if the layout was still settling.
+   *  The chrome says what the mind learned on this beat, not the earlier one. */
+  onStruck?: (names: string[]) => void;
 }
 
 /** Room kept at the end of the buffers for the spell: one orb for the query,
@@ -129,6 +133,18 @@ const BOLT_HALF_WIDTH_PX = 2.4;
 const ORB_MAX_PX = 150;
 /** Edge count at which additive stacking starts to wash out; intensity sinks past it. */
 const DENSE_EDGES = 1500;
+/** A growth pass throws the layout this hard, and it lands this fast — ~90
+ *  ticks, a second and a half of the sky making room. A full alpha would send
+ *  every memory sliding out from under the eye watching the newborn arrive. */
+const GROWTH_ALPHA = 0.3;
+const GROWTH_ALPHA_DECAY = 0.06;
+/** A newborn's strike, and the beat between one newborn and the next. Seconds. */
+const BIRTH_STAGGER_S = 0.16;
+const BIRTH_BOLT_DELAY_S = 0.06;
+/** How long a birth HOLDS the sky — lit, everything else sunk, camera there.
+ *  One orb flashing among 2,459 is invisible; Moti said so in s545 and he was
+ *  right. A birth is not a flash, it is a moment, and it has to be findable. */
+const BIRTH_HOLD_S = 7;
 
 interface Tween {
   start: number;
@@ -166,6 +182,13 @@ function diceFor(name: string): () => number {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** Identity of an edge already drawn. A written link has a direction (a→b and
+ *  b→a are two different sentences); a semantic neighbour does not. */
+export function edgeKey(kind: "link" | "semantic", source: string, target: string): string {
+  if (kind === "link") return `l:${source}>${target}`;
+  return source < target ? `s:${source}|${target}` : `s:${target}|${source}`;
 }
 
 export class MemorySky {
@@ -227,6 +250,12 @@ export class MemorySky {
   // the spell
   private hits: SkyHit[] = [];
   private hitNodes: SkyNode[] = [];
+  /** Memories to strike once the layout stops moving — see `strike`. */
+  private pendingStrike: string[] = [];
+  /** The memories a birth is currently holding the sky for, and when it lets
+   *  go. Lit like a spell's hits, everything else sunk, camera flown there. */
+  private newborn: SkyNode[] = [];
+  private newbornUntil = 0;
   private focus = 0;
   private focusTarget = 0;
   private selected: SkyNode | null = null;
@@ -412,11 +441,220 @@ export class MemorySky {
     this.emitStats();
   }
 
+  /** THE SKY GROWS (s545). A delta from the graph door's `/graph/nodes`:
+   *  memories carved since this mind was drawn, and the edges they arrive with.
+   *  Each newborn is appended and STRUCK — it flashes, and its first bolts run
+   *  out of it into what it is already related to. A memory that was merely
+   *  revised re-strikes where it stands.
+   *
+   *  Everything on screen survives: the spell, the open memory, the filter,
+   *  the camera, and every existing orb's index. The buffers are rebuilt
+   *  rather than over-allocated with spare slots — they are exact-fit by
+   *  design, a rebuild of a 2,400-memory mind costs a few milliseconds, and a
+   *  sleep pass lands minutes apart. Nothing else in here has to know that
+   *  growth is possible.
+   *
+   *  Returns the memories that were actually born. */
+  addMemories(delta: MemoryGraph): SkyNode[] {
+    if (!this.orbGeometry || !this.boltGeometry) return [];
+
+    // Snapshot the strikes in flight — the rebuild allocates fresh buffers,
+    // and an idle chain or a spell mid-flash should not blink out.
+    const previousNodes = this.nodes.length;
+    const previousEdges = this.edges.length;
+    const orbPulseWas = (this.orbPulse.array as Float32Array).slice();
+    const boltPulseWas = (this.boltPulse.array as Float32Array).slice();
+
+    const born: SkyNode[] = [];
+    const revised: SkyNode[] = [];
+    for (const incoming of delta.nodes) {
+      const existing = this.byName.get(incoming.name);
+      if (existing) {
+        // Not a birth — the same memory, written over. Refresh what the
+        // drawing reads from it; size and heat land on the rebuild below.
+        existing.description = incoming.description;
+        existing.memType = incoming.mem_type;
+        existing.importance = incoming.importance;
+        existing.accessCount = incoming.access_count;
+        existing.archived = incoming.archived_at != null;
+        existing.links = incoming.links;
+        revised.push(existing);
+        continue;
+      }
+      const node = this.toSkyNode(incoming, this.nodes.length);
+      this.nodes.push(node);
+      this.byName.set(node.name, node);
+      born.push(node);
+    }
+    if (!born.length && !revised.length) return [];
+
+    // Edges whose other end this sky actually holds; the door answers with
+    // whatever the memory connects to, and a mind on screen is a subset.
+    const drawn = new Set(this.edges.map((e) => edgeKey(e.kind, e.source.name, e.target.name)));
+    for (const incoming of delta.edges) {
+      const source = this.byName.get(incoming.source);
+      const target = this.byName.get(incoming.target);
+      if (!source || !target || source === target) continue;
+      const key = edgeKey(incoming.kind, incoming.source, incoming.target);
+      if (drawn.has(key)) continue;
+      drawn.add(key);
+      this.edges.push({
+        index: this.edges.length,
+        source,
+        target,
+        kind: incoming.kind,
+        weight: incoming.weight,
+      });
+    }
+
+    // The sky's scale grows with the mind — before anything is seated in it.
+    this.radius = Math.max(120, 40 * Math.cbrt(Math.max(this.nodes.length, 1)));
+
+    // A newborn has no meaning-space seat: PCA is fitted over a whole matrix,
+    // so the door sends no hint for it. It arrives among its relatives instead
+    // — which is the truer picture anyway — and the layout takes it from there.
+    const placed = new Set(this.nodes.slice(0, previousNodes).map((n) => n.name));
+    const arriving = this.edges.slice(previousEdges);
+    for (const node of born) {
+      const kin = arriving
+        .filter((e) => e.source === node || e.target === node)
+        .map((e) => (e.source === node ? e.target : e.source))
+        .filter((other) => placed.has(other.name));
+      const dice = diceFor(node.name);
+      if (kin.length) {
+        const centre = this.centroid(kin);
+        const spread = this.radius * 0.12;
+        node.x = centre.x + (dice() - 0.5) * spread;
+        node.y = centre.y + (dice() - 0.5) * spread;
+        node.z = centre.z + (dice() - 0.5) * spread;
+      } else {
+        // Nothing to arrive beside: the cold-start seat, hint or dice.
+        this.seedOne(node, dice);
+      }
+      placed.add(node.name);
+    }
+
+    this.adjacency = this.nodes.map(() => []);
+    for (const e of this.edges) {
+      this.adjacency[e.source.index].push(e.index);
+      this.adjacency[e.target.index].push(e.index);
+    }
+    this.ranked = [...this.nodes].sort(
+      (a, b) => b.importance - a.importance || b.accessCount - a.accessCount || a.name.localeCompare(b.name),
+    );
+    this.labelCount = Math.min(20, Math.max(8, Math.round(0.4 * Math.sqrt(this.nodes.length))));
+    this.filteredOut = new Uint8Array(this.nodes.length);
+    this.computeFilter();
+
+    this.disposeGeometry();
+    this.buildOrbs();
+    this.buildBolts();
+    const orbPulse = this.orbPulse.array as Float32Array;
+    orbPulse.set(orbPulseWas.subarray(0, previousNodes));
+    orbPulse[this.nodes.length] = orbPulseWas[previousNodes]; // the query orb moved
+    const boltPulse = this.boltPulse.array as Float32Array;
+    boltPulse.set(boltPulseWas.subarray(0, previousEdges));
+    for (let k = 0; k < MAX_HITS; k += 1) {
+      boltPulse[this.edges.length + k] = boltPulseWas[previousEdges + k];
+    }
+
+    this.boltMaterial.uniforms.uDensity.value = Math.min(
+      1,
+      Math.pow(DENSE_EDGES / Math.max(this.edges.length, 1), 0.6),
+    );
+    this.buildSimulation(GROWTH_ALPHA, GROWTH_ALPHA_DECAY);
+    this.settled = false;
+    this.applyLighting(); // rewrites lit/hide/labels over the new buffers
+
+    this.emitStats();
+    this.celebrate([...born, ...revised], born);
+    return born;
+  }
+
+  /** Strike memories already in the sky — the same birth flash `addMemories`
+   *  ends on, for memories that were carved while nobody was looking and so
+   *  arrived inside the graph itself. Names this mind does not hold are
+   *  ignored. Returns how many will light.
+   *
+   *  A mind still settling swallows this: 2,400 memories are in motion and one
+   *  flash among them is nothing. So the strike WAITS for the layout to rest,
+   *  and the sky draws itself, comes to a stop, and only then says what it
+   *  learned while he was away. */
+  strike(names: string[]): number {
+    if (!this.orbGeometry) return 0;
+    if (!this.settled) {
+      const holding = names.filter((name) => this.byName.has(name));
+      this.pendingStrike = holding;
+      return holding.length;
+    }
+    const nodes = names
+      .map((name) => this.byName.get(name))
+      .filter((node): node is SkyNode => Boolean(node));
+    this.celebrate(nodes, nodes);
+    return nodes.length;
+  }
+
+  /** Let a held birth go early — he pressed Esc, or moved on. */
+  rest(): boolean {
+    if (!this.newborn.length) return false;
+    this.releaseNewborn();
+    return true;
+  }
+
+  /** THE BIRTH, STAGED. `struck` flash and throw their bolts outward; `announced`
+   *  are the ones worth saying out loud (a revision strikes but is not news).
+   *
+   *  A flash alone is not enough. On a 2,459-memory mind one orb lighting up is
+   *  a drop in a nebula — Moti looked straight at it and asked what he was
+   *  supposed to be seeing. So a birth borrows the SPELL's stage: the newborn
+   *  is lit, the rest of the sky sinks, its name comes up, and the camera flies
+   *  there. It holds for a few seconds and lets go on its own.
+   *
+   *  Unless he is already somewhere: a spell up or a memory open means he is
+   *  reading, and the sky must not yank the camera out from under him. Then the
+   *  birth is only a strike, and the chrome still says it happened. */
+  private celebrate(struck: SkyNode[], announced: SkyNode[]): void {
+    if (!struck.length) return;
+    const now = this.now();
+    struck.forEach((node, rank) => {
+      const at = now + BIRTH_STAGGER_S * rank;
+      this.orbPulse.setX(node.index, at);
+      for (const edgeIndex of this.adjacency[node.index]) {
+        this.boltPulse.setX(edgeIndex, at + BIRTH_BOLT_DELAY_S);
+        this.boltFrom.setX(edgeIndex, this.edges[edgeIndex].source === node ? 0 : 1);
+      }
+    });
+    this.orbPulse.needsUpdate = true;
+    this.boltPulse.needsUpdate = true;
+    this.boltFrom.needsUpdate = true;
+
+    const busy = this.hitNodes.length > 0 || this.selected !== null;
+    if (!busy) {
+      this.newborn = struck;
+      this.newbornUntil = now + BIRTH_HOLD_S + BIRTH_STAGGER_S * struck.length;
+      this.focusTarget = 1;
+      this.applyLighting();
+      this.flyToCentroid(struck);
+    }
+    if (announced.length) this.callbacks.onStruck?.(announced.map((node) => node.name));
+  }
+
+  private releaseNewborn(): void {
+    this.newborn = [];
+    this.newbornUntil = 0;
+    if (!this.hitNodes.length && !this.selected) {
+      this.focusTarget = 0;
+      this.controls.autoRotate = true;
+    }
+    this.applyLighting();
+  }
+
   /** The spell: light the hits, sink everything else, draw the query as an
    *  orb tethered to what it found, and fly there. Pass an empty list to
    *  clear. */
   setHits(hits: SkyHit[]): void {
     if (!this.orbGeometry) return;
+    this.newborn = []; // he asked a question; the birth has had its moment
     this.hits = hits.slice(0, MAX_HITS);
     this.hitNodes = this.hits
       .map((h) => this.byName.get(h.name))
@@ -466,6 +704,7 @@ export class MemorySky {
   select(name: string | null): void {
     if (!this.orbGeometry) return;
     const node = name ? (this.byName.get(name) ?? null) : null;
+    if (node) this.newborn = []; // he opened one; the hold is over
     this.selected = node;
     this.applyLighting();
     if (node) {
@@ -520,23 +759,26 @@ export class MemorySky {
   }
 
   private seedPositions(): void {
+    for (const node of this.nodes) this.seedOne(node, diceFor(node.name));
+  }
+
+  /** One memory's first seat: its meaning-space hint if the door sent one,
+   *  otherwise its own dice on a sphere. Deterministic either way. */
+  private seedOne(node: SkyNode, dice: () => number): void {
     const r = this.radius;
-    for (const node of this.nodes) {
-      const dice = diceFor(node.name);
-      if (node.hint) {
-        node.x = node.hint[0] * r * 0.85 + (dice() - 0.5) * r * 0.2;
-        node.y = node.hint[1] * r * 0.85 + (dice() - 0.5) * r * 0.2;
-        node.z = node.hint[2] * r * 0.85 + (dice() - 0.5) * r * 0.2;
-      } else {
-        const u = dice() * 2 - 1;
-        const phi = dice() * Math.PI * 2;
-        const rr = r * 0.6 * Math.cbrt(dice());
-        const s = Math.sqrt(1 - u * u);
-        node.x = rr * s * Math.cos(phi);
-        node.y = rr * s * Math.sin(phi);
-        node.z = rr * u;
-      }
+    if (node.hint) {
+      node.x = node.hint[0] * r * 0.85 + (dice() - 0.5) * r * 0.2;
+      node.y = node.hint[1] * r * 0.85 + (dice() - 0.5) * r * 0.2;
+      node.z = node.hint[2] * r * 0.85 + (dice() - 0.5) * r * 0.2;
+      return;
     }
+    const u = dice() * 2 - 1;
+    const phi = dice() * Math.PI * 2;
+    const rr = r * 0.6 * Math.cbrt(dice());
+    const s = Math.sqrt(1 - u * u);
+    node.x = rr * s * Math.cos(phi);
+    node.y = rr * s * Math.sin(phi);
+    node.z = rr * u;
   }
 
   private buildOrbs(): void {
@@ -560,7 +802,10 @@ export class MemorySky {
       color[i * 3 + 2] = c.b;
       size[i] = 7 + 17 * n.importance;
       heat[i] = Math.log1p(n.accessCount) / Math.log1p(maxAccess);
-      seed[i] = Math.random();
+      // The memory's own dice, not Math.random: a growth pass rebuilds these
+      // buffers, and a re-rolled seed would re-scramble every orb's twinkle
+      // the instant one new memory arrived.
+      seed[i] = diceFor(`twinkle:${n.name}`)();
       ghost[i] = n.archived ? 1 : 0;
     }
     // The query orb: white-violet, large, always hot; drawn only while a
@@ -636,7 +881,9 @@ export class MemorySky {
     const colorB = new Float32Array(count * 3);
     for (const e of this.edges) {
       const i = e.index;
-      seed[i] = Math.random() * 100;
+      // Deterministic per pair, for the same reason the orbs' is: a growth
+      // pass rebuilds the buffer and every bolt would re-roll its kinks.
+      seed[i] = diceFor(`bolt:${e.source.name}>${e.target.name}`)() * 100;
       kind[i] = e.kind === "link" ? 1 : 0;
       weight[i] = e.weight;
       const ca = typeColor(e.source.memType);
@@ -645,7 +892,7 @@ export class MemorySky {
       colorB.set([cb.r, cb.g, cb.b], i * 3);
     }
     for (let i = this.edges.length; i < count; i += 1) {
-      seed[i] = Math.random() * 100;
+      seed[i] = diceFor(`spell:${i - this.edges.length}`)() * 100;
       kind[i] = 2;
       weight[i] = 1;
       lit[i] = 1;
@@ -700,7 +947,10 @@ export class MemorySky {
     this.scene.add(this.dust);
   }
 
-  private buildSimulation(): void {
+  /** `alpha` is how hard the layout is thrown: 1 for a mind arriving cold,
+   *  a fraction for a growth pass, where the sky must make room for a newborn
+   *  without every other memory sliding out from under the eye watching it. */
+  private buildSimulation(alpha = 1, alphaDecay?: number): void {
     this.simulation?.stop();
     const r = this.radius;
     const link = forceLink<SkyNode>(this.edges.map((e) => ({ source: e.source, target: e.target })))
@@ -721,18 +971,18 @@ export class MemorySky {
       .force("hx", forceX<SkyNode>((n) => (n.hint ? n.hint[0] * r * 0.85 : 0)).strength((n) => (n.hint ? 0.03 : 0)))
       .force("hy", forceY<SkyNode>((n) => (n.hint ? n.hint[1] * r * 0.85 : 0)).strength((n) => (n.hint ? 0.03 : 0)))
       .force("hz", forceZ<SkyNode>((n) => (n.hint ? n.hint[2] * r * 0.85 : 0)).strength((n) => (n.hint ? 0.03 : 0)))
-      .alpha(1)
+      .alpha(alpha)
       // ~380 ticks for a small mind, ~230 for a big one — the big one's ticks
       // cost more, and nobody wants to watch 2,400 memories settle for 12s.
-      .alphaDecay(this.nodes.length > 1200 ? 0.03 : 0.018)
+      .alphaDecay(alphaDecay ?? (this.nodes.length > 1200 ? 0.03 : 0.018))
       .velocityDecay(0.4)
       .stop();
     this.simulation = simulation;
   }
 
-  private clearScene(): void {
-    this.simulation?.stop();
-    this.simulation = null;
+  /** Drop the orb and bolt draw calls, keeping every bit of view state — what
+   *  a growth pass does between the old buffers and the new ones. */
+  private disposeGeometry(): void {
     if (this.orbs) {
       this.scene.remove(this.orbs);
       this.orbGeometry?.dispose();
@@ -745,8 +995,17 @@ export class MemorySky {
       this.bolts = null;
       this.boltGeometry = null;
     }
+  }
+
+  private clearScene(): void {
+    this.simulation?.stop();
+    this.simulation = null;
+    this.disposeGeometry();
     this.hits = [];
     this.hitNodes = [];
+    this.pendingStrike = [];
+    this.newborn = [];
+    this.newbornUntil = 0;
     this.selected = null;
     this.hovered = null;
     this.focus = 0;
@@ -782,11 +1041,17 @@ export class MemorySky {
       if (this.simulation.alpha() < this.simulation.alphaMin()) {
         this.settled = true;
         this.emitStats();
+        if (this.pendingStrike.length) {
+          const held = this.pendingStrike;
+          this.pendingStrike = [];
+          this.strike(held);
+        }
       }
       this.writeOrbPositions();
       this.writeBoltEndpoints();
     }
     if (this.hitNodes.length) this.writeSpell();
+    if (this.newborn.length && time > this.newbornUntil) this.releaseNewborn();
 
     this.runTweens(nowMs);
     if (!this.controls.autoRotate && nowMs - this.lastInteractionAt > IDLE_RESUME_MS && !this.tweens.length) {
@@ -795,7 +1060,9 @@ export class MemorySky {
     this.controls.update();
 
     if (this.pointerDirty) this.pick();
-    if (this.hitNodes.length === 0 && !this.selected && nowMs >= this.nextFireAt) this.fire(nowMs);
+    if (this.hitNodes.length === 0 && !this.selected && !this.newborn.length && nowMs >= this.nextFireAt) {
+      this.fire(nowMs);
+    }
 
     this.renderer.render(this.scene, this.camera);
     // after render: the camera's matrices are this frame's, so the names sit
@@ -871,6 +1138,7 @@ export class MemorySky {
 
     const bright = new Set<number>();
     for (const n of this.hitNodes) bright.add(n.index);
+    for (const n of this.newborn) bright.add(n.index);
     if (this.selected) bright.add(this.selected.index);
 
     for (const index of bright) {
@@ -927,7 +1195,20 @@ export class MemorySky {
   private chooseLabels(): void {
     if (!this.labelSlots.length) return;
     let pool: SkyNode[] = [];
-    if (this.hitNodes.length) {
+    if (this.newborn.length && !this.hitNodes.length && !this.selected) {
+      // A birth holds the sky: name the newborns and their nearest kin, so the
+      // thing that just happened can be READ, not just seen.
+      const around = new Set<SkyNode>();
+      for (const node of this.newborn) {
+        for (const ei of this.adjacency[node.index]) {
+          const e = this.edges[ei];
+          const other = e.source === node ? e.target : e.source;
+          if (!this.newborn.includes(other) && !this.filteredOut[other.index]) around.add(other);
+        }
+      }
+      const kin = [...around].sort((a, b) => b.importance - a.importance);
+      pool = [...this.newborn, ...kin].slice(0, MAX_LABELS);
+    } else if (this.hitNodes.length) {
       pool = this.selected && !this.hitNodes.includes(this.selected)
         ? [this.selected, ...this.hitNodes]
         : [...this.hitNodes];

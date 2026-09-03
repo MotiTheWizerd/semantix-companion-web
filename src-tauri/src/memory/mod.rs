@@ -716,6 +716,69 @@ pub(crate) async fn load_memory_graph(
         .map_err(|error| format!("The memory graph could not be read: {error}"))
 }
 
+/// A few memories and what they connect to — the graph door's DELTA (s545),
+/// so a sky already drawn can grow when the sleeper carves instead of being
+/// redrawn from scratch (3.6MB and a lost layout on a 2,400-memory mind).
+///
+/// Same shape as `load_memory_graph`, same pure-pipe deal: both brains answer
+/// the contract, nothing is translated here. Edges whose other end the viewer
+/// does not hold are dropped by the engine, and `pos` comes back null — a PCA
+/// basis is fitted over a whole matrix, so one new vector has no seat in it.
+#[tauri::command]
+pub(crate) async fn load_memory_nodes(
+    state: State<'_, MemoryState>,
+    agent_id: String,
+    names: Vec<String>,
+    k: Option<u32>,
+    min_sim: Option<f64>,
+    include_archived: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let target = MemoryTarget::resolve(&state.service.companions, &agent_id)?;
+    let client = reqwest::Client::new();
+    let mut query: Vec<(&str, String)> = names
+        .iter()
+        .map(|name| ("name", name.trim().to_owned()))
+        .filter(|(_, name)| !name.is_empty())
+        .collect();
+    if query.is_empty() {
+        return Err("no memory named".to_owned());
+    }
+    if let Some(k) = k {
+        query.push(("k", k.to_string()));
+    }
+    if let Some(min_sim) = min_sim {
+        query.push(("min_sim", min_sim.to_string()));
+    }
+    if let Some(include_archived) = include_archived {
+        query.push(("include_archived", include_archived.to_string()));
+    }
+
+    let request = match &target {
+        MemoryTarget::Organ { agent_id } => client
+            .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/graph/nodes"))
+            .bearer_auth(organ_bearer().await?),
+        MemoryTarget::Muninn { channel, .. } => {
+            query.push(("channel", channel.clone()));
+            client.get(format!("{MUNINN_BASE}/graph/nodes"))
+        }
+    };
+    let response = request
+        .query(&query)
+        // A handful of memories, one indexed neighbour query each.
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| format!("The memory organ could not be reached: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("memory nodes failed: HTTP {}", status.as_u16()));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("The memory nodes could not be read: {error}"))
+}
+
 /// One full memory by name, for the frontend — the graph's click-through.
 /// The same fetch the model's `recall_memory` tool makes, made a command, and
 /// normalised to the organ's shape so the panel reads one contract.

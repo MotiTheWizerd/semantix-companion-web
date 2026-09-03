@@ -181,6 +181,7 @@ pub fn run() {
             memory::ensure_memory_agent,
             memory::recall_memories,
             memory::load_memory_graph,
+            memory::load_memory_nodes,
             memory::read_memory,
             memory::sleep_conversation,
             import::inspect_import_source,

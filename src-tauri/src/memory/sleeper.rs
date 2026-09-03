@@ -46,6 +46,10 @@ pub(crate) enum SleptEvent {
     Carved {
         #[serde(rename = "conversationId")]
         conversation_id: String,
+        /// Whose mind grew. The memory sky watches this to know whether a pass
+        /// belongs to the mind it currently has on screen (s545).
+        #[serde(rename = "agentId")]
+        agent_id: String,
         created: u32,
         updated: u32,
         dropped: u32,
@@ -204,6 +208,7 @@ impl Sleeper {
             Ok(Some(SleepOutcome { created, updated, dropped, memories, scribe_note, .. })) => {
                 SleptEvent::Carved {
                     conversation_id: conversation_id.to_owned(),
+                    agent_id: agent_id.to_owned(),
                     created,
                     updated,
                     dropped,

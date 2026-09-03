@@ -204,6 +204,49 @@
   border-color: rgba(255, 120, 160, 0.35);
 }
 
+/* A memory was just carved — the note arrives with the strike and glows on
+   the sky's own violet, then leaves on its own. When it names ONE memory it is
+   a button: the hold lets go after a few seconds, and this is the way back. */
+.memory-sky__note.is-born {
+  color: #e6dcff;
+  border-color: rgba(169, 125, 255, 0.45);
+  box-shadow: 0 0 26px rgba(169, 125, 255, 0.28);
+  animation: memory-sky-born 420ms ease-out;
+}
+
+button.memory-sky__note.is-born {
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  max-width: min(560px, 60vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.memory-sky__note.is-born:hover {
+  color: #fff;
+  border-color: rgba(169, 125, 255, 0.75);
+  box-shadow: 0 0 34px rgba(169, 125, 255, 0.42);
+}
+
+@keyframes memory-sky-born {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .memory-sky__note.is-born {
+    animation: none;
+  }
+}
+
 /* ── hits ────────────────────────────────────────────────────────────── */
 
 .memory-sky__hits {

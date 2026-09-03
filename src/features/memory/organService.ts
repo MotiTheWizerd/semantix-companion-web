@@ -146,6 +146,26 @@ export async function loadMemoryGraph(
   });
 }
 
+/** A few memories and what they connect to — the graph's delta (s545), so a
+ *  sky already on screen can GROW when the sleeper carves. Same shape as the
+ *  whole graph and deliberately partial: an edge whose other end this mind does
+ *  not hold is dropped, and `pos` is always null (a PCA basis is fitted over a
+ *  whole matrix — one new vector has no seat in it, so the newborn takes its
+ *  place from the neighbours it arrives with). */
+export async function loadMemoryNodes(
+  agentId: string,
+  names: string[],
+  options: MemoryGraphOptions = {},
+): Promise<MemoryGraph> {
+  return invoke<MemoryGraph>("load_memory_nodes", {
+    agentId,
+    names,
+    k: options.k,
+    minSim: options.minSim,
+    includeArchived: options.includeArchived,
+  });
+}
+
 /** One full memory by name — the graph's click-through. */
 export async function readMemory(
   agentId: string,

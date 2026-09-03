@@ -25,6 +25,9 @@ export type MemorySleptEvent =
   | {
       kind: "carved";
       conversationId: string;
+      /** Whose mind grew — the memory sky watches this to know whether a pass
+       *  belongs to the mind it has on screen. */
+      agentId: string;
       created: number;
       updated: number;
       dropped: number;
