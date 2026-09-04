@@ -260,6 +260,96 @@ button.memory-sky__note.is-born:hover {
   }
 }
 
+/* ── the camera, by hand ────────────────────────────────────────────────
+   A glass pill on the right edge at mid-height — closer, farther, swing,
+   swing, the whole mind — clear of the spell at the floor and the hits at
+   the left. When a memory is open it steps left to stand beside the panel
+   rather than under it. */
+
+.memory-sky__camera {
+  position: absolute;
+  top: 50%;
+  right: 22px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 999px;
+  background: rgba(10, 8, 34, 0.62);
+  border: 1px solid rgba(150, 160, 255, 0.22);
+  box-shadow:
+    0 0 0 1px rgba(90, 100, 220, 0.08) inset,
+    0 10px 40px rgba(0, 0, 0, 0.45),
+    0 0 30px rgba(110, 120, 255, 0.12);
+  backdrop-filter: blur(10px);
+  transition: right 260ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.memory-sky.has-panel .memory-sky__camera {
+  right: calc(22px + min(420px, calc(100% - 44px)) + 12px);
+}
+
+.memory-sky__camera button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(220, 226, 255, 0.75);
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+/* a hair of air between the zooms, the swings, and home */
+.memory-sky__camera button.is-after-gap {
+  margin-top: 6px;
+}
+
+.memory-sky__camera button.is-after-gap::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 14px;
+  height: 1px;
+  transform: translateX(-50%);
+  background: rgba(150, 160, 255, 0.22);
+}
+
+.memory-sky__camera button:hover {
+  color: #fff;
+  background: rgba(130, 140, 255, 0.16);
+}
+
+/* pressed or held: the charge */
+.memory-sky__camera button:active {
+  color: #fff;
+  background: rgba(140, 150, 255, 0.3);
+  box-shadow: 0 0 14px rgba(140, 150, 255, 0.4);
+}
+
+.memory-sky__camera button:focus-visible {
+  outline: 1px solid rgba(170, 180, 255, 0.6);
+  outline-offset: 1px;
+}
+
+.memory-sky__camera svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* ── hits ────────────────────────────────────────────────────────────── */
 
 .memory-sky__hits {
@@ -691,6 +781,11 @@ button.memory-sky__note.is-born:hover {
 
 @media (max-width: 900px) {
   .memory-sky__hits {
+    display: none;
+  }
+
+  /* the panel spans the width here; there is no "beside" to step to */
+  .memory-sky.has-panel .memory-sky__camera {
     display: none;
   }
 }

@@ -21,6 +21,7 @@ import {
   Points,
   Scene,
   ShaderMaterial,
+  Spherical,
   Vector3,
   WebGLRenderer,
   AdditiveBlending,
@@ -116,6 +117,12 @@ const NEVER = -1e9;
 const DUST_COUNT = 1800;
 const PICK_RADIUS_PX = 18;
 const IDLE_RESUME_MS = 7000;
+/** A tap on the camera widget moves over one beat. */
+const NUDGE_MS = 520;
+/** A held control ramps in and out over this, so it never jerks. */
+const STEER_EASE_MS = 140;
+/** Straight up or down the camera loses its sense of "around"; stop short. */
+const POLAR_MARGIN = 0.04;
 const FIRE_EVERY_MS: [number, number] = [2200, 4600];
 /** Named orbs: DOM tags projected each frame. At rest the most important
  *  8–20 (scales with the mind); during a spell the hits; with a memory open,
@@ -261,6 +268,10 @@ export class MemorySky {
   private selected: SkyNode | null = null;
 
   private tweens: Tween[] = [];
+  /** The widget's hold: rad/s around the target and a log zoom rate per
+   *  second, eased toward what is asked so a press never jerks. */
+  private readonly steerTarget = { azimuth: 0, polar: 0, zoom: 0 };
+  private readonly steering = { azimuth: 0, polar: 0, zoom: 0 };
   private frame = 0;
   private startedAt = performance.now();
   private lastFrameAt = performance.now();
@@ -721,6 +732,113 @@ export class MemorySky {
     this.flyToPoint(new Vector3(node.x, node.y, node.z), Math.max(150, this.radius * 0.55));
   }
 
+  // ── the camera, by hand ───────────────────────────────────────────────
+  // The widget's moves. Everything swings around the controls' target — the
+  // mind's centre, or wherever the last spell or selection flew — so none of
+  // this needs a node picked to be useful. A tap is a nudge (eased, and taps
+  // add up); a hold is a steer (eased in and out).
+
+  /** Swing around the target by these angles over one beat. */
+  nudgeOrbit(azimuthDeg: number, polarDeg: number): void {
+    const azimuth = (azimuthDeg * Math.PI) / 180;
+    const polar = (polarDeg * Math.PI) / 180;
+    this.byHand();
+    let applied = 0;
+    this.tweens.push({
+      start: performance.now(),
+      duration: NUDGE_MS,
+      update: (t) => {
+        const k = easeInOut(t);
+        this.orbitBy(azimuth * (k - applied), polar * (k - applied), 1);
+        applied = k;
+      },
+    });
+  }
+
+  /** Move in toward the target (factor < 1) or out from it (> 1) over one beat. */
+  nudgeZoom(factor: number): void {
+    this.byHand();
+    let applied = 0;
+    this.tweens.push({
+      start: performance.now(),
+      duration: NUDGE_MS,
+      update: (t) => {
+        const k = easeInOut(t);
+        this.orbitBy(0, 0, Math.pow(factor, k - applied));
+        applied = k;
+      },
+    });
+  }
+
+  /** Keep moving while a control is held: degrees per second around the
+   *  target, and a distance factor per second (0.5 halves it each second,
+   *  2 doubles it). All neutral lets go — the motion eases out. */
+  steer(azimuthDegPerS: number, polarDegPerS: number, zoomPerS = 1): void {
+    this.steerTarget.azimuth = (azimuthDegPerS * Math.PI) / 180;
+    this.steerTarget.polar = (polarDegPerS * Math.PI) / 180;
+    this.steerTarget.zoom = zoomPerS > 0 ? Math.log(zoomPerS) : 0;
+    if (this.steerTarget.azimuth || this.steerTarget.polar || this.steerTarget.zoom) this.byHand();
+  }
+
+  /** Back out to the whole mind, where a fresh graph starts, and let the
+   *  slow turn resume from there. Camera only — the spell and the open
+   *  memory keep their light. */
+  home(): void {
+    this.byHand();
+    const fromTarget = this.controls.target.clone();
+    const fromPosition = this.camera.position.clone();
+    const toTarget = new Vector3(0, 0, 0);
+    const toPosition = new Vector3(0, this.radius * 0.35, this.radius * 2.6);
+    this.tweens = [{
+      start: performance.now(),
+      duration: 1300,
+      update: (t) => {
+        const k = easeInOut(t);
+        this.controls.target.lerpVectors(fromTarget, toTarget, k);
+        this.camera.position.lerpVectors(fromPosition, toPosition, k);
+      },
+      done: () => {
+        this.controls.autoRotate = true;
+      },
+    }];
+  }
+
+  /** A hand on the camera: the slow turn stops and the idle clock restarts. */
+  private byHand(): void {
+    this.controls.autoRotate = false;
+    this.lastInteractionAt = performance.now();
+  }
+
+  /** Move the camera on its sphere around the target. OrbitControls rebuilds
+   *  its own spherical from the camera each update, so a position written
+   *  here sticks, and a drag afterwards carries on from it. */
+  private orbitBy(azimuth: number, polar: number, scale: number): void {
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    const s = new Spherical().setFromVector3(offset);
+    s.theta += azimuth;
+    s.phi = Math.min(Math.PI - POLAR_MARGIN, Math.max(POLAR_MARGIN, s.phi + polar));
+    s.radius = Math.min(this.controls.maxDistance, Math.max(this.controls.minDistance, s.radius * scale));
+    this.camera.position.copy(this.controls.target).add(offset.setFromSpherical(s));
+  }
+
+  private runSteering(dt: number): void {
+    const s = this.steering;
+    const target = this.steerTarget;
+    const ease = Math.min(1, dt / STEER_EASE_MS);
+    s.azimuth += (target.azimuth - s.azimuth) * ease;
+    s.polar += (target.polar - s.polar) * ease;
+    s.zoom += (target.zoom - s.zoom) * ease;
+    const still = Math.abs(s.azimuth) < 1e-4 && Math.abs(s.polar) < 1e-4 && Math.abs(s.zoom) < 1e-4;
+    if (still) {
+      s.azimuth = s.polar = s.zoom = 0;
+      return;
+    }
+    const sec = dt / 1000;
+    this.orbitBy(s.azimuth * sec, s.polar * sec, Math.exp(s.zoom * sec));
+    // a hold longer than the idle window must not hand the camera back
+    this.lastInteractionAt = performance.now();
+  }
+
   dispose(): void {
     this.disposed = true;
     cancelAnimationFrame(this.frame);
@@ -1053,6 +1171,7 @@ export class MemorySky {
     if (this.hitNodes.length) this.writeSpell();
     if (this.newborn.length && time > this.newbornUntil) this.releaseNewborn();
 
+    this.runSteering(dt);
     this.runTweens(nowMs);
     if (!this.controls.autoRotate && nowMs - this.lastInteractionAt > IDLE_RESUME_MS && !this.tweens.length) {
       this.controls.autoRotate = true;

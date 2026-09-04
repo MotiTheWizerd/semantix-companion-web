@@ -22,6 +22,7 @@ import {
 } from "../memory/organService";
 import { onMemorySlept } from "../memory/sleepService";
 import { edgeKey, MemorySky, type SkyFilter, type SkyHit } from "./engine/MemorySky";
+import { SkyCameraControls, TAP_DEG, TAP_ZOOM } from "./SkyCameraControls";
 import { useSkyLensStore, type SkyTypeCount } from "./skyLensStore";
 import { typeTintCss, TYPE_ORDER } from "./tints";
 
@@ -400,12 +401,64 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, hits, query, openMemory]);
 
+  // The camera widget's moves from the keyboard, whenever nothing is being
+  // typed. Ctrl/Cmd stay out of it — that is the interface zoom (useUiZoom).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (
+        active &&
+        (active.tagName === "INPUT" ||
+          active.tagName === "TEXTAREA" ||
+          active.tagName === "SELECT" ||
+          active.isContentEditable)
+      ) {
+        return;
+      }
+      const sky = skyRef.current;
+      if (!sky) return;
+      switch (event.key) {
+        case "ArrowLeft":
+          sky.nudgeOrbit(-TAP_DEG, 0);
+          break;
+        case "ArrowRight":
+          sky.nudgeOrbit(TAP_DEG, 0);
+          break;
+        case "ArrowUp":
+          sky.nudgeOrbit(0, -TAP_DEG / 2);
+          break;
+        case "ArrowDown":
+          sky.nudgeOrbit(0, TAP_DEG / 2);
+          break;
+        case "+":
+        case "=":
+          sky.nudgeZoom(TAP_ZOOM);
+          break;
+        case "-":
+        case "_":
+          sky.nudgeZoom(1 / TAP_ZOOM);
+          break;
+        case "Home":
+          sky.home();
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
-    <div className="memory-sky">
+    <div className={`memory-sky${selected ? " has-panel" : ""}`}>
       <canvas ref={canvasRef} className="memory-sky__canvas" />
       <div className="memory-sky__vignette" aria-hidden="true" />
       <div ref={namesRef} className="memory-sky__names" aria-hidden="true" />
       <div ref={labelRef} className="memory-sky__label" hidden />
+
+      <SkyCameraControls sky={() => skyRef.current} />
 
       {/* The dock — where the chat keeps its composer, the sky keeps its
           spell. Notes rise out of the glass above the row. */}
