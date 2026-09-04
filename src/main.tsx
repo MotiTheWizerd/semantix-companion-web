@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
+import { applyZoom, readZoom } from "./features/appearance/uiZoom";
 import "./styles/base/tokens.css";
 import "./styles/base/reset.css";
 import "./styles/base/buttons.css";
@@ -24,6 +25,11 @@ import "./styles/features/style-library.css";
 import "./styles/features/memory-sky.css";
 import "./styles/markdown.css";
 import "./styles/syntax.css";
+
+// Before the first render, not after: React's effects run once the tree is
+// already on screen, so restoring the zoom there would show one frame at 100%
+// and then jump. This is a document-level property, so it needs no tree.
+applyZoom(readZoom());
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

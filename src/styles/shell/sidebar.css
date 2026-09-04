@@ -47,6 +47,15 @@
   filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.55));
 }
 
+/* A user's photograph is not the mark: it has no transparency to sit inside
+   the box, and it is square-ish rather than the mark's shape. So it CROPS to
+   a circle instead of fitting, which is also what makes an avatar read as a
+   face at chrome size rather than as a tiny picture. */
+.companion-mark__img--avatar {
+  object-fit: cover;
+  border-radius: 50%;
+}
+
 .new-chat-button {
   display: flex;
   align-items: center;

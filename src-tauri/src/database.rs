@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 23;
+const LATEST_SCHEMA_VERSION: i64 = 24;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -777,6 +777,20 @@ fn migration_sql(version: i64) -> &'static str {
             // This stamp lets the card grant a woken companion an honest
             // answering window before declaring silence.
             "ALTER TABLE raven_calls ADD COLUMN woken_at INTEGER;"
+        }
+        24 => {
+            // THE COMPANION GETS A FACE. A user-chosen picture, stored as a
+            // FILE beside this database in `avatars/` — see
+            // `companions::avatars` for why the bytes are not in this column
+            // and why the folder is derived from the database's own path.
+            //
+            // What lands here is a bare FILE NAME (`<companion-id>.png`), never
+            // an absolute path. A path would bake `$HOME` into a row and break
+            // the moment the folder moved or the database was carried to
+            // another machine; a name is resolved against wherever the database
+            // is actually opened. NULL is the ordinary state — most companions
+            // wear the mark, not a photograph.
+            "ALTER TABLE companions ADD COLUMN avatar_file TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

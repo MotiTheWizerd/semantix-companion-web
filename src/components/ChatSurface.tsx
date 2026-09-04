@@ -281,6 +281,21 @@ const ChatThread = memo(function ChatThread({
     [companions],
   );
 
+  // Faces for the call card, kept separate from the names rather than folded
+  // into one map: only some companions have a picture, and every other reader
+  // of `callAgentNames` (the tool chips) wants the name and nothing else.
+  const callAgentAvatars = useMemo(
+    () =>
+      new Map(
+        companions
+          .filter((companion): companion is typeof companion & { avatarUrl: string } =>
+            Boolean(companion.avatarUrl),
+          )
+          .map((companion) => [companion.id, companion.avatarUrl]),
+      ),
+    [companions],
+  );
+
   // ⚑ NOT EVERY GROWTH IS A COMMIT OF THIS COMPONENT. The follow below rides
   // ChatThread's own renders, which covers new messages and streamed tokens —
   // but a call card owns its `expanded` state privately and opens ITSELF the
@@ -342,6 +357,7 @@ const ChatThread = memo(function ChatThread({
             key={thread.call.id}
             thread={thread}
             agentNames={callAgentNames}
+            agentAvatars={callAgentAvatars}
             streamingMessages={streamingCallMessages.filter(
               (message) => message.callId === thread.call.id,
             )}
@@ -421,6 +437,7 @@ const ChatThread = memo(function ChatThread({
                   key={thread.call.id}
                   thread={thread}
                   agentNames={callAgentNames}
+                  agentAvatars={callAgentAvatars}
                   streamingMessages={streamingCallMessages.filter(
                     (streaming) => streaming.callId === thread.call.id,
                   )}

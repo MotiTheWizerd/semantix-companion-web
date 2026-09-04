@@ -55,7 +55,7 @@ export function CompanionSelect({
       renderItem={(companion) => (
         <span className={styles.companionItem}>
           <span className={styles.companionMark}>
-            <CompanionMark />
+            <CompanionMark src={companion.avatarUrl} />
           </span>
           <span className={styles.companionCopy}>
             <span className={styles.companionName}>
@@ -74,7 +74,7 @@ export function CompanionSelect({
               isPill ? styles.selectedMarkPill : ""
             }`}
           >
-            <CompanionMark />
+            <CompanionMark src={selectedCompanion?.avatarUrl} />
           </span>
           <span
             className={`${styles.selectedName} ${isPill ? styles.selectedNamePill : ""}`}

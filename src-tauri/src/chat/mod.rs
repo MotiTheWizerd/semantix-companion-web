@@ -2338,6 +2338,7 @@ mod tests {
             is_origin: false,
             origin_agent_id: None,
             style_id: None,
+            avatar_url: None,
         };
 
         assert_eq!(
@@ -2375,6 +2376,7 @@ mod tests {
             is_origin: true,
             origin_agent_id: None,
             style_id: None,
+            avatar_url: None,
         };
 
         let told =

@@ -83,11 +83,41 @@ function useNow(active: boolean): number {
   return now;
 }
 
+/** Who is speaking, as a face when the companion has one and its initial when
+ *  it does not. Every turn in the card — spoken, typing, ringing — goes
+ *  through here, so a companion never wears its picture on some of its own
+ *  lines and a letter on the others. */
+function SpeakerAvatar({
+  agentId,
+  name,
+  agentAvatars,
+}: {
+  agentId: string;
+  name: string;
+  agentAvatars?: ReadonlyMap<string, string>;
+}) {
+  const avatarUrl = agentAvatars?.get(agentId);
+  return (
+    <span
+      className={`calls__avatar${avatarUrl ? " calls__avatar--image" : ""}`}
+      aria-hidden="true"
+    >
+      {avatarUrl ? (
+        <img src={avatarUrl} alt="" draggable={false} />
+      ) : (
+        agentInitial(name)
+      )}
+    </span>
+  );
+}
+
 interface CallTurnProps {
   message: Pick<RavenCallMessage, "fromAgentId" | "body"> &
     Partial<Pick<RavenCallMessage, "createdAt">>;
   initiatorAgentId: string;
   agentNames: ReadonlyMap<string, string>;
+  /** Companion id → its picture, for the companions that have one. */
+  agentAvatars?: ReadonlyMap<string, string>;
   streaming?: boolean;
 }
 
@@ -95,6 +125,7 @@ function CallTurn({
   message,
   initiatorAgentId,
   agentNames,
+  agentAvatars,
   streaming = false,
 }: CallTurnProps) {
   const name = agentLabel(message.fromAgentId, agentNames);
@@ -102,9 +133,11 @@ function CallTurn({
 
   return (
     <div className={`calls__turn calls__turn--${side}${streaming ? " calls__turn--streaming" : ""}`}>
-      <span className="calls__avatar" aria-hidden="true">
-        {agentInitial(name)}
-      </span>
+      <SpeakerAvatar
+        agentId={message.fromAgentId}
+        name={name}
+        agentAvatars={agentAvatars}
+      />
       <div className="calls__turn-content">
         <div className="calls__turn-meta">
           <span className="calls__speaker">{name}</span>
@@ -133,10 +166,12 @@ function TypingTurn({
   agentId,
   initiatorAgentId,
   agentNames,
+  agentAvatars,
 }: {
   agentId: string;
   initiatorAgentId: string;
   agentNames: ReadonlyMap<string, string>;
+  agentAvatars?: ReadonlyMap<string, string>;
 }) {
   const name = agentLabel(agentId, agentNames);
   const side = agentId === initiatorAgentId ? "initiator" : "recipient";
@@ -147,9 +182,7 @@ function TypingTurn({
 
   return (
     <div className={`calls__turn calls__turn--${side} calls__turn--ghost`}>
-      <span className="calls__avatar" aria-hidden="true">
-        {agentInitial(name)}
-      </span>
+      <SpeakerAvatar agentId={agentId} name={name} agentAvatars={agentAvatars} />
       <div className="calls__turn-content">
         <div className="calls__turn-meta">
           <span className="calls__speaker">{name}</span>
@@ -174,11 +207,13 @@ function RingingTurn({
   message,
   initiatorAgentId,
   agentNames,
+  agentAvatars,
   now,
 }: {
   message: RavenCallMessage;
   initiatorAgentId: string;
   agentNames: ReadonlyMap<string, string>;
+  agentAvatars?: ReadonlyMap<string, string>;
   now: number;
 }) {
   const name = agentLabel(message.toAgentId, agentNames);
@@ -186,9 +221,11 @@ function RingingTurn({
 
   return (
     <div className={`calls__turn calls__turn--${side} calls__turn--ghost calls__turn--ringing`}>
-      <span className="calls__avatar" aria-hidden="true">
-        {agentInitial(name)}
-      </span>
+      <SpeakerAvatar
+        agentId={message.toAgentId}
+        name={name}
+        agentAvatars={agentAvatars}
+      />
       <div className="calls__turn-content">
         <div className="calls__turn-meta">
           <span className="calls__speaker">{name}</span>
@@ -246,6 +283,7 @@ export function CallTranscriptItem({
   streamingMessages = [],
   replyingAgentId = null,
   agentNames,
+  agentAvatars,
 }: {
   thread: CallThread;
   streamingMessages?: StreamingCallMessage[];
@@ -253,6 +291,8 @@ export function CallTranscriptItem({
    *  a guess. Null when nothing is in flight. */
   replyingAgentId?: string | null;
   agentNames: ReadonlyMap<string, string>;
+  /** Companion id → its picture, for the companions that have one. */
+  agentAvatars?: ReadonlyMap<string, string>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [redialing, setRedialing] = useState(false);
@@ -387,6 +427,7 @@ export function CallTranscriptItem({
                       message={message}
                       initiatorAgentId={call.initiatorAgentId}
                       agentNames={agentNames}
+                      agentAvatars={agentAvatars}
                     />
                   ))}
                   {streamingMessages.map((message) => (
@@ -395,6 +436,7 @@ export function CallTranscriptItem({
                       message={message}
                       initiatorAgentId={call.initiatorAgentId}
                       agentNames={agentNames}
+                      agentAvatars={agentAvatars}
                       streaming
                     />
                   ))}
@@ -403,6 +445,7 @@ export function CallTranscriptItem({
                       agentId={replyingAgentId}
                       initiatorAgentId={call.initiatorAgentId}
                       agentNames={agentNames}
+                      agentAvatars={agentAvatars}
                     />
                   )}
                   {ringing && newestMessage !== null && (
@@ -410,6 +453,7 @@ export function CallTranscriptItem({
                       message={newestMessage}
                       initiatorAgentId={call.initiatorAgentId}
                       agentNames={agentNames}
+                      agentAvatars={agentAvatars}
                       now={now}
                     />
                   )}

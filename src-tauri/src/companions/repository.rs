@@ -1,26 +1,35 @@
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::{Companion, CompanionWorkspace, OriginIdentity};
+use super::{avatars, Companion, CompanionWorkspace, OriginIdentity};
 use crate::{app_error::AppError, database, preferences::ModelPreference};
 
 const COMPANION_COLUMNS: &str = "id, name, memory_agent_name, model_preference_mode, model_id,
-     is_built_in, created_at, updated_at, is_origin, origin_agent_id, style_id";
+     is_built_in, created_at, updated_at, is_origin, origin_agent_id, style_id, avatar_file";
 
 pub(crate) struct CompanionRepository {
     connection: Mutex<Connection>,
+    /// Where the faces are. Derived from the database path at open time rather
+    /// than resolved independently, so the pictures cannot end up beside a
+    /// different database than the rows that name them.
+    avatars_dir: PathBuf,
 }
 
 impl CompanionRepository {
     pub(crate) fn open(path: &Path) -> Result<Self, AppError> {
         Ok(Self {
             connection: Mutex::new(database::open_connection(path)?),
+            avatars_dir: avatars::directory(path),
         })
+    }
+
+    pub(crate) fn avatars_dir(&self) -> &Path {
+        &self.avatars_dir
     }
 
     /// The built-in companion leads; the rest follow in the order they were made,
@@ -35,8 +44,9 @@ impl CompanionRepository {
             ))
             .map_err(AppError::database)?;
 
+        let avatars_dir = self.avatars_dir.clone();
         let mut companions = statement
-            .query_map([], map_companion)
+            .query_map([], move |row| map_companion(row, &avatars_dir))
             .map_err(AppError::database)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::database)?;
@@ -56,7 +66,7 @@ impl CompanionRepository {
             .query_row(
                 &format!("SELECT {COMPANION_COLUMNS} FROM companions WHERE id = ?1"),
                 [id],
-                map_companion,
+                |row| map_companion(row, &self.avatars_dir),
             )
             .optional()
             .map_err(AppError::database)?;
@@ -74,7 +84,7 @@ impl CompanionRepository {
             .query_row(
                 &format!("SELECT {COMPANION_COLUMNS} FROM companions WHERE is_built_in = 1"),
                 [],
-                map_companion,
+                |row| map_companion(row, &self.avatars_dir),
             )
             .optional()
             .map_err(AppError::database)?;
@@ -179,6 +189,29 @@ impl CompanionRepository {
         Ok(())
     }
 
+    /// Record (or clear) which file holds this companion's face.
+    ///
+    /// Separate from `update_details` because setting a picture is not an edit
+    /// of the form: it comes from a file picker, it must not require the name,
+    /// model and workspace fields to be round-tripped, and it must not be
+    /// undone by a later Save of a form that was opened before the picture was
+    /// chosen.
+    pub(crate) fn set_avatar_file(
+        &self,
+        id: &str,
+        avatar_file: Option<&str>,
+        updated_at: i64,
+    ) -> Result<(), AppError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "UPDATE companions SET avatar_file = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, avatar_file, updated_at],
+            )
+            .map_err(AppError::database)?;
+        Ok(())
+    }
+
     pub(crate) fn delete(&self, id: &str) -> Result<(), AppError> {
         let connection = self.connection()?;
         connection
@@ -194,9 +227,14 @@ impl CompanionRepository {
     }
 }
 
-fn map_companion(row: &rusqlite::Row<'_>) -> rusqlite::Result<Companion> {
+/// The row plus, when one is recorded and still on disk, the picture itself.
+///
+/// The stored column is a file name; what the UI receives is a renderable
+/// `data:` URL, so no caller outside this module ever handles an avatar path.
+fn map_companion(row: &rusqlite::Row<'_>, avatars_dir: &Path) -> rusqlite::Result<Companion> {
     let mode: String = row.get(3)?;
     let model_id: Option<String> = row.get(4)?;
+    let avatar_file: Option<String> = row.get(11)?;
     Ok(Companion {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -209,6 +247,9 @@ fn map_companion(row: &rusqlite::Row<'_>) -> rusqlite::Result<Companion> {
         is_origin: row.get::<_, i64>(8)? != 0,
         origin_agent_id: row.get(9)?,
         style_id: row.get(10)?,
+        avatar_url: avatar_file
+            .as_deref()
+            .and_then(|name| avatars::read_data_url(avatars_dir, name)),
     })
 }
 

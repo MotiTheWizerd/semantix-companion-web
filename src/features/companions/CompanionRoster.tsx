@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
 import { ConfirmDeleteButton } from "../../components/ConfirmDeleteButton";
 import { EditButton } from "../../components/EditButton";
@@ -13,11 +14,13 @@ import type { ModelPreference, UserPreferences } from "../preferences/types";
 import { listStyles, onStylesChanged, reconcileStyleEvent } from "../styles/styleService";
 import type { Style } from "../styles/types";
 import {
+  clearCompanionAvatar,
   createCompanion,
   deleteCompanion,
   listCompanions,
   onCompanionsChanged,
   reconcileCompanionEvent,
+  setCompanionAvatar,
   updateCompanion,
 } from "./companionService";
 import { companionLabel, type Companion } from "./types";
@@ -46,6 +49,12 @@ function errorMessage(error: unknown): string {
 /** One glyph for the row: the name's first letter, or a mark for the unnamed. */
 function companionInitial(companion: Companion): string {
   return companion.name?.trim().charAt(0).toUpperCase() || "◦";
+}
+
+/** The last segment of a picked path — all the form needs to confirm the
+ *  choice, and the only part of an absolute path worth showing a user. */
+function fileBaseName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
 }
 
 function workspaceSummary(companion: Companion): string {
@@ -97,8 +106,18 @@ export function CompanionRoster() {
   const [styleId, setStyleId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importingId, setImportingId] = useState<string | null>(null);
+  const [avatarBusyId, setAvatarBusyId] = useState<string | null>(null);
+  /** A picture chosen while CREATING a companion, held until there is an id to
+   *  file it under — avatars are stored by companion id, so one cannot be
+   *  written before the companion exists. Applied right after the create. */
+  const [pendingAvatarPath, setPendingAvatarPath] = useState<string | null>(null);
 
   const isEditing = editingId !== null;
+  /** The live record behind the open edit form. Read from the roster rather
+   *  than copied into form state, so a picture set from the form (which
+   *  applies at once) shows up in it immediately. */
+  const editingCompanion =
+    companions.find((companion) => companion.id === editingId) ?? null;
   const workspaceValidationError = workspaceDraftError(workspaces);
   const importingCompanion =
     companions.find((companion) => companion.id === importingId) ?? null;
@@ -155,6 +174,7 @@ export function CompanionRoster() {
     setStyleId(null);
     setError(null);
     setEditingId(null);
+    setPendingAvatarPath(null);
     setIsFormOpen(false);
   };
 
@@ -167,6 +187,7 @@ export function CompanionRoster() {
     setEditingId(null);
     setPendingDeleteId(null);
     setImportingId(null);
+    setPendingAvatarPath(null);
     setIsFormOpen(true);
   };
 
@@ -213,7 +234,7 @@ export function CompanionRoster() {
     setError(null);
     setIsSaving(true);
     try {
-      const companion = isEditing
+      let companion = isEditing
         ? await updateCompanion({
             companionId: editingId,
             name: submitted,
@@ -227,6 +248,12 @@ export function CompanionRoster() {
             workspaces: submittedWorkspaces,
             styleId,
           });
+      // The companion now has an id, so a picture chosen during the create can
+      // finally be filed. A failure here must not lose the companion that was
+      // just made, so it surfaces as an error over a saved record.
+      if (!isEditing && pendingAvatarPath) {
+        companion = await setCompanionAvatar(companion.id, pendingAvatarPath);
+      }
       setCompanions((current) =>
         reconcileCompanionEvent(current, {
           kind: isEditing ? "updated" : "created",
@@ -255,6 +282,66 @@ export function CompanionRoster() {
       setError(errorMessage(deleteError));
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  /** The native image chooser. `null` means the user cancelled. */
+  const pickImageFile = async (subject: string): Promise<string | null> => {
+    const selection = await openFileDialog({
+      multiple: false,
+      directory: false,
+      title: `Choose a picture for ${subject}`,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+    });
+    return typeof selection === "string" ? selection : null;
+  };
+
+  /** Set the picture of a companion that already exists.
+   *
+   *  Applied at once rather than on Save: a face comes from a native dialog,
+   *  and holding it until Submit would let a form opened before the choice
+   *  quietly revert it. The roster updates from the returned companion, and
+   *  `companions://changed` carries it to every other surface.
+   *
+   *  Reached from BOTH the row's picture button and the edit form's Picture
+   *  field — one path, two doors. */
+  const handleChooseAvatar = async (companion: Companion) => {
+    const selection = await pickImageFile(companionLabel(companion));
+    if (!selection) return;
+
+    setError(null);
+    setAvatarBusyId(companion.id);
+    try {
+      const updated = await setCompanionAvatar(companion.id, selection);
+      setCompanions((current) =>
+        reconcileCompanionEvent(current, { kind: "updated", companion: updated }),
+      );
+    } catch (avatarError) {
+      setError(errorMessage(avatarError));
+    } finally {
+      setAvatarBusyId(null);
+    }
+  };
+
+  /** Choosing a picture for a companion that does not exist yet: remember the
+   *  path, and let the create carry it once there is an id to file it under. */
+  const handleChoosePendingAvatar = async () => {
+    const selection = await pickImageFile("the new companion");
+    if (selection) setPendingAvatarPath(selection);
+  };
+
+  const handleClearAvatar = async (companion: Companion) => {
+    setError(null);
+    setAvatarBusyId(companion.id);
+    try {
+      const updated = await clearCompanionAvatar(companion.id);
+      setCompanions((current) =>
+        reconcileCompanionEvent(current, { kind: "updated", companion: updated }),
+      );
+    } catch (avatarError) {
+      setError(errorMessage(avatarError));
+    } finally {
+      setAvatarBusyId(null);
     }
   };
 
@@ -317,6 +404,57 @@ export function CompanionRoster() {
                 onChange={(event) => setName(event.target.value)}
               />
             </label>
+
+            <div className="credential-field credential-field--wide">
+              <span>
+                Picture <small>Optional</small>
+              </span>
+              <div className="avatar-field">
+                <span
+                  className={`avatar-field__preview${
+                    editingCompanion?.avatarUrl ? " avatar-field__preview--has-image" : ""
+                  }`}
+                  aria-hidden="true"
+                >
+                  {editingCompanion?.avatarUrl ? (
+                    <img src={editingCompanion.avatarUrl} alt="" draggable={false} />
+                  ) : (
+                    <img src="/logo-mark.png" alt="" draggable={false} />
+                  )}
+                </span>
+                <div className="avatar-field__controls">
+                  <button
+                    className="avatar-field__button"
+                    type="button"
+                    disabled={editingId !== null && avatarBusyId === editingId}
+                    onClick={() =>
+                      void (editingCompanion
+                        ? handleChooseAvatar(editingCompanion)
+                        : handleChoosePendingAvatar())
+                    }
+                  >
+                    {editingCompanion?.avatarUrl || pendingAvatarPath
+                      ? "Change image…"
+                      : "Choose image…"}
+                  </button>
+                  {editingCompanion?.avatarUrl ? (
+                    <button
+                      className="avatar-field__button avatar-field__button--quiet"
+                      type="button"
+                      disabled={editingId !== null && avatarBusyId === editingId}
+                      onClick={() => void handleClearAvatar(editingCompanion)}
+                    >
+                      Remove
+                    </button>
+                  ) : null}
+                  <small className="avatar-field__hint">
+                    {pendingAvatarPath
+                      ? `${fileBaseName(pendingAvatarPath)} — added when you save`
+                      : "PNG, JPEG, GIF or WebP, up to 4 MB. Without one, the companion wears the mark."}
+                  </small>
+                </div>
+              </div>
+            </div>
 
             <div className="credential-field credential-field--wide">
               <span>Model</span>
@@ -409,8 +547,39 @@ export function CompanionRoster() {
           <ul>
             {companions.map((companion) => (
               <li key={companion.id}>
-                <div className="credential-list__provider" aria-hidden="true">
-                  {companionInitial(companion)}
+                <div className="companion-avatar">
+                  <button
+                    className={`credential-list__provider companion-avatar__pick${
+                      companion.avatarUrl ? " companion-avatar__pick--has-image" : ""
+                    }`}
+                    type="button"
+                    disabled={avatarBusyId === companion.id}
+                    title={companion.avatarUrl ? "Change picture" : "Add a picture"}
+                    aria-label={`${
+                      companion.avatarUrl ? "Change" : "Add"
+                    } a picture for ${companionLabel(companion)}`}
+                    onClick={() => void handleChooseAvatar(companion)}
+                  >
+                    {companion.avatarUrl ? (
+                      <img src={companion.avatarUrl} alt="" draggable={false} />
+                    ) : (
+                      <span aria-hidden="true">{companionInitial(companion)}</span>
+                    )}
+                  </button>
+                  {companion.avatarUrl ? (
+                    <button
+                      className="companion-avatar__clear"
+                      type="button"
+                      disabled={avatarBusyId === companion.id}
+                      title="Remove picture"
+                      aria-label={`Remove the picture for ${companionLabel(companion)}`}
+                      onClick={() => void handleClearAvatar(companion)}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M7 7l10 10M17 7L7 17" />
+                      </svg>
+                    </button>
+                  ) : null}
                 </div>
                 <div className="credential-list__identity">
                   <strong>{companionLabel(companion)}</strong>

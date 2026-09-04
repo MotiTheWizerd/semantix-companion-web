@@ -246,6 +246,21 @@
   line-height: 1;
 }
 
+/* A companion with a face wears it here too, so a call reads as two
+   identities talking rather than two initials. The tinted background and
+   border stay off the image — a photograph brings its own edge. */
+.calls__avatar--image {
+  overflow: hidden;
+  background: none;
+  border-color: transparent;
+}
+
+.calls__avatar--image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .calls__turn--recipient .calls__avatar {
   background: rgba(var(--glow-gold), 0.09);
   border-color: rgba(var(--glow-gold), 0.17);

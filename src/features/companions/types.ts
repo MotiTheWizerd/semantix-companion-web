@@ -41,6 +41,11 @@ export interface Companion {
   /** The style this companion wears — a reference into the style library.
    *  `null` speaks plainly. */
   styleId: string | null;
+  /** The companion's face, ready to put in an `<img src>`: a `data:` URL Rust
+   *  builds from the image on disk, or `null` for the ones wearing the mark.
+   *  The file itself lives in `~/.semantix/companion/avatars/`; no path for it
+   *  ever crosses into the frontend. */
+  avatarUrl: string | null;
 }
 
 export interface CreateCompanionInput {

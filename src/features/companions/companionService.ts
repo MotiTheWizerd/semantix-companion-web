@@ -22,6 +22,21 @@ export function updateCompanion(input: UpdateCompanionInput): Promise<Companion>
   return invoke<Companion>("update_companion", { input });
 }
 
+/** Give a companion the image at `sourcePath`, replacing any it already wore.
+ *  Rust copies the file into the avatar folder and answers with the companion
+ *  as it now stands, so the caller never assembles a path of its own. */
+export function setCompanionAvatar(
+  companionId: string,
+  sourcePath: string,
+): Promise<Companion> {
+  return invoke<Companion>("set_companion_avatar", { companionId, sourcePath });
+}
+
+/** Back to the mark — the stored file is deleted, not just forgotten. */
+export function clearCompanionAvatar(companionId: string): Promise<Companion> {
+  return invoke<Companion>("clear_companion_avatar", { companionId });
+}
+
 export function deleteCompanion(companionId: string): Promise<void> {
   return invoke<void>("delete_companion", { companionId });
 }

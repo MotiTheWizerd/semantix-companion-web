@@ -7,6 +7,7 @@ import { ChatSurface } from "./components/ChatSurface";
 import { NotificationStack } from "./components/NotificationStack";
 import { ConversationTabs } from "./components/ConversationTabs";
 import { SettingsScreen } from "./components/SettingsScreen";
+import { useUiZoom } from "./features/appearance/useUiZoom";
 import { bindImportNotifications } from "./features/import/importNotifications";
 
 // The sky carries three.js (~600 kB); the chat never pays for it.
@@ -57,6 +58,10 @@ export function App() {
       removeAttachment: state.removeAttachment,
     })),
   );
+
+  // Ctrl/Cmd +/- for the whole interface. Bound at the shell so it answers
+  // from any view, and restored from the last run before the first paint.
+  useUiZoom();
 
   useEffect(() => {
     void initialise();

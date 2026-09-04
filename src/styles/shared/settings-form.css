@@ -306,6 +306,178 @@
   font-weight: 680;
 }
 
+/* A companion's face, and the two controls that set it. The glyph square the
+   roster already used becomes the button — so a companion with no picture
+   looks exactly as it did, and one with a picture wears it in the same slot
+   rather than growing a new row. */
+.companion-avatar {
+  position: relative;
+  flex: none;
+}
+
+.companion-avatar__pick {
+  position: relative;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+/* ⚑ THE SQUARE MUST LOOK CLICKABLE. It began as a plain initial glyph, and
+   making it a button changed nothing visible — the control was invisible to
+   anyone who did not already know it was there. A camera scrim on hover is
+   the idiom every avatar picker uses, and it is the whole reason this rule
+   exists. The form's Picture field is the discoverable path; this is the
+   shortcut for someone who has found it once. */
+.companion-avatar__pick::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    /* the lens */
+    radial-gradient(circle at 50% 56%, var(--text) 0 3px, transparent 3.5px),
+    /* the body */
+    linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.55));
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.companion-avatar__pick:hover:not(:disabled),
+.companion-avatar__pick:focus-visible {
+  border-color: var(--accent-border, var(--glass-border));
+  background: var(--surface-hover, var(--surface-active));
+}
+
+.companion-avatar__pick:hover:not(:disabled)::after,
+.companion-avatar__pick:focus-visible::after {
+  opacity: 1;
+}
+
+.companion-avatar__pick:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.companion-avatar__pick img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Only reachable while a picture exists, so it never sits over the initial. */
+.companion-avatar__clear {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  padding: 0;
+  background: var(--surface-active);
+  border: 1px solid var(--glass-border);
+  border-radius: 50%;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+
+.companion-avatar:hover .companion-avatar__clear,
+.companion-avatar__clear:focus-visible {
+  opacity: 1;
+}
+
+.companion-avatar__clear:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.companion-avatar__clear svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+/* The Picture field in the add/edit form — the discoverable way in. A big
+   preview, a labelled button, and one line saying what is accepted. */
+.avatar-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.avatar-field__preview {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  background: var(--surface-active);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+}
+
+/* The mark is a logo sitting INSIDE the box; a photograph fills it. */
+.avatar-field__preview img {
+  width: 68%;
+  height: 68%;
+  object-fit: contain;
+}
+
+.avatar-field__preview--has-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-field__controls {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.avatar-field__button {
+  padding: 6px 12px;
+  background: var(--surface-active);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 560;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.avatar-field__button:hover:not(:disabled) {
+  border-color: var(--accent-border, var(--glass-border));
+  background: var(--surface-hover, var(--surface-active));
+}
+
+.avatar-field__button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.avatar-field__button--quiet {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+/* Takes the whole second line so the buttons never squeeze it to nothing. */
+.avatar-field__hint {
+  flex: 1 0 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .credential-list__identity {
   display: grid;
   min-width: 0;

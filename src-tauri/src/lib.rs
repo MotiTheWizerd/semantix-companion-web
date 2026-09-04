@@ -160,6 +160,8 @@ pub fn run() {
             companions::list_companions,
             companions::create_companion,
             companions::update_companion,
+            companions::set_companion_avatar,
+            companions::clear_companion_avatar,
             companions::delete_companion,
             styles::list_styles,
             styles::get_style_exemplars,

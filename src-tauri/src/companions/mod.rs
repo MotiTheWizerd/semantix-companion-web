@@ -13,6 +13,7 @@
 //! first time a companion actually speaks — adding one here costs nothing
 //! upstream.
 
+mod avatars;
 mod repository;
 
 use std::{collections::HashSet, path::Path, sync::Arc};
@@ -90,6 +91,11 @@ pub(crate) struct Companion {
     /// never a copy. `None` speaks plainly. Deleting a style SET NULLs this,
     /// so a companion is never broken by losing its coat. See schema 21.
     pub(crate) style_id: Option<String>,
+    /// The companion's face, ready to render: a `data:` URL built from the
+    /// image on disk, or `None` for the companions that wear the mark. The
+    /// database stores a file name; the path never leaves `avatars`. See
+    /// schema 24.
+    pub(crate) avatar_url: Option<String>,
 }
 
 /// What an origin companion is allowed to sign with. Absent = the companion is
@@ -238,10 +244,37 @@ impl CompanionService {
             is_origin: false,
             origin_agent_id: None,
             style_id,
+            // A new companion wears the mark. A face is chosen afterwards,
+            // from a file picker the create form does not have.
+            avatar_url: None,
         };
 
         self.repository.insert(&companion)?;
         Ok(companion)
+    }
+
+    /// Give this companion the picture at `source`, replacing any it had.
+    ///
+    /// The file is copied in BEFORE the row is touched, so a rejected image —
+    /// wrong format, too large, gone from disk — leaves the companion exactly
+    /// as it was rather than pointing at a picture that was never written.
+    fn set_avatar(&self, companion_id: &str, source: &Path) -> Result<Companion, AppError> {
+        let current = self.require(companion_id.trim())?;
+        let file_name = avatars::store(self.repository.avatars_dir(), &current.id, source)?;
+        let timestamp = unix_timestamp_ms()?;
+        self.repository
+            .set_avatar_file(&current.id, Some(&file_name), timestamp)?;
+        self.require(&current.id)
+    }
+
+    /// Back to the mark. The file goes with the record — a cleared avatar
+    /// leaves nothing behind on disk to be found by a later reader.
+    fn clear_avatar(&self, companion_id: &str) -> Result<Companion, AppError> {
+        let current = self.require(companion_id.trim())?;
+        let timestamp = unix_timestamp_ms()?;
+        self.repository.set_avatar_file(&current.id, None, timestamp)?;
+        avatars::remove(self.repository.avatars_dir(), &current.id)?;
+        self.require(&current.id)
     }
 
     fn update(&self, input: UpdateCompanionInput) -> Result<Companion, AppError> {
@@ -285,7 +318,11 @@ impl CompanionService {
                 "The built-in companion cannot be removed.",
             ));
         }
-        self.repository.delete(&companion.id)
+        self.repository.delete(&companion.id)?;
+        // The row is gone; the face must go with it. Files are named for their
+        // owner, so a picture left here would be inherited by nothing and
+        // simply sit on disk forever.
+        avatars::remove(self.repository.avatars_dir(), &companion.id)
     }
 
     fn require(&self, id: &str) -> Result<Companion, AppError> {
@@ -430,6 +467,53 @@ pub(crate) async fn update_companion(
 ) -> Result<Companion, String> {
     let service = Arc::clone(&state.service);
     let companion = tauri::async_runtime::spawn_blocking(move || service.update(input))
+        .await
+        .map_err(|error| format!("Companion task failed: {error}"))?
+        .map_err(String::from)?;
+
+    let _ = app.emit(
+        COMPANIONS_CHANGED_EVENT,
+        CompanionChangedEvent::Updated {
+            companion: companion.clone(),
+        },
+    );
+
+    Ok(companion)
+}
+
+#[tauri::command]
+pub(crate) async fn set_companion_avatar(
+    app: AppHandle,
+    state: State<'_, CompanionState>,
+    companion_id: String,
+    source_path: String,
+) -> Result<Companion, String> {
+    let service = Arc::clone(&state.service);
+    let companion = tauri::async_runtime::spawn_blocking(move || {
+        service.set_avatar(&companion_id, Path::new(&source_path))
+    })
+    .await
+    .map_err(|error| format!("Companion task failed: {error}"))?
+    .map_err(String::from)?;
+
+    let _ = app.emit(
+        COMPANIONS_CHANGED_EVENT,
+        CompanionChangedEvent::Updated {
+            companion: companion.clone(),
+        },
+    );
+
+    Ok(companion)
+}
+
+#[tauri::command]
+pub(crate) async fn clear_companion_avatar(
+    app: AppHandle,
+    state: State<'_, CompanionState>,
+    companion_id: String,
+) -> Result<Companion, String> {
+    let service = Arc::clone(&state.service);
+    let companion = tauri::async_runtime::spawn_blocking(move || service.clear_avatar(&companion_id))
         .await
         .map_err(|error| format!("Companion task failed: {error}"))?
         .map_err(String::from)?;
@@ -866,6 +950,7 @@ mod tests {
                 is_origin: false,
                 origin_agent_id: None,
                 style_id: None,
+                avatar_url: None,
             },
         })
         .expect("created event should serialize");
