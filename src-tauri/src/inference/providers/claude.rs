@@ -262,6 +262,121 @@ fn usable_sidecar(candidate: &Path) -> Option<PathBuf> {
     dir.join("index.mjs").is_file().then_some(dir)
 }
 
+/// Resolve the `node` binary used to spawn the sidecar.
+///
+/// Why this isn't just `Command::new("node")`: a dock/Finder-launched app
+/// inherits the minimal desktop-session PATH (launchd's `/usr/bin:/bin:…`, or
+/// GNOME's `/usr/bin:/snap/bin:…`), which omits version-manager dirs — those
+/// are added by the user's shell rc, and no shell runs when you click an icon.
+/// So a bare `node` spawn dies with ENOENT even though node IS installed under
+/// `~/.nvm`, and the lane reports "install Node.js" to someone who already has
+/// it. We resolve a real path instead. Order:
+///   1. `COMPANION_NODE` / `SEMANTIX_NODE` env override (either product's var,
+///      since they ship to the same machines and a user sets one),
+///   2. `node` on PATH (keeps terminal/dev launches working),
+///   3. known version-manager + system locations,
+///   4. bare `node` (so the failure message is unchanged if node is truly absent).
+///
+/// Ported from the Studio server's identical resolver
+/// (semantix-indexer crates/semantix-server/src/routes/claude.rs).
+fn resolve_node() -> PathBuf {
+    for var in ["COMPANION_NODE", "SEMANTIX_NODE"] {
+        if let Ok(p) = std::env::var(var) {
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
+    }
+    if let Some(p) = find_on_path("node") {
+        return p;
+    }
+    if let Some(p) = find_node_in_known_dirs() {
+        return p;
+    }
+    PathBuf::from("node")
+}
+
+/// First `bin` found across the entries of `PATH`, if any.
+fn find_on_path(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(bin))
+        .find(|cand| cand.is_file())
+}
+
+/// Scan the locations version managers and packages install node into, since
+/// these never appear on a desktop-session PATH.
+fn find_node_in_known_dirs() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        // nvm: ~/.nvm/versions/node/<version>/bin/node
+        if let Some(p) = newest_node_under(&home.join(".nvm/versions/node"), |v| v.join("bin/node"))
+        {
+            return Some(p);
+        }
+        // fnm: ~/.local/share/fnm/node-versions/<v>/installation/bin/node (and legacy ~/.fnm)
+        for fnm in [
+            home.join(".local/share/fnm/node-versions"),
+            home.join(".fnm/node-versions"),
+        ] {
+            if let Some(p) = newest_node_under(&fnm, |v| v.join("installation/bin/node")) {
+                return Some(p);
+            }
+        }
+        // volta pins a single shim.
+        let volta = home.join(".volta/bin/node");
+        if volta.is_file() {
+            return Some(volta);
+        }
+    }
+    // System / package-manager installs.
+    [
+        "/usr/local/bin/node",
+        "/opt/homebrew/bin/node",
+        "/usr/bin/node",
+        "/snap/bin/node",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|c| c.is_file())
+}
+
+/// Highest-versioned `node` among the version-named subdirs of `dir`, where
+/// `to_node` maps a version dir to its node binary. None if `dir` is absent or
+/// holds no node binary.
+fn newest_node_under(dir: &Path, to_node: impl Fn(&Path) -> PathBuf) -> Option<PathBuf> {
+    let mut best: Option<((u64, u64, u64), PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let sub = entry.path();
+        let node = to_node(&sub);
+        if !node.is_file() {
+            continue;
+        }
+        let ver = sub
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(parse_version)
+            .unwrap_or((0, 0, 0));
+        if best.as_ref().map_or(true, |(b, _)| ver > *b) {
+            best = Some((ver, node));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Parse a `vMAJOR.MINOR.PATCH` (or bare `MAJOR.MINOR.PATCH`) dir name into a
+/// comparable tuple; missing/garbled parts fall back to 0 so sorting is total.
+fn parse_version(s: &str) -> (u64, u64, u64) {
+    let mut parts = s
+        .trim_start_matches('v')
+        .split('.')
+        .map(|p| p.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
 impl SidecarLink {
     /// Tell the sidecar to abandon `id`. Only a LIVE sidecar is told — a dead
     /// one has nothing to abandon, and respawning it to say so would be absurd.
@@ -302,7 +417,7 @@ impl SidecarLink {
 
     async fn spawn(&self) -> Result<SidecarHandle, StreamError> {
         let dir = sidecar_dir()?;
-        let mut child = Command::new("node")
+        let mut child = Command::new(resolve_node())
             .arg("index.mjs")
             .current_dir(&dir)
             .stdin(Stdio::piped())
@@ -583,7 +698,7 @@ impl InferenceProvider for ClaudeProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_query, SidecarEvent, SidecarLine};
+    use super::{build_query, newest_node_under, parse_version, SidecarEvent, SidecarLine};
     use crate::inference::{InferenceMessage, InferenceRequest, ModelTarget, Role};
 
     fn request(messages: Vec<InferenceMessage>) -> InferenceRequest {
@@ -713,5 +828,25 @@ mod tests {
             }
             event => panic!("expected reasoning, got {event:?}"),
         }
+    }
+
+    #[test]
+    fn version_dirs_sort_by_number_not_by_string() {
+        // The whole point of parsing: "v9.0.0" > "v10.0.0" as strings, which
+        // would pick an ancient node off a machine with several installed.
+        assert!(parse_version("v10.0.0") > parse_version("v9.0.0"));
+        assert_eq!(parse_version("v24.14.0"), (24, 14, 0));
+        assert_eq!(parse_version("24.14.0"), (24, 14, 0));
+        // Garbled or partial names sort last rather than panicking.
+        assert_eq!(parse_version("node-latest"), (0, 0, 0));
+        assert_eq!(parse_version("v22"), (22, 0, 0));
+    }
+
+    #[test]
+    fn a_missing_version_dir_yields_no_node() {
+        // An absent version-manager dir is the COMMON case (most machines have
+        // no nvm), so it must be a quiet None, never an error.
+        let missing = std::path::Path::new("/nonexistent/semantix/nvm/versions/node");
+        assert!(newest_node_under(missing, |v| v.join("bin/node")).is_none());
     }
 }
