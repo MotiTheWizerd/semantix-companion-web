@@ -92,17 +92,34 @@
   text-overflow: ellipsis;
 }
 
-/* ── HUD ─────────────────────────────────────────────────────────────── */
+/* ── the dock ────────────────────────────────────────────────────────────
+   The spell sits where the chat keeps its composer: at the floor, centred
+   over the sky, on the composer's own bottom offset (chat.css
+   --surface-pad-b) so the eye lands in the same place in both views. Notes
+   stack above the row and rise out of the glass. */
 
-.memory-sky__hud {
+.memory-sky__dock {
   position: absolute;
-  top: 18px;
+  bottom: 20px;
   left: calc(50% + var(--sky-left) / 2);
   transform: translateX(-50%);
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 10px;
-  width: min(640px, calc(100% - 48px));
+  width: min(640px, calc(100% - var(--sky-left) - 48px));
+  pointer-events: none;
+}
+
+.memory-sky__dock > * {
+  pointer-events: auto;
+}
+
+.memory-sky__hud {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
 }
 
 .memory-sky__search {
@@ -185,10 +202,6 @@
 }
 
 .memory-sky__note {
-  position: absolute;
-  top: 74px;
-  left: calc(50% + var(--sky-left) / 2);
-  transform: translateX(-50%);
   margin: 0;
   padding: 6px 14px;
   border-radius: 999px;
@@ -233,11 +246,11 @@ button.memory-sky__note.is-born:hover {
 @keyframes memory-sky-born {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(-6px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
-    transform: translateX(-50%) translateY(0);
+    transform: translateY(0);
   }
 }
 
@@ -251,13 +264,14 @@ button.memory-sky__note.is-born:hover {
 
 .memory-sky__hits {
   position: absolute;
-  top: 76px;
+  top: 22px;
   left: calc(var(--sky-left) + 22px);
   margin: 0;
   padding: 8px;
   list-style: none;
   width: 300px;
-  max-height: calc(100% - 160px);
+  /* clears the dock at the floor */
+  max-height: calc(100% - 130px);
   overflow: auto;
   border-radius: 12px;
   background: rgba(10, 8, 34, 0.55);
@@ -300,119 +314,245 @@ button.memory-sky__note.is-born:hover {
   white-space: nowrap;
 }
 
-/* ── stats ───────────────────────────────────────────────────────────── */
+/* ── the legend ──────────────────────────────────────────────────────────
+   Lives in the sidebar while the sky is up (SkyLegend.tsx), in the slot the
+   chat's recent list keeps: it takes the leftover column and scrolls inside
+   it, so the footer never moves. Its text is the pane's (tokens); its light
+   is the sky's (tints). */
 
-.memory-sky__stats {
-  position: absolute;
-  left: calc(var(--sky-left) + 22px);
-  right: 22px;
-  bottom: 16px;
-  display: flex;
+.sky-legend {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 28px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-subtle) transparent;
+}
+
+.sky-legend .sidebar-section-label {
+  position: static;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.sky-legend__types {
+  display: grid;
+  gap: 1px;
+}
+
+/* A type is a row you can put out. The bar under the name is the type's
+   share of this mind, so the key is also a map of what the mind is made of:
+   the widest bar is the type it thinks in most. */
+.sky-legend__type {
+  position: relative;
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
-  font-size: 12px;
-  color: rgba(200, 208, 255, 0.55);
-  pointer-events: none;
-}
-
-.memory-sky__stats > * {
-  pointer-events: auto;
-}
-
-/* The legend is the filter: each type is a chip you can put out. */
-
-.memory-sky__legend {
-  display: flex;
-  gap: 4px;
-  margin-left: 8px;
-}
-
-.memory-sky__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 9px 3px 7px;
-  border-radius: 999px;
-  border: 1px solid transparent;
+  column-gap: 9px;
+  width: 100%;
+  padding: 7px 10px 10px;
+  border: 0;
+  border-radius: 7px;
   background: transparent;
-  color: rgba(200, 208, 255, 0.7);
+  color: var(--text-secondary);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
+  text-align: left;
   cursor: pointer;
-  transition: color 150ms ease, border-color 150ms ease, background 150ms ease, opacity 150ms ease;
+  transition: background 140ms ease, color 140ms ease;
 }
 
-.memory-sky__chip::before {
-  content: "";
+.sky-legend__type:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.sky-legend__dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--tint);
-  box-shadow: 0 0 8px var(--tint);
-  transition: background 150ms ease, box-shadow 150ms ease;
+  box-shadow: 0 0 8px var(--tint), 0 0 2px var(--tint);
+  transition: background 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
 }
 
-.memory-sky__chip:hover {
-  color: rgba(236, 240, 255, 0.95);
-  border-color: rgba(150, 160, 255, 0.22);
-  background: rgba(10, 8, 34, 0.55);
+.sky-legend__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* put out: the dot goes hollow and the name sinks with its orbs */
-.memory-sky__chip[aria-pressed="false"] {
-  color: rgba(200, 208, 255, 0.35);
+.sky-legend__count {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sky-legend__bar {
+  position: absolute;
+  left: 26px;
+  right: 10px;
+  bottom: 5px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--tint);
+  box-shadow: 0 0 6px var(--tint);
+  opacity: 0.45;
+  transform: scaleX(var(--share, 0));
+  transform-origin: left center;
+  transition: transform 320ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 150ms ease;
+}
+
+/* put out: the dot goes hollow, the bar goes dark, the name sinks with its orbs */
+.sky-legend__type[aria-pressed="false"] {
+  color: var(--text-faint);
+}
+
+.sky-legend__type[aria-pressed="false"] .sky-legend__name {
   text-decoration: line-through;
-  text-decoration-color: rgba(200, 208, 255, 0.35);
+  text-decoration-color: var(--text-faint);
 }
 
-.memory-sky__chip[aria-pressed="false"]::before {
+.sky-legend__type[aria-pressed="false"] .sky-legend__dot {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--tint);
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
-.memory-sky__chip.is-reset {
-  padding-left: 9px;
-  color: rgba(220, 226, 255, 0.85);
-  border-color: rgba(150, 160, 255, 0.22);
+.sky-legend__type[aria-pressed="false"] .sky-legend__bar {
+  opacity: 0.1;
+  box-shadow: none;
 }
 
-.memory-sky__chip.is-reset::before {
-  display: none;
+.sky-legend__all {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
 }
 
-.memory-sky__floor {
-  display: inline-flex;
-  align-items: center;
+.sky-legend__all:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--glass-border-strong);
+}
+
+/* the lens: the floor and the ghosts */
+.sky-legend__lens {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px 10px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sky-legend__floor {
+  display: grid;
   gap: 8px;
-  margin-left: 4px;
-  font-variant-numeric: tabular-nums;
   cursor: pointer;
 }
 
-.memory-sky__floor input {
-  width: 90px;
+.sky-legend__lens-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sky-legend__lens-label b {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.sky-legend__floor input {
+  width: 100%;
   height: 2px;
   margin: 0;
   accent-color: #a97dff;
   cursor: pointer;
 }
 
-.memory-sky__archived {
-  display: inline-flex;
+.sky-legend__archived {
+  display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
   cursor: pointer;
 }
 
-.memory-sky__archived input {
+.sky-legend__archived:hover {
+  color: var(--text-secondary);
+}
+
+.sky-legend__archived input {
   margin: 0;
   accent-color: #a97dff;
   cursor: pointer;
 }
 
-.memory-sky__fps {
-  margin-left: auto;
+/* the mind's own numbers */
+.sky-legend__mind {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 6px;
+  margin: 16px 0 0;
+  padding: 14px 10px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sky-legend__mind div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sky-legend__mind dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sky-legend__mind dd small {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+
+.sky-legend__mind dt {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sky-legend__pulse {
+  margin: 12px 0 0;
+  padding: 0 10px;
+  color: var(--text-faint);
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -420,9 +560,10 @@ button.memory-sky__note.is-born:hover {
 
 .memory-sky__panel {
   position: absolute;
-  top: 76px;
+  top: 22px;
   right: 22px;
-  bottom: 52px;
+  /* clears the dock at the floor */
+  bottom: 82px;
   width: min(420px, calc(100% - 44px));
   display: flex;
   flex-direction: column;

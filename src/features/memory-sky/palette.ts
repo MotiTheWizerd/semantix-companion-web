@@ -1,23 +1,14 @@
-// The sky's colours — one family, the lightning school: white-blue cores,
-// electric blue, violet fringe, a deep indigo void. A memory's TYPE is a tint
-// inside that family, not a category colour from a chart; the sky has to read
-// as one spell, not a legend.
+// The sky's colours for the engine: the tints from tints.ts, promoted to
+// three.js Colors and cached. Anything that does not draw should import
+// tints.ts directly — this file costs three.
 
 import { Color } from "three";
 
-export const VOID_COLOR = "#06051a";
+import { DEFAULT_TINT, TYPE_TINTS } from "./tints";
 
-/** Tint per memory type. Anything unknown (Muninn carries types the organ
- *  does not, e.g. `visual`) falls to the lavender default. */
-const TYPE_TINTS: Record<string, string> = {
-  insight: "#a97dff", // violet — the spell's fringe
-  project: "#56b8ff", // electric blue — the work itself
-  reference: "#5ff0e4", // cold cyan — pointers, cool and exact
-  episodic: "#cfe4ff", // ice white — what happened
-  feedback: "#ff7ad9", // magenta — a correction leaves a mark
-  user: "#ffd58a", // pale gold — people are warm
-};
-const DEFAULT_TINT = "#b8a8ff";
+export { typeTintCss, TYPE_ORDER } from "./tints";
+
+export const VOID_COLOR = "#06051a";
 
 const cache = new Map<string, Color>();
 
@@ -30,9 +21,3 @@ export function typeColor(memType: string): Color {
   }
   return color;
 }
-
-export function typeTintCss(memType: string): string {
-  return TYPE_TINTS[memType] ?? DEFAULT_TINT;
-}
-
-export const TYPE_ORDER = ["insight", "project", "reference", "episodic", "feedback", "user"];

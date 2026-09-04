@@ -1,5 +1,6 @@
 import { CompanionMark } from "./CompanionMark";
 import type { Conversation } from "../features/chat/types";
+import { SkyLegend } from "../features/memory-sky/SkyLegend";
 import {
   userDisplayName,
   userInitial,
@@ -99,7 +100,11 @@ export function AppSidebar({
         </button>
       </nav>
 
-      {conversations.length > 0 ? (
+      {/* While the sky is up the pane is its key, not the chat's history:
+          the legend takes the list's place and the list's flex slot. */}
+      {activeView === "memory" ? (
+        <SkyLegend />
+      ) : conversations.length > 0 ? (
         <div className="conversation-list" aria-label="Recent conversations">
           <p className="sidebar-section-label">Recent</p>
           {conversations.map((conversation) => (

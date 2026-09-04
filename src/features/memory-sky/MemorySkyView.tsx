@@ -1,10 +1,12 @@
 // The Memory view — a companion's mind as a sky you look into, and search.
 //
-// React owns the chrome (search, the hover label, the memory panel, the
-// stats line); the WebGL life belongs to MemorySky. One companion's mind at a
+// React owns the chrome (search, the hover label, the memory panel); the
+// WebGL life belongs to MemorySky; the legend and the lens live in the
+// sidebar and reach here through the lens store. One companion's mind at a
 // time: the active tab's companion by default, switchable from the HUD.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { MarkdownRenderer } from "../../components/MarkdownRenderer";
 import { CompanionSelect } from "../companions/CompanionSelect";
@@ -19,10 +21,9 @@ import {
   type MemoryRecord,
 } from "../memory/organService";
 import { onMemorySlept } from "../memory/sleepService";
-import { edgeKey, MemorySky, type SkyFilter, type SkyHit, type SkyStats } from "./engine/MemorySky";
-import { typeTintCss, TYPE_ORDER } from "./palette";
-
-const NO_TYPES: ReadonlySet<string> = new Set();
+import { edgeKey, MemorySky, type SkyFilter, type SkyHit } from "./engine/MemorySky";
+import { useSkyLensStore, type SkyTypeCount } from "./skyLensStore";
+import { typeTintCss, TYPE_ORDER } from "./tints";
 
 /** THE LIVING SKY (s545). The sleeper carves while the app is used, so the
  *  mind on screen is only ever a photograph unless something tells it. Two
@@ -130,19 +131,25 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
   const [graph, setGraph] = useState<MemoryGraph | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [stats, setStats] = useState<SkyStats | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SkyHit[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [searchNote, setSearchNote] = useState<string | null>(null);
   const [selected, setSelected] = useState<SelectedMemory | null>(null);
-  // The filter is a way of looking, not a property of one mind: it survives
-  // a companion switch. Archived is a reload (the door leaves them out by
-  // default); types and the floor are a lighting pass in the engine.
-  const [hiddenTypes, setHiddenTypes] = useState<ReadonlySet<string>>(NO_TYPES);
-  const [minImportance, setMinImportance] = useState(0);
-  const [showArchived, setShowArchived] = useState(false);
-  /** What the mind just learned, said for a few seconds under the search. */
+  // The lens is the sidebar legend's — a way of looking, not a property of
+  // one mind, so it survives a companion switch. Archived is a reload (the
+  // door leaves them out by default); types and the floor are a lighting
+  // pass in the engine.
+  const { hiddenTypes, minImportance, showArchived, reportMind, reportSky } = useSkyLensStore(
+    useShallow((state) => ({
+      hiddenTypes: state.hiddenTypes,
+      minImportance: state.minImportance,
+      showArchived: state.showArchived,
+      reportMind: state.reportMind,
+      reportSky: state.reportSky,
+    })),
+  );
+  /** What the mind just learned, said for a few seconds over the search. */
   const [birthNote, setBirthNote] = useState<{ text: string; open: string | null } | null>(null);
 
   const agentIdRef = useRef<string | null>(null);
@@ -200,7 +207,7 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
         onSelect: (node) => {
           void openMemory(node?.name ?? null);
         },
-        onStats: setStats,
+        onStats: reportSky,
         onStruck: (names) => announceBirthRef.current?.(names),
       },
       namesRef.current,
@@ -209,8 +216,12 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     return () => {
       sky.dispose();
       skyRef.current = null;
+      // The legend outlives this view only as a lens; what it showed is gone.
+      reportSky(null);
+      reportMind([], null);
     };
-    // openMemory is stable enough: it reads agentId through a ref below.
+    // openMemory is stable enough: it reads agentId through a ref below; the
+    // store's actions never change identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -254,23 +265,20 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     skyRef.current?.setFilter(filter);
   }, [hiddenTypes, minImportance]);
 
-  const toggleType = (type: string) => {
-    setHiddenTypes((current) => {
-      const next = new Set(current);
-      if (next.has(type)) next.delete(type);
-      else next.add(type);
-      return next;
-    });
-  };
+  // What the legend shows: the types in this mind with their counts, and the
+  // mind's own numbers. Republished whenever the graph changes — a companion
+  // switch, a reload, a newborn folded in.
+  const typeCounts = useMemo<readonly SkyTypeCount[]>(() => {
+    const counts = new Map<string, number>();
+    for (const n of graph?.nodes ?? []) counts.set(n.mem_type, (counts.get(n.mem_type) ?? 0) + 1);
+    const ordered = TYPE_ORDER.filter((t) => counts.has(t));
+    for (const t of counts.keys()) if (!ordered.includes(t)) ordered.push(t);
+    return ordered.map((t) => [t, counts.get(t) ?? 0] as const);
+  }, [graph]);
 
-  /** Double-click a chip: only that type — or, if it already stands alone,
-   *  everything back. The two clicks before it toggle twice and cancel. */
-  const soloType = (type: string, allTypes: string[]) => {
-    setHiddenTypes((current) => {
-      const alone = !current.has(type) && allTypes.every((t) => t === type || current.has(t));
-      return alone ? NO_TYPES : new Set(allTypes.filter((t) => t !== type));
-    });
-  };
+  useEffect(() => {
+    reportMind(typeCounts, graph?.stats ?? null);
+  }, [typeCounts, graph, reportMind]);
 
   // ── the living sky ────────────────────────────────────────────────────
   // A pass that lands while this view is up grows the mind on screen: fetch
@@ -392,14 +400,6 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, hits, query, openMemory]);
 
-  const typeCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const n of graph?.nodes ?? []) counts.set(n.mem_type, (counts.get(n.mem_type) ?? 0) + 1);
-    const ordered = TYPE_ORDER.filter((t) => counts.has(t));
-    for (const t of counts.keys()) if (!ordered.includes(t)) ordered.push(t);
-    return ordered.map((t) => [t, counts.get(t) ?? 0] as const);
-  }, [graph]);
-
   return (
     <div className="memory-sky">
       <canvas ref={canvasRef} className="memory-sky__canvas" />
@@ -407,56 +407,60 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
       <div ref={namesRef} className="memory-sky__names" aria-hidden="true" />
       <div ref={labelRef} className="memory-sky__label" hidden />
 
-      <div className="memory-sky__hud">
-        <form className="memory-sky__search" onSubmit={castSearch}>
-          <input
-            type="search"
-            value={query}
-            placeholder={graph ? "Ask the sky…" : "Loading the mind…"}
-            disabled={!graph}
-            onChange={(event) => setQuery(event.target.value)}
-            aria-label="Search memories"
-          />
-          <button type="submit" disabled={!graph || isSearching}>
-            {isSearching ? "Casting…" : "Recall"}
-          </button>
-          {hits ? (
-            <button type="button" className="memory-sky__clear" onClick={clearSearch}>
-              Clear
+      {/* The dock — where the chat keeps its composer, the sky keeps its
+          spell. Notes rise out of the glass above the row. */}
+      <div className="memory-sky__dock">
+        {birthNote ? (
+          birthNote.open ? (
+            <button
+              type="button"
+              className="memory-sky__note is-born"
+              title="Open this memory"
+              onClick={() => void openMemory(birthNote.open)}
+            >
+              {birthNote.text}
             </button>
-          ) : null}
-        </form>
-
-        {companions.length > 1 ? (
-          <CompanionSelect
-            companions={companions}
-            value={companion?.id ?? null}
-            onChange={setCompanionId}
-            variant="pill"
-            eyebrow="Whose mind"
-            ariaLabel="Whose mind"
-            className="memory-sky__companion"
-          />
+          ) : (
+            <p className="memory-sky__note is-born">{birthNote.text}</p>
+          )
         ) : null}
-      </div>
+        {searchNote ? <p className="memory-sky__note">{searchNote}</p> : null}
+        {loadError ? <p className="memory-sky__note is-error">{loadError}</p> : null}
+        {isLoading ? <p className="memory-sky__note">Drawing the mind…</p> : null}
 
-      {birthNote ? (
-        birthNote.open ? (
-          <button
-            type="button"
-            className="memory-sky__note is-born"
-            title="Open this memory"
-            onClick={() => void openMemory(birthNote.open)}
-          >
-            {birthNote.text}
-          </button>
-        ) : (
-          <p className="memory-sky__note is-born">{birthNote.text}</p>
-        )
-      ) : null}
-      {searchNote ? <p className="memory-sky__note">{searchNote}</p> : null}
-      {loadError ? <p className="memory-sky__note is-error">{loadError}</p> : null}
-      {isLoading ? <p className="memory-sky__note">Drawing the mind…</p> : null}
+        <div className="memory-sky__hud">
+          <form className="memory-sky__search" onSubmit={castSearch}>
+            <input
+              type="search"
+              value={query}
+              placeholder={graph ? "Ask the sky…" : "Loading the mind…"}
+              disabled={!graph}
+              onChange={(event) => setQuery(event.target.value)}
+              aria-label="Search memories"
+            />
+            <button type="submit" disabled={!graph || isSearching}>
+              {isSearching ? "Casting…" : "Recall"}
+            </button>
+            {hits ? (
+              <button type="button" className="memory-sky__clear" onClick={clearSearch}>
+                Clear
+              </button>
+            ) : null}
+          </form>
+
+          {companions.length > 1 ? (
+            <CompanionSelect
+              companions={companions}
+              value={companion?.id ?? null}
+              onChange={setCompanionId}
+              variant="pill"
+              eyebrow="Whose mind"
+              ariaLabel="Whose mind"
+              className="memory-sky__companion"
+            />
+          ) : null}
+        </div>
+      </div>
 
       {hits && hits.length ? (
         <ol className="memory-sky__hits">
@@ -470,77 +474,6 @@ export function MemorySkyView({ companions, initialCompanionId }: MemorySkyViewP
           ))}
         </ol>
       ) : null}
-
-      <footer className="memory-sky__stats">
-        {graph ? (
-          <>
-            <span>
-              {stats && stats.visible < graph.stats.nodes
-                ? `${stats.visible.toLocaleString()} of ${graph.stats.nodes.toLocaleString()} memories`
-                : `${graph.stats.nodes.toLocaleString()} memories`}
-            </span>
-            <span>{graph.stats.link_edges.toLocaleString()} links</span>
-            <span>{graph.stats.semantic_edges.toLocaleString()} neighbours</span>
-            {graph.stats.dangling_links ? (
-              <span title="[[links]] to memories never written">
-                {graph.stats.dangling_links.toLocaleString()} promises
-              </span>
-            ) : null}
-            <span className="memory-sky__legend" role="group" aria-label="Show types">
-              {typeCounts.map(([type, count]) => (
-                <button
-                  key={type}
-                  type="button"
-                  className="memory-sky__chip"
-                  style={{ ["--tint" as string]: typeTintCss(type) }}
-                  aria-pressed={!hiddenTypes.has(type)}
-                  title={`${count} ${type} · click to toggle · double-click for only this`}
-                  onClick={() => toggleType(type)}
-                  onDoubleClick={() => soloType(type, typeCounts.map(([t]) => t))}
-                >
-                  {type}
-                </button>
-              ))}
-              {hiddenTypes.size ? (
-                <button
-                  type="button"
-                  className="memory-sky__chip is-reset"
-                  onClick={() => setHiddenTypes(NO_TYPES)}
-                  title="Show every type"
-                >
-                  all
-                </button>
-              ) : null}
-            </span>
-            <label className="memory-sky__floor" title="Sink memories below this importance">
-              <span>≥ {minImportance.toFixed(2)}</span>
-              <input
-                type="range"
-                min={0}
-                max={0.95}
-                step={0.05}
-                value={minImportance}
-                onChange={(event) => setMinImportance(Number(event.target.value))}
-                aria-label="Importance floor"
-              />
-            </label>
-            <label className="memory-sky__archived" title="Archived memories, drawn as ghosts">
-              <input
-                type="checkbox"
-                checked={showArchived}
-                onChange={(event) => setShowArchived(event.target.checked)}
-              />
-              archived
-            </label>
-          </>
-        ) : null}
-        {stats ? (
-          <span className="memory-sky__fps" title="frames per second · render scale">
-            {stats.fps} fps{stats.renderScale < 1 ? ` · ${Math.round(stats.renderScale * 100)}%` : ""}
-            {stats.settled ? "" : " · settling"}
-          </span>
-        ) : null}
-      </footer>
 
       {selected ? (
         <aside className="memory-sky__panel" aria-label="Memory">
