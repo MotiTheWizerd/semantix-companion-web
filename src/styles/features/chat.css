@@ -151,7 +151,7 @@
   height: 16px;
 }
 
-.chat-presence__orb .companion-mark__core {
+.chat-presence__orb .companion-mark__img {
   animation: presence-breathe 1.8s ease-in-out infinite;
 }
 
@@ -264,6 +264,16 @@
    state centres its wordmark against the composer in normal flow and keeps it.
    Transparent to the pointer except the form itself, so a wheel over the dock's
    dead gutters still scrolls the transcript underneath. */
+/* In the empty state the dock is a flow item in a centre-aligned column, so
+   without this it shrinks to its content and the composer comes up narrower
+   than the one the reader sees in an open chat. Stretching the cross axis
+   fills the surface's content box — the same span the absolute dock below
+   gets from left/right, so the plate keeps one width across both states.
+   Ignored once the dock goes out of flow. */
+.chat-composer-dock {
+  align-self: stretch;
+}
+
 .chat-surface.has-messages .chat-composer-dock {
   position: absolute;
   right: var(--surface-pad-x);
@@ -407,7 +417,7 @@
 @media (prefers-reduced-motion: reduce) {
   .chat-presence,
   .chat-presence__orb::after,
-  .chat-presence__orb .companion-mark__core,
+  .chat-presence__orb .companion-mark__img,
   .composer-send--stop {
     animation: none;
   }

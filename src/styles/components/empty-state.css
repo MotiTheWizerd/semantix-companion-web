@@ -7,8 +7,9 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
-  padding: 24px 24px 64px;
+  /* Near-symmetric: the composer is a flow sibling, not an overlay, so the
+     old 64px bottom pad was lifting the hero ~20px off true centre. */
+  padding: 24px 24px 32px;
   text-align: center;
 }
 
@@ -23,16 +24,21 @@
   transform: translateY(-64px);
 }
 
+/* The mirror hangs out of flow (LogoMark), so this box is only as tall as the
+   mark itself — the wordmark then rides up INTO the fade instead of waiting
+   below a column of near-invisible reflection. */
 .chat-empty-state__logo {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 24px;
+  margin-bottom: 0;
 }
 
 .chat-empty-state__wordmark {
-  margin: 24px 0 0;
+  position: relative;
+  z-index: 1;
+  margin: 34px 0 0;
   padding-left: 0.42em;
   color: var(--text-muted);
   font-family: "Helvetica Neue", Arial, sans-serif;
@@ -46,7 +52,7 @@
 
 @media (max-width: 720px) {
   .chat-empty-state {
-    padding-bottom: 44px;
+    padding-bottom: 24px;
   }
 }
 

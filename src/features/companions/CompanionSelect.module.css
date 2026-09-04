@@ -141,9 +141,11 @@
   border-radius: 7px;
 }
 
+/* The logo carries more detail than the orb it replaced, so it takes the
+   tile's spare room — 18 inside 22. No layout change; the tile is unmoved. */
 .selectedMark :global(.companion-mark) {
-  width: 15px;
-  height: 15px;
+  width: 18px;
+  height: 18px;
 }
 
 .companionItem {

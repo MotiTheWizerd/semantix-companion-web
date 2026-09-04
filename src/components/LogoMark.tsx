@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 
 /**
- * The welcome-hero mark for the empty/new-chat state — the Semantix icon
+ * The welcome-hero mark for the empty/new-chat state — the Companion logo
  * presented as a floating, lit 3D object. Ported from Semantix Studio's
  * shipping chat welcome state and built around the icon silhouette.
  *
@@ -10,8 +10,8 @@ import type { CSSProperties } from "react";
  * an SVG water filter. Reduced-motion freezes every layer at rest.
  */
 
-const ICON = "/semantix-icon.svg";
-const ASPECT = "263 / 298";
+const ICON = "/logo-mark.png";
+const ASPECT = "967 / 844";
 
 const CSS = `
 @keyframes lm-enter {
@@ -50,7 +50,12 @@ export function LogoMark({ size = 96 }: LogoMarkProps) {
   return (
     <div
       className="lm-stage"
-      style={{ display: "flex", flexDirection: "column", alignItems: "center" }}
+      style={{
+        position: "relative",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+      }}
     >
       <svg
         width="0"
@@ -109,7 +114,7 @@ export function LogoMark({ size = 96 }: LogoMarkProps) {
         />
         <img
           src={ICON}
-          alt="Semantix"
+          alt="Semantix Companion"
           draggable={false}
           style={{
             position: "relative",
@@ -146,12 +151,19 @@ export function LogoMark({ size = 96 }: LogoMarkProps) {
         />
       </div>
 
+      {/* Hung out of flow: the mirror is mostly transparent, and letting it
+          claim its full height pushed the mark up off centre and left a dead
+          column between it and the wordmark. */}
       <div
         className="lm-reflection"
         style={{
+          position: "absolute",
+          top: "100%",
+          left: "50%",
           width,
           aspectRatio: ASPECT,
           marginTop: "-14px",
+          transform: "translateX(-50%)",
           WebkitMaskImage:
             "linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.28) 42%, transparent 80%)",
           maskImage:
