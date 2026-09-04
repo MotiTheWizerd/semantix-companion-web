@@ -1,5 +1,10 @@
 import { CompanionMark } from "./CompanionMark";
 import type { Conversation } from "../features/chat/types";
+import {
+  userDisplayName,
+  userInitial,
+  type UserPreferences,
+} from "../features/preferences/types";
 import type { WorkspaceView } from "../features/workspace/companionStore";
 
 function PlusIcon() {
@@ -41,6 +46,10 @@ interface AppSidebarProps {
   activeView: WorkspaceView;
   conversations: Conversation[];
   activeConversationId: string | null;
+  userPreferences: UserPreferences;
+  /** Preferences start empty and arrive a beat later. Without this the footer
+   *  of a named install flashes "Set your name" on every launch. */
+  isInitialising: boolean;
   onViewChange: (view: WorkspaceView) => void;
   onNewConversation: () => void;
   onConversationSelect: (conversationId: string) => void;
@@ -50,10 +59,13 @@ export function AppSidebar({
   activeView,
   conversations,
   activeConversationId,
+  userPreferences,
+  isInitialising,
   onViewChange,
   onNewConversation,
   onConversationSelect,
 }: AppSidebarProps) {
+  const needsName = !isInitialising && !userPreferences.displayName;
   return (
     <aside className="app-sidebar" aria-label="Companion navigation">
       <div className="sidebar-brand">
@@ -118,14 +130,23 @@ export function AppSidebar({
           <span>Settings</span>
         </button>
 
-        <div className="sidebar-profile">
-          <span className="sidebar-profile__avatar">M</span>
+        {/* Clicking your own profile to reach your own settings is the
+            convention everywhere else, and it is the only signpost pointing at
+            where the name is set — without it, an unnamed install has no way to
+            discover that it can be named. */}
+        <button
+          className="sidebar-profile"
+          type="button"
+          onClick={() => onViewChange("settings")}
+          title={needsName ? "Set your name" : "Your settings"}
+        >
+          <span className="sidebar-profile__avatar">{userInitial(userPreferences)}</span>
           <span className="sidebar-profile__identity">
-            <strong>Moti</strong>
-            <small>Private workspace</small>
+            <strong>{userDisplayName(userPreferences)}</strong>
+            <small>{needsName ? "Set your name" : "Private workspace"}</small>
           </span>
           <span className="sidebar-profile__status" title="Companion ready" />
-        </div>
+        </button>
       </div>
     </aside>
   );

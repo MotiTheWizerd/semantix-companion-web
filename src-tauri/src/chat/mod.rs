@@ -595,7 +595,7 @@ impl ChatService {
         // companion should know who it is before it is handed what it can do or
         // what it remembers. These blocks ride the request only and are never
         // persisted.
-        if let Some(identity) = companion_identity(&companion) {
+        if let Some(identity) = companion_identity(&companion, self.user_name().as_deref()) {
             messages.insert(0, InferenceMessage::text(Role::System, identity));
         }
 
@@ -697,7 +697,11 @@ impl ChatService {
         // context that actively misleads, was the worst of both.
         let mut messages = Vec::new();
         let woken_companion = self.companions.resolve(Some(companion_id)).ok();
-        if let Some(identity) = woken_companion.as_ref().and_then(companion_identity) {
+        let user_name = self.user_name();
+        if let Some(identity) = woken_companion
+            .as_ref()
+            .and_then(|companion| companion_identity(companion, user_name.as_deref()))
+        {
             messages.push(InferenceMessage::text(Role::System, identity));
         }
         // A woken turn speaks in the same voice as an answered one — the style
@@ -787,6 +791,19 @@ impl ChatService {
             return Ok(None);
         }
         self.companions.resolve(Some(companion_id)).map(Some)
+    }
+
+    /// What to call the person this companion is talking to, if they have said.
+    ///
+    /// Every failure degrades to `None` — an unreadable preferences row means
+    /// the companion speaks without a name, never that the turn fails. A name
+    /// is a courtesy, and a courtesy must not be load-bearing.
+    fn user_name(&self) -> Option<String> {
+        self.preferences
+            .get_user_preferences()
+            .ok()?
+            .display_name()
+            .map(str::to_owned)
     }
 
     /// The style block for whoever is answering, ready to ride as a system
@@ -1547,15 +1564,32 @@ async fn close_stopped_turn(
 /// An unnamed companion gets NOTHING — no placeholder, no "you have no name".
 /// Silence is the honest state there, and inventing a line about namelessness
 /// would tell the model something the user never said.
-fn companion_identity(companion: &Companion) -> Option<String> {
+/// Who the companion is, and who it is talking to.
+///
+/// ⚑ THE PERSON GETS A NAME WHEN THEY HAVE GIVEN ONE. "The user" is a role, not
+/// a person, and a companion told only that is speaking to nobody in
+/// particular. When the name is unset this falls back to the old wording rather
+/// than inventing one — an invented name is worse than an honest role.
+///
+/// No instruction to USE the name rides with it. A model told to address
+/// someone by name says it in every sentence; a model simply told the name
+/// uses it the way a person would.
+fn companion_identity(companion: &Companion, user_name: Option<&str>) -> Option<String> {
     let name = companion
         .name
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty());
+    let user_name = user_name.map(str::trim).filter(|name| !name.is_empty());
     let mut lines = Vec::new();
+    if let Some(user_name) = user_name {
+        lines.push(format!("You are speaking with {user_name}."));
+    }
     if let Some(name) = name {
-        lines.push(format!("The user prefers to call you {name}."));
+        // The same sentence either way — only the subject changes, so the
+        // person's name is spoken exactly where "the user" used to stand.
+        let addressee = user_name.unwrap_or("The user");
+        lines.push(format!("{addressee} prefers to call you {name}."));
     }
     if companion.is_origin {
         lines.push(ORIGIN_CLOCK_ETIQUETTE.to_owned());
@@ -2342,20 +2376,60 @@ mod tests {
         };
 
         assert_eq!(
-            companion_identity(&companion(Some("Ragnar"))).as_deref(),
+            companion_identity(&companion(Some("Ragnar")), None).as_deref(),
             Some("The user prefers to call you Ragnar.")
         );
-        assert_eq!(companion_identity(&companion(None)), None);
+        assert_eq!(companion_identity(&companion(None), None), None);
         assert_eq!(
-            companion_identity(&companion(Some("   "))),
+            companion_identity(&companion(Some("   ")), None),
             None,
             "a blank name says nothing rather than saying something empty"
         );
         assert!(
-            !companion_identity(&companion(Some("Ragnar")))
+            !companion_identity(&companion(Some("Ragnar")), None)
                 .expect("a named companion says something")
                 .contains("session"),
             "a normal companion reads no numbered mind and needs no warning about one"
+        );
+    }
+
+    /// "The user" is a role, not a person. Once someone has said what to call
+    /// them, the companion is told — and the phrase disappears entirely rather
+    /// than sitting beside the name.
+    #[test]
+    fn a_companion_is_told_who_it_is_speaking_with() {
+        let companion = |name: Option<&str>| Companion {
+            id: "companion-1".to_owned(),
+            name: name.map(str::to_owned),
+            memory_agent_name: "canonical".to_owned(),
+            model_preference: ModelPreference::Inherit,
+            is_built_in: false,
+            created_at: 1,
+            updated_at: 1,
+            workspaces: Vec::new(),
+            is_origin: false,
+            origin_agent_id: None,
+            style_id: None,
+            avatar_url: None,
+        };
+
+        let told = companion_identity(&companion(Some("Ragnar")), Some("Moti"))
+            .expect("a named companion says something");
+        assert_eq!(told, "You are speaking with Moti.\nMoti prefers to call you Ragnar.");
+        assert!(
+            !told.contains("The user"),
+            "the role must not survive alongside the name: {told}"
+        );
+
+        assert_eq!(
+            companion_identity(&companion(None), Some("Moti")).as_deref(),
+            Some("You are speaking with Moti."),
+            "an unnamed companion still learns who it is talking to",
+        );
+        assert_eq!(
+            companion_identity(&companion(Some("Ragnar")), Some("   ")).as_deref(),
+            Some("The user prefers to call you Ragnar."),
+            "a blank name is no name — fall back rather than greeting an empty string",
         );
     }
 
@@ -2380,12 +2454,12 @@ mod tests {
         };
 
         let told =
-            companion_identity(&origin(Some("Studio"))).expect("an origin is told something");
+            companion_identity(&origin(Some("Studio")), None).expect("an origin is told something");
         assert!(told.starts_with("The user prefers to call you Studio."));
         assert!(told.contains("YOU DO NOT KNOW THE CURRENT SESSION NUMBER"));
 
         assert_eq!(
-            companion_identity(&origin(None)).as_deref(),
+            companion_identity(&origin(None), None).as_deref(),
             Some(ORIGIN_CLOCK_ETIQUETTE),
             "an unnamed origin still gets the warning — it is about the memory, not the name"
         );

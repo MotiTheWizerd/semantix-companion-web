@@ -8,11 +8,29 @@ export type ModelPreference =
 
 export interface UserPreferences {
   defaultModel: Exclude<ModelPreference, { mode: "inherit" }>;
+  /** What to call the person using this install. `null` until they say so —
+   *  the interface falls back to "You" rather than inventing a name. */
+  displayName: string | null;
   updatedAt: number;
 }
 
+/** A PATCH: an omitted field is left as it was. Sending `displayName: ""`
+ *  clears the name; omitting it entirely leaves the stored one alone. */
 export interface UpdateUserPreferencesInput {
-  defaultModel: Exclude<ModelPreference, { mode: "inherit" }>;
+  defaultModel?: Exclude<ModelPreference, { mode: "inherit" }>;
+  displayName?: string;
+}
+
+/** The name the interface actually shows. One function so the sidebar, the
+ *  settings form and anything later cannot drift on what "unset" looks like. */
+export function userDisplayName(preferences: UserPreferences): string {
+  return preferences.displayName?.trim() || "You";
+}
+
+/** The avatar letter. Derived from whatever is displayed, so it can never
+ *  disagree with the name beside it. */
+export function userInitial(preferences: UserPreferences): string {
+  return [...userDisplayName(preferences)][0]?.toUpperCase() ?? "Y";
 }
 
 export type UserPreferencesChangedEvent = {

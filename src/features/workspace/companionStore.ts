@@ -110,6 +110,9 @@ interface CompanionStore {
   setUserDefaultModel: (
     preference: Exclude<ModelPreference, { mode: "inherit" }>,
   ) => Promise<void>;
+  /** Rename the person using this install. An empty string clears the name.
+   *  Rejects on a refused name so the form can keep the reader in the field. */
+  setUserDisplayName: (name: string) => Promise<void>;
   sendMessage: (tabId: string, content: string) => Promise<void>;
   /** The composer's stop square: end the tab's turn where it stands. */
   stopTurn: (tabId: string) => Promise<void>;
@@ -119,6 +122,7 @@ interface CompanionStore {
 
 const EMPTY_USER_PREFERENCES: UserPreferences = {
   defaultModel: { mode: "test" },
+  displayName: null,
   updatedAt: 0,
 };
 
@@ -721,6 +725,20 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
       set({ userPreferences, preferenceError: null });
     } catch (error) {
       set({ preferenceError: errorMessage(error) });
+    }
+  },
+
+  // Only the name is sent — the update is a patch, so the default model is not
+  // re-asserted from this screen's copy of it and cannot be reverted by a save
+  // made here.
+  setUserDisplayName: async (name) => {
+    set({ preferenceError: null });
+    try {
+      const userPreferences = await updateUserPreferences({ displayName: name });
+      set({ userPreferences, preferenceError: null });
+    } catch (error) {
+      set({ preferenceError: errorMessage(error) });
+      throw error;
     }
   },
 

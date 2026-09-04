@@ -36,6 +36,7 @@ export function App() {
     stopTurn,
     attachFiles,
     removeAttachment,
+    userPreferences,
   } = useCompanionStore(
     useShallow((state) => ({
       activeView: state.activeView,
@@ -56,6 +57,7 @@ export function App() {
       stopTurn: state.stopTurn,
       attachFiles: state.attachFiles,
       removeAttachment: state.removeAttachment,
+      userPreferences: state.userPreferences,
     })),
   );
 
@@ -101,6 +103,8 @@ export function App() {
         activeView={activeView}
         conversations={conversations}
         activeConversationId={activeConversationId}
+        userPreferences={userPreferences}
+        isInitialising={isInitialising}
         onViewChange={setActiveView}
         onNewConversation={openNewConversation}
         onConversationSelect={(conversationId) => void openConversation(conversationId)}

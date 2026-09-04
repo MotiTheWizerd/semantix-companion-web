@@ -53,19 +53,41 @@ impl ModelPreference {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UserPreferences {
     default_model: ModelPreference,
+    /// What to call the person using this install. None until they say — the
+    /// interface falls back to "You" rather than guessing.
+    display_name: Option<String>,
     updated_at: i64,
 }
 
+/// A PATCH, not a replacement: every field is optional and an absent one is
+/// left exactly as it was. The alternative — one input carrying the whole row —
+/// would make renaming yourself re-send the default model, so a stale copy in
+/// one screen could silently revert a change made in another.
+///
+/// `display_name: Some("")` is meaningful: it CLEARS the name (stored NULL).
+/// Absent leaves it alone.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UpdateUserPreferencesInput {
-    default_model: ModelPreference,
+    #[serde(default)]
+    default_model: Option<ModelPreference>,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum UserPreferencesChangedEvent {
     Updated { preferences: UserPreferences },
+}
+
+impl UserPreferences {
+    /// What to call the person, for anything that speaks about them. None when
+    /// they have not said — and a caller that gets None must say something
+    /// other than a guess.
+    pub(crate) fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
 }
 
 pub(crate) struct PreferenceState {
@@ -99,7 +121,11 @@ pub(crate) async fn update_user_preferences(
 ) -> Result<UserPreferences, String> {
     let repository = Arc::clone(&state.repository);
     let preferences = tauri::async_runtime::spawn_blocking(move || {
-        repository.update_user_preferences(&input.default_model, unix_timestamp_ms()?)
+        repository.update_user_preferences(
+            input.default_model.as_ref(),
+            input.display_name.as_deref(),
+            unix_timestamp_ms()?,
+        )
     })
     .await
     .map_err(|error| format!("Preference task failed: {error}"))?

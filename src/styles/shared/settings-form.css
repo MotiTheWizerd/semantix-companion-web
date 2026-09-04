@@ -212,6 +212,34 @@
   box-shadow: 0 0 0 3px rgba(var(--glow-blue), 0.07);
 }
 
+/* The identity form is one field wide — a grid like the credential form would
+   strand the input at half width beside an empty column. */
+.identity-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  max-width: 360px;
+}
+
+.identity-form__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.identity-form__saved {
+  color: var(--success);
+  font-size: 10.5px;
+  font-weight: 560;
+}
+
+.identity-form__error {
+  color: var(--danger);
+  font-size: 10.5px;
+  font-weight: 560;
+}
+
 .credential-form__actions {
   display: flex;
   justify-content: flex-end;

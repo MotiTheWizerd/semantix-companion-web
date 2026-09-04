@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 24;
+const LATEST_SCHEMA_VERSION: i64 = 25;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -791,6 +791,18 @@ fn migration_sql(version: i64) -> &'static str {
             // is actually opened. NULL is the ordinary state — most companions
             // wear the mark, not a photograph.
             "ALTER TABLE companions ADD COLUMN avatar_file TEXT;"
+        }
+        25 => {
+            // THE USER GETS A NAME. Until now the sidebar greeted every install
+            // with a hard-coded "Moti" — the author's name shipped to strangers.
+            //
+            // It lands on the user_preferences singleton rather than a new
+            // table because that row already IS the local user: one install,
+            // one person, one row (id = 1). NULL is the honest unset state —
+            // the interface says "You" rather than inventing a name, and a
+            // blank name from the form stores NULL rather than an empty string,
+            // so "never set" and "cleared" read identically downstream.
+            "ALTER TABLE user_preferences ADD COLUMN display_name TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

@@ -244,13 +244,32 @@
   background: var(--surface-active);
 }
 
+/* A button that must not look like one: the profile is a signpost to settings,
+   not an action, so it keeps the plain footer look and earns its affordance on
+   hover alone. */
 .sidebar-profile {
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 9px;
   min-height: 48px;
   padding: 7px 8px;
+  border: 0;
   border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 140ms ease;
+}
+
+.sidebar-profile:hover {
+  background: var(--surface-hover);
+}
+
+.sidebar-profile:focus-visible {
+  outline: 1px solid rgba(var(--glow-blue), 0.5);
+  outline-offset: -1px;
 }
 
 .sidebar-profile__avatar {

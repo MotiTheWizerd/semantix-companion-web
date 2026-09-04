@@ -6,11 +6,16 @@ import { MemorySettingsSection } from "../features/memory/MemorySettingsSection"
 import { ProviderApiKeyStore } from "../features/models/credentials/ProviderApiKeyStore";
 import { ConfiguredModelStore } from "../features/models/configuredModels/ConfiguredModelStore";
 import { UserPreferenceStore } from "../features/preferences/UserPreferenceStore";
+import { UserIdentityStore } from "../features/preferences/UserIdentityStore";
 
 interface SettingsTab {
   id: string;
   label: string;
   Panel: ComponentType;
+}
+
+function YouPanel() {
+  return <UserIdentityStore />;
 }
 
 function ModelsPanel() {
@@ -35,6 +40,9 @@ function StylesPanel() {
 /** The registry drives both the tab strip and the panel — a new settings
  *  section is one entry here and nothing else. */
 const SETTINGS_TABS: SettingsTab[] = [
+  // First, because it is the one setting that is about the reader rather than
+  // the machinery — and the one a fresh install most needs answered.
+  { id: "you", label: "You", Panel: YouPanel },
   { id: "models", label: "Models", Panel: ModelsPanel },
   { id: "companions", label: "Companions", Panel: CompanionsPanel },
   { id: "styles", label: "Styles", Panel: StylesPanel },
