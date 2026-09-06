@@ -40,6 +40,11 @@ pub(crate) struct CommitUserMessage<'a> {
 /// answer from, so the full text rides along and size is governed by message
 /// count at render time, never by truncation.
 pub(crate) struct ArchiveHit {
+    /// Where the hit sits — named in the render so the model can read the
+    /// turns around it with `read_conversation`. A search finds a sentence;
+    /// the moment is the stretch of turns it sits in (s559).
+    pub(crate) conversation_id: String,
+    pub(crate) sequence: i64,
     pub(crate) conversation_title: String,
     pub(crate) role: String,
     pub(crate) day: String,
@@ -47,6 +52,29 @@ pub(crate) struct ArchiveHit {
     /// Where the conversation came from: None = born in this app,
     /// Some("claude"/"chatgpt") = imported history.
     pub(crate) source: Option<String>,
+    /// The hit sits earlier in the conversation the drill was run from —
+    /// rendered as such, so the model knows it is reading its own thread
+    /// rather than another one.
+    pub(crate) in_this_conversation: bool,
+}
+
+/// A stretch of one conversation read back in order by `read_turns` — the
+/// turns around a drill hit. Text only; an image is counted, not carried.
+pub(crate) struct ArchiveWindow {
+    pub(crate) conversation_title: String,
+    pub(crate) source: Option<String>,
+    /// The conversation's last sequence number, so the render can say where
+    /// the window sits ("turns 4-13 of 0-52") and the model can page on.
+    pub(crate) last_sequence: i64,
+    pub(crate) turns: Vec<ArchiveTurn>,
+}
+
+pub(crate) struct ArchiveTurn {
+    pub(crate) sequence: i64,
+    pub(crate) role: String,
+    pub(crate) day: String,
+    pub(crate) content: String,
+    pub(crate) image_count: i64,
 }
 
 /// One turn of an imported conversation, borrowed from the parsed export —
@@ -84,13 +112,20 @@ impl ChatRepository {
     /// had with, and no companion can read another's — the same wall the
     /// UNIQUE memory_agent_name puts around their distilled memories (s491),
     /// drawn here around the raw ones (s541: Rook could drill Hugin's past).
-    /// The current conversation is excluded — the model already holds it in
-    /// context; this drill is for the OTHER conversations.
+    /// The conversation the drill runs from is searched too, all but its LIVE
+    /// turn (the latest user message and whatever followed it — the one part
+    /// the model is guaranteed to be holding). It used to be excluded whole,
+    /// on the theory that the model already had it in context. s559 proved
+    /// the theory wrong: Hugin, forty turns past the exchange where its avatar
+    /// was born, drilled for that exchange from inside the same thread and was
+    /// told nothing matched. A resumed session compacts; the archive does
+    /// not. A companion's own earlier turns are the FIRST thing it should be
+    /// able to reach, not the one thing it cannot.
     pub(crate) fn search_messages(
         &self,
         query: &str,
         companion_id: &str,
-        exclude_conversation_id: Option<&str>,
+        current_conversation_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<ArchiveHit>, AppError> {
         let connection = self.connection()?;
@@ -98,7 +133,9 @@ impl ChatRepository {
             .prepare(
                 "SELECT c.title, m.role,
                         date(m.created_at / 1000, 'unixepoch') AS day,
-                        m.content, c.source
+                        m.content, c.source,
+                        (?3 IS NOT NULL AND m.conversation_id = ?3) AS in_this_conversation,
+                        m.conversation_id, m.sequence
                  FROM messages_fts
                  JOIN messages m ON m.rowid = messages_fts.rowid
                  JOIN conversations c ON c.id = m.conversation_id
@@ -106,26 +143,103 @@ impl ChatRepository {
                    AND c.companion_id = ?2
                    AND m.status = 'completed'
                    AND m.role IN ('user', 'assistant')
-                   AND (?3 IS NULL OR m.conversation_id <> ?3)
+                   AND (?3 IS NULL
+                        OR m.conversation_id <> ?3
+                        OR m.sequence < (SELECT COALESCE(MAX(sequence), 0)
+                                         FROM messages
+                                         WHERE conversation_id = ?3 AND role = 'user'))
                  ORDER BY bm25(messages_fts)
                  LIMIT ?4",
             )
             .map_err(AppError::database)?;
 
         let hits = statement
-            .query_map(params![query, companion_id, exclude_conversation_id, limit], |row| {
+            .query_map(params![query, companion_id, current_conversation_id, limit], |row| {
                 Ok(ArchiveHit {
                     conversation_title: row.get(0)?,
                     role: row.get(1)?,
                     day: row.get(2)?,
                     content: row.get(3)?,
                     source: row.get(4)?,
+                    in_this_conversation: row.get(5)?,
+                    conversation_id: row.get(6)?,
+                    sequence: row.get(7)?,
                 })
             })
             .map_err(AppError::database)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::database)?;
         Ok(hits)
+    }
+
+    /// The turns `from..=to` of one conversation, in order — what the
+    /// read_conversation tool hands the model once the drill has found a
+    /// hit. Same wall as the drill, failing closed: a conversation that is
+    /// not the asking companion's reads as None, never as someone else's
+    /// words. Same live-turn rule too: from the thread being drilled, the
+    /// latest user message and after it stay out.
+    pub(crate) fn read_turns(
+        &self,
+        conversation_id: &str,
+        companion_id: &str,
+        current_conversation_id: Option<&str>,
+        from: i64,
+        to: i64,
+    ) -> Result<Option<ArchiveWindow>, AppError> {
+        let connection = self.connection()?;
+        let header: Option<(String, Option<String>, i64)> = connection
+            .query_row(
+                "SELECT c.title, c.source,
+                        (SELECT COALESCE(MAX(sequence), 0) FROM messages WHERE conversation_id = c.id)
+                 FROM conversations c
+                 WHERE c.id = ?1 AND c.companion_id = ?2",
+                params![conversation_id, companion_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(AppError::database)?;
+        let Some((conversation_title, source, last_sequence)) = header else {
+            return Ok(None);
+        };
+
+        let mut statement = connection
+            .prepare(
+                "SELECT m.sequence, m.role,
+                        date(m.created_at / 1000, 'unixepoch') AS day,
+                        m.content,
+                        (SELECT COUNT(*) FROM message_attachments a WHERE a.message_id = m.id)
+                 FROM messages m
+                 WHERE m.conversation_id = ?1
+                   AND m.status = 'completed'
+                   AND m.role IN ('user', 'assistant')
+                   AND m.sequence BETWEEN ?2 AND ?3
+                   AND (?4 IS NULL
+                        OR m.conversation_id <> ?4
+                        OR m.sequence < (SELECT COALESCE(MAX(sequence), 0)
+                                         FROM messages
+                                         WHERE conversation_id = ?4 AND role = 'user'))
+                 ORDER BY m.sequence ASC",
+            )
+            .map_err(AppError::database)?;
+        let turns = statement
+            .query_map(params![conversation_id, from, to, current_conversation_id], |row| {
+                Ok(ArchiveTurn {
+                    sequence: row.get(0)?,
+                    role: row.get(1)?,
+                    day: row.get(2)?,
+                    content: row.get(3)?,
+                    image_count: row.get(4)?,
+                })
+            })
+            .map_err(AppError::database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::database)?;
+        Ok(Some(ArchiveWindow {
+            conversation_title,
+            source,
+            last_sequence,
+            turns,
+        }))
     }
 
     /// File imported conversations into the archive as real rows — hidden
@@ -749,7 +863,7 @@ fn message_by_id(connection: &Connection, message_id: &str) -> Result<Option<Mes
 mod tests {
     use std::fs;
 
-    use super::{ChatRepository, CommitUserMessage};
+    use super::{ChatRepository, CommitUserMessage, MessageAttachment};
     use crate::database;
 
     fn open_repository(tag: &str) -> (ChatRepository, std::path::PathBuf) {
@@ -813,8 +927,12 @@ mod tests {
         conversation_id
     }
 
+    /// The drill reaches the OTHER conversations and the earlier turns of
+    /// THIS one alike — only the live turn (the latest user message and what
+    /// followed it) stays out. s559: a companion drilling from inside the
+    /// very thread it was looking for used to be told nothing matched.
     #[test]
-    fn the_raw_memory_drill_finds_ranks_and_excludes() {
+    fn the_raw_memory_drill_finds_ranks_and_reaches_its_own_earlier_turns() {
         let (repository, path) = open_repository("drill");
         let companion_id = built_in_id(&path);
         let ships = seed_conversation(
@@ -828,20 +946,50 @@ mod tests {
             &repository,
             &companion_id,
             "current",
-            "The Long Serpent again, but from the conversation being excluded.",
-            "Understood.",
+            "The Long Serpent again, earlier in the conversation being drilled from.",
+            "Understood, the Serpent.",
         );
+        // The live turn: the question that triggered the drill. The model is
+        // holding it — it is the one thing the drill must not echo back.
+        repository
+            .commit_user_message(CommitUserMessage {
+                role: "user",
+                conversation_id: Some(&current),
+                companion_id: &companion_id,
+                content: "Do you remember the Serpent?",
+                title: "ignored",
+                timestamp: 1_755_800_010_000,
+                new_conversation_id: "unused",
+                message_id: "message-current-live",
+                attachments: &[],
+            })
+            .expect("the live turn should commit");
 
         let hits = repository
             .search_messages("\"serpent\"", &companion_id, Some(&current), 10)
             .expect("search should succeed");
-        assert_eq!(hits.len(), 2, "only the OTHER conversation's messages match");
-        assert!(hits.iter().all(|hit| hit.conversation_title == "Talk about ships"));
         let contents: Vec<&str> = hits.iter().map(|hit| hit.content.as_str()).collect();
+        assert_eq!(hits.len(), 4, "both conversations, minus the live turn: {contents:?}");
+        assert!(
+            !contents.contains(&"Do you remember the Serpent?"),
+            "the live turn never comes back: {contents:?}"
+        );
+        assert!(
+            contents.contains(&"The Long Serpent again, earlier in the conversation being drilled from."),
+            "the current thread's EARLIER turns are reachable: {contents:?}"
+        );
         assert!(
             contents.contains(&"My favorite ship is the Long Serpent."),
             "the WHOLE message comes back, not a snippet: {contents:?}"
         );
+        for hit in &hits {
+            assert_eq!(
+                hit.in_this_conversation,
+                hit.conversation_title == "Talk about current",
+                "a hit knows whether it sits in the drilling thread: {}",
+                hit.content
+            );
+        }
         assert_eq!(hits[0].day, "2025-08-21");
         let roles: Vec<&str> = hits.iter().map(|hit| hit.role.as_str()).collect();
         assert!(roles.contains(&"user") && roles.contains(&"assistant"));
@@ -853,7 +1001,8 @@ mod tests {
         let hits = repository
             .search_messages("\"serpent\"", &companion_id, None, 10)
             .expect("search should succeed");
-        assert_eq!(hits.len(), 3, "both conversations, completed messages only");
+        assert_eq!(hits.len(), 5, "no current thread named: everything completed, nothing live");
+        assert!(hits.iter().all(|hit| !hit.in_this_conversation));
 
         drop(repository);
         let _ = fs::remove_file(path);
@@ -875,6 +1024,99 @@ mod tests {
             )
             .expect("the companion should insert");
         id
+    }
+
+    /// The reader hands back a stretch of one conversation in order, counts
+    /// the images a turn carried, keeps the live turn out, and reads another
+    /// companion's thread as nothing at all. s559: the drill found the turn,
+    /// the companion had no way to read what was said around it.
+    #[test]
+    fn the_reader_returns_a_window_of_turns_behind_the_same_wall() {
+        let (repository, path) = open_repository("reader");
+        let rook = built_in_id(&path);
+        let hugin = companion(&path, "Hugin");
+        let thread = seed_conversation(
+            &repository,
+            &hugin,
+            "avatar",
+            "No, it's not you — I want each AI to choose its own visual.",
+            "Oh, that's a thoughtful feature!",
+        );
+        let picture = MessageAttachment {
+            id: "attachment-1".to_owned(),
+            media_type: "image/png".to_owned(),
+            data: "aGk=".to_owned(),
+        };
+        repository
+            .commit_user_message(CommitUserMessage {
+                role: "user",
+                conversation_id: Some(&thread),
+                companion_id: &hugin,
+                content: "Is this close to what you had in mind?",
+                title: "ignored",
+                timestamp: 1_755_800_010_000,
+                new_conversation_id: "unused",
+                message_id: "message-avatar-shown",
+                attachments: std::slice::from_ref(&picture),
+            })
+            .expect("the picture turn should commit");
+        repository
+            .begin_assistant_message(&thread, "message-avatar-yes", "test", "test-model", 1_755_800_011_000)
+            .expect("assistant message should begin");
+        repository
+            .complete_assistant_message("message-avatar-yes", "Oh wow, yes! That's incredibly close.", 1_755_800_012_000)
+            .expect("assistant message should complete");
+        repository
+            .commit_user_message(CommitUserMessage {
+                role: "user",
+                conversation_id: Some(&thread),
+                companion_id: &hugin,
+                content: "Do you remember when we made your avatar?",
+                title: "ignored",
+                timestamp: 1_755_800_020_000,
+                new_conversation_id: "unused",
+                message_id: "message-avatar-live",
+                attachments: &[],
+            })
+            .expect("the live turn should commit");
+
+        // From another thread: the whole stretch, images counted.
+        let window = repository
+            .read_turns(&thread, &hugin, None, 1, 3)
+            .expect("read should succeed")
+            .expect("Hugin's own thread reads");
+        assert_eq!(window.conversation_title, "Talk about avatar");
+        assert_eq!(window.last_sequence, 4);
+        let seen: Vec<(i64, &str, i64)> = window
+            .turns
+            .iter()
+            .map(|turn| (turn.sequence, turn.content.as_str(), turn.image_count))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (1, "Oh, that's a thoughtful feature!", 0),
+                (2, "Is this close to what you had in mind?", 1),
+                (3, "Oh wow, yes! That's incredibly close.", 0),
+            ]
+        );
+
+        // From inside the thread: the same window minus the live turn.
+        let inside = repository
+            .read_turns(&thread, &hugin, Some(&thread), 0, 10)
+            .expect("read should succeed")
+            .expect("Hugin's own thread reads");
+        assert_eq!(inside.turns.len(), 4, "turns 0-3; the live turn 4 stays out");
+        assert!(inside.turns.iter().all(|turn| turn.sequence < 4));
+
+        // Rook asking for Hugin's thread gets nothing — not an error, not a word.
+        assert!(repository
+            .read_turns(&thread, &rook, None, 0, 10)
+            .expect("read should succeed")
+            .is_none());
+
+        drop(repository);
+        let _ = fs::remove_file(path);
     }
 
     /// The wall between companions, drawn around the RAW memory too: a

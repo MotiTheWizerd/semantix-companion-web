@@ -12,7 +12,7 @@ mod files;
 use std::path::{Path, PathBuf};
 
 use crate::agent_mail::{AgentMailRepository, SendAgentMessage};
-use crate::chat::repository::{ArchiveHit, ChatRepository};
+use crate::chat::repository::{ArchiveHit, ArchiveWindow, ChatRepository};
 use crate::companions::{Companion, CompanionRepository};
 use crate::inference::{ToolCall, ToolDeclaration};
 use crate::memory;
@@ -22,6 +22,7 @@ use crate::web;
 pub(crate) const RECALL_MEMORY: &str = "recall_memory";
 pub(crate) const CARVE_MEMORY: &str = "carve_memory";
 pub(crate) const SEARCH_CONVERSATIONS: &str = "search_conversations";
+pub(crate) const READ_CONVERSATION: &str = "read_conversation";
 pub(crate) const WEB_SEARCH: &str = "web_search";
 pub(crate) const WEB_FETCH: &str = "web_fetch";
 pub(crate) const LIST_AGENTS: &str = "list_agents";
@@ -38,7 +39,10 @@ pub(crate) const LIST_CALLS: &str = "list_calls";
 /// so the chat lane keeps these off the transcript entirely (Moti, s540:
 /// "make all memory tool calling invisible — let it feel like real memory").
 pub(crate) fn is_memory_tool(name: &str) -> bool {
-    matches!(name, RECALL_MEMORY | CARVE_MEMORY | SEARCH_CONVERSATIONS)
+    matches!(
+        name,
+        RECALL_MEMORY | CARVE_MEMORY | SEARCH_CONVERSATIONS | READ_CONVERSATION
+    )
 }
 
 /// Turns returned by `read_call`. A call cannot hold more than
@@ -54,6 +58,9 @@ const SEARCH_MAX_LIMIT: u32 = 20;
 /// many chars are spent, but never truncates one (count is the only dial;
 /// the best match always comes back whole, however big).
 const SEARCH_RENDER_BUDGET_CHARS: usize = 24_000;
+/// read_conversation's window: turns before and after the one asked for.
+const READ_DEFAULT_SPAN: i64 = 6;
+const READ_MAX_SPAN: i64 = 20;
 
 const WEB_SEARCH_DEFAULT_LIMIT: u32 = 5;
 const WEB_SEARCH_MAX_LIMIT: u32 = 10;
@@ -175,15 +182,20 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
             description: concat!(
                 "Search the full text of your past conversations with this ",
                 "user — your raw, word-for-word memory of everything said ",
-                "here, distinct from your distilled long-term memories. This ",
-                "includes conversations imported from the user's Claude or ",
-                "ChatGPT history (marked with their origin), once an import ",
-                "has filed them. Use it when the user refers to something ",
-                "from another conversation, or when a recalled memory lacks ",
-                "the exact detail. Each result is the WHOLE message the match ",
-                "sits in, best matches first. This is your own memory of your ",
-                "shared history: weave it in naturally, don't narrate the ",
-                "search.",
+                "here, distinct from your distilled long-term memories. It ",
+                "reaches every conversation you have had, including the ",
+                "earlier turns of THIS one (only the turn you are answering ",
+                "now is left out), and conversations imported from the user's ",
+                "Claude or ChatGPT history (marked with their origin), once an ",
+                "import has filed them. Use it when the user refers to ",
+                "something from another conversation, when they recall a ",
+                "moment from this one that you no longer see, or when a ",
+                "recalled memory lacks the exact detail. Each result is the ",
+                "WHOLE message the match sits in, best matches first, and ",
+                "names its conversation and turn — a search finds a sentence; ",
+                "to get back to the MOMENT, read the turns around a hit with ",
+                "read_conversation. This is your own memory of your shared ",
+                "history: weave it in naturally, don't narrate the search.",
             )
             .to_owned(),
             parameters: serde_json::json!({
@@ -191,7 +203,11 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Words to search for, e.g. \"scooter lock\". Plain words work best."
+                        "description": concat!(
+                            "Words to search for, e.g. \"scooter lock\". A few plain words work best: ",
+                            "messages holding every word come first; if none does, messages holding ",
+                            "some of them come back instead, and the result says so."
+                        )
                     },
                     "limit": {
                         "type": "integer",
@@ -199,6 +215,44 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                     }
                 },
                 "required": ["query"]
+            }),
+        });
+        tools.push(ToolDeclaration {
+            name: READ_CONVERSATION.to_owned(),
+            description: concat!(
+                "Read a stretch of one of your past conversations with this ",
+                "user in order — the turns around a search hit. This is how ",
+                "you get back to a moment rather than a sentence: ",
+                "search_conversations finds the conversation and the turn, ",
+                "this reads what was said before and after it, including the ",
+                "turns no search word would land on (a picture shown, a ",
+                "'yes', a 'one shotted it'). Images are counted, not shown. ",
+                "Only your own conversations read; the turn you are answering ",
+                "now stays out. Weave what you find in naturally, as your own ",
+                "memory.",
+            )
+            .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "conversation": {
+                        "type": "string",
+                        "description": "The conversation id, exactly as a search result names it."
+                    },
+                    "around_turn": {
+                        "type": "integer",
+                        "description": "The turn number to read around, as a search result names it."
+                    },
+                    "before": {
+                        "type": "integer",
+                        "description": "Turns to read before it (default 6, max 20)."
+                    },
+                    "after": {
+                        "type": "integer",
+                        "description": "Turns to read after it (default 6, max 20)."
+                    }
+                },
+                "required": ["conversation", "around_turn"]
             }),
         });
     }
@@ -640,18 +694,66 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
                 .clone()
                 .ok_or_else(|| "the conversation archive needs to know who is asking".to_owned())?;
             let (query, limit) = parse_search_arguments(&call.arguments)?;
-            let fts_query = fts_match_expression(&query)
+            let every_word = fts_match_expression(&query)
                 .ok_or_else(|| "give at least one word to search for".to_owned())?;
-            let exclude = context.conversation_id.clone();
-            let hits = tauri::async_runtime::spawn_blocking(move || {
+            let any_word = fts_any_expression(&query);
+            let current = context.conversation_id.clone();
+            let (hits, loosened) = tauri::async_runtime::spawn_blocking(move || {
                 let repository = ChatRepository::open(&path).map_err(String::from)?;
-                repository
-                    .search_messages(&fts_query, &companion_id, exclude.as_deref(), limit)
-                    .map_err(String::from)
+                let strict = repository
+                    .search_messages(&every_word, &companion_id, current.as_deref(), limit)
+                    .map_err(String::from)?;
+                if !strict.is_empty() {
+                    return Ok::<_, String>((strict, false));
+                }
+                // No message holds every word. A model asks the archive in
+                // sentences ("memory gap avatar conversation search drill") and
+                // implicit AND answered every such sentence with nothing (s559,
+                // Hugin's bug report) — so the second pass takes any word,
+                // bm25 ranks the messages holding the most of them first, and
+                // the render says which pass answered.
+                match any_word {
+                    Some(any_word) => repository
+                        .search_messages(&any_word, &companion_id, current.as_deref(), limit)
+                        .map(|hits| (hits, true))
+                        .map_err(String::from),
+                    None => Ok((strict, false)),
+                }
             })
             .await
             .map_err(|error| format!("the archive search task failed: {error}"))??;
-            Ok(render_archive_hits(&query, &hits))
+            Ok(render_archive_hits(&query, &hits, loosened))
+        }
+        READ_CONVERSATION => {
+            let path = context
+                .database_path
+                .clone()
+                .ok_or_else(|| "the conversation archive is not available".to_owned())?;
+            // Same wall as the drill, for the same reason: without an owner
+            // this would read anyone's conversation.
+            let companion_id = context
+                .companion_id
+                .clone()
+                .ok_or_else(|| "the conversation archive needs to know who is asking".to_owned())?;
+            let window = parse_read_arguments(&call.arguments)?;
+            let current = context.conversation_id.clone();
+            let read = tauri::async_runtime::spawn_blocking(move || {
+                let repository = ChatRepository::open(&path).map_err(String::from)?;
+                repository
+                    .read_turns(
+                        &window.conversation,
+                        &companion_id,
+                        current.as_deref(),
+                        window.from,
+                        window.to,
+                    )
+                    .map(|read| (window, read))
+                    .map_err(String::from)
+            })
+            .await
+            .map_err(|error| format!("the archive read task failed: {error}"))??;
+            let (window, read) = read;
+            Ok(render_conversation_window(&window, read.as_ref()))
         }
         WEB_SEARCH => {
             let api_key = context
@@ -1135,21 +1237,41 @@ fn parse_query_and_limit(
 /// string instead: split on whitespace, double any inner quotes, join with
 /// implicit AND. None = nothing searchable survived.
 fn fts_match_expression(query: &str) -> Option<String> {
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect();
+    let terms = fts_terms(query);
     if terms.is_empty() {
         return None;
     }
     Some(terms.join(" "))
 }
 
+/// The loose pass: the same quoted terms joined with OR, so a message holding
+/// ANY of the words matches and bm25 ranks the ones holding more of them
+/// first. None when the query has fewer than two words — with one word the
+/// two passes are the same query, and a second run would be a wasted one.
+fn fts_any_expression(query: &str) -> Option<String> {
+    let terms = fts_terms(query);
+    if terms.len() < 2 {
+        return None;
+    }
+    Some(terms.join(" OR "))
+}
+
+fn fts_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect()
+}
+
 /// Hits rendered for the model: one block per WHOLE message — who said it,
 /// when, in which conversation, then the full text. Size is governed by
 /// dropping trailing messages once the char budget is spent, never by
 /// cutting one open; the best match is always included whole.
-fn render_archive_hits(query: &str, hits: &[ArchiveHit]) -> String {
+///
+/// `loosened` = the every-word pass found nothing and these are the any-word
+/// hits: the header says so, since a partial match presented as a full one
+/// is how a model comes to "remember" something that was never said.
+fn render_archive_hits(query: &str, hits: &[ArchiveHit], loosened: bool) -> String {
     if hits.is_empty() {
         return format!("nothing in your past conversations matches \"{query}\"");
     }
@@ -1169,9 +1291,17 @@ fn render_archive_hits(query: &str, hits: &[ArchiveHit]) -> String {
             Some("chatgpt") => " · from their imported ChatGPT history",
             _ => "",
         };
+        // A hit from the thread being drilled says so — the model is reading
+        // its own earlier turns, not another conversation with the same title.
+        let place = if hit.in_this_conversation {
+            "earlier in this conversation".to_owned()
+        } else {
+            format!("{}{}", hit.conversation_title, origin)
+        };
+        // The address — where read_conversation can pick the thread up.
         let block = format!(
-            "[{} · {}{} · {}]\n{}",
-            hit.day, hit.conversation_title, origin, who, hit.content
+            "[{} · {} · {} · turn {} · conversation {}]\n{}",
+            hit.day, place, who, hit.sequence, hit.conversation_id, hit.content
         );
         if !blocks.is_empty() && spent + block.len() > SEARCH_RENDER_BUDGET_CHARS {
             break;
@@ -1180,14 +1310,125 @@ fn render_archive_hits(query: &str, hits: &[ArchiveHit]) -> String {
         blocks.push(block);
     }
     let withheld = hits.len() - blocks.len();
-    let mut rendered = format!(
-        "{} message(s) from your past conversations, best match first:\n\n{}",
-        blocks.len(),
-        blocks.join("\n\n")
-    );
+    let header = if loosened {
+        format!(
+            "no message holds every word of \"{query}\" — {} message(s) holding some of them, closest first:",
+            blocks.len()
+        )
+    } else {
+        format!(
+            "{} message(s) from your past conversations, best match first:",
+            blocks.len()
+        )
+    };
+    let mut rendered = format!("{header}\n\n{}", blocks.join("\n\n"));
     if withheld > 0 {
         rendered.push_str(&format!(
             "\n\n({withheld} more matching message(s) withheld to stay readable — narrow the query to reach them)"
+        ));
+    }
+    rendered
+}
+
+/// What read_conversation was asked for, resolved to a turn range.
+struct ReadWindow {
+    conversation: String,
+    around: i64,
+    from: i64,
+    to: i64,
+}
+
+fn parse_read_arguments(arguments: &str) -> Result<ReadWindow, String> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|error| format!("arguments were not valid JSON: {error}"))?;
+    let conversation = parsed
+        .get("conversation")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "a non-empty \"conversation\" id is required".to_owned())?;
+    let around = parsed
+        .get("around_turn")
+        .and_then(|value| value.as_i64())
+        .filter(|turn| *turn >= 0)
+        .ok_or_else(|| "\"around_turn\" must be a turn number, 0 or more".to_owned())?;
+    let span = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|value| value.as_i64())
+            .map(|span| span.clamp(0, READ_MAX_SPAN))
+            .unwrap_or(READ_DEFAULT_SPAN)
+    };
+    Ok(ReadWindow {
+        conversation,
+        around,
+        from: (around - span("before")).max(0),
+        to: around + span("after"),
+    })
+}
+
+/// A window of turns rendered for the model, in order, whole — the same
+/// char budget as the drill, spent on whole turns and never on cutting one
+/// open. None = not this companion's conversation (or no such conversation),
+/// which reads the same either way: the wall does not confirm what it hides.
+fn render_conversation_window(window: &ReadWindow, read: Option<&ArchiveWindow>) -> String {
+    let Some(read) = read else {
+        return format!(
+            "conversation {} is not one of yours — only your own past conversations can be read",
+            window.conversation
+        );
+    };
+    let origin = match read.source.as_deref() {
+        Some("claude") => " · from their imported Claude history",
+        Some("chatgpt") => " · from their imported ChatGPT history",
+        _ => "",
+    };
+    if read.turns.is_empty() {
+        return format!(
+            "\"{}\"{} has no turns {}-{} to read — it runs from turn 0 to turn {}",
+            read.conversation_title, origin, window.from, window.to, read.last_sequence
+        );
+    }
+    let mut blocks: Vec<String> = Vec::new();
+    let mut spent = 0usize;
+    for turn in &read.turns {
+        let who = match (turn.role.as_str(), read.source.is_some()) {
+            ("user", _) => "the user said",
+            (_, true) => "the assistant said",
+            (_, false) => "you said",
+        };
+        let pictures = match turn.image_count {
+            0 => String::new(),
+            1 => " · 1 image shown here (not carried)".to_owned(),
+            n => format!(" · {n} images shown here (not carried)"),
+        };
+        let marker = if turn.sequence == window.around { " ◀" } else { "" };
+        let block = format!(
+            "[turn {} · {} · {}{}]{}\n{}",
+            turn.sequence, turn.day, who, pictures, marker, turn.content
+        );
+        if !blocks.is_empty() && spent + block.len() > SEARCH_RENDER_BUDGET_CHARS {
+            break;
+        }
+        spent += block.len();
+        blocks.push(block);
+    }
+    let first = read.turns[0].sequence;
+    let last = read.turns[blocks.len() - 1].sequence;
+    let mut rendered = format!(
+        "\"{}\"{} · turns {}-{} of 0-{}:\n\n{}",
+        read.conversation_title,
+        origin,
+        first,
+        last,
+        read.last_sequence,
+        blocks.join("\n\n")
+    );
+    let withheld = read.turns.len() - blocks.len();
+    if withheld > 0 {
+        rendered.push_str(&format!(
+            "\n\n({withheld} more turn(s) withheld to stay readable — read a narrower window to reach them)"
         ));
     }
     rendered
@@ -1337,10 +1578,11 @@ fn render_memory(memory: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        declarations, execute, fts_match_expression, parse_carve_arguments, parse_name_argument,
-        parse_search_arguments, parse_url_argument, parse_web_search_arguments,
-        render_archive_hits, render_carve_outcome, render_memory, render_web_page,
-        render_web_search, workspace_for_call, ToolContext, ToolWorkspace,
+        declarations, execute, fts_any_expression, fts_match_expression, parse_carve_arguments,
+        parse_name_argument, parse_read_arguments, parse_search_arguments, parse_url_argument,
+        parse_web_search_arguments, render_archive_hits, render_carve_outcome,
+        render_conversation_window, render_memory, render_web_page, render_web_search,
+        workspace_for_call, ChatRepository, ReadWindow, ToolContext, ToolWorkspace,
     };
     use super::{execute_mail, LIST_AGENTS, MARK_MESSAGE_READ, READ_MESSAGES, SEND_MESSAGE};
     use super::{execute_call, LIST_CALLS, OPEN_CALL, READ_CALL, SEND_IN_CALL};
@@ -2003,6 +2245,11 @@ mod tests {
             ..ToolContext::default()
         });
         assert_eq!(archive_signed[0].name, "search_conversations");
+        assert_eq!(archive_signed[1].name, "read_conversation");
+        assert_eq!(
+            archive_signed[1].parameters["required"],
+            serde_json::json!(["conversation", "around_turn"])
+        );
         assert!(archive_signed.iter().any(|declaration| declaration.name == "web_fetch"));
 
         let web_only = declarations(&ToolContext {
@@ -2076,8 +2323,8 @@ mod tests {
         });
         assert_eq!(
             everything.len(),
-            18,
-            "ten, plus the four mail tools and the four call tools"
+            19,
+            "eleven, plus the four mail tools and the four call tools"
         );
     }
 
@@ -2208,28 +2455,274 @@ mod tests {
         assert_eq!(fts_match_expression("   "), None);
     }
 
+    /// The loose pass ORs the same quoted terms — and does not exist for a
+    /// single word, where it would only repeat the strict pass.
+    #[test]
+    fn fts_any_expression_ors_the_terms_and_skips_single_words() {
+        assert_eq!(
+            fts_any_expression("avatar creation Rook").as_deref(),
+            Some(r#""avatar" OR "creation" OR "Rook""#)
+        );
+        assert_eq!(fts_any_expression("avatar"), None);
+        assert_eq!(fts_any_expression("   "), None);
+    }
+
+    /// s559, Hugin's bug report: a sentence-shaped query used to get
+    /// "nothing matches" because implicit AND wanted every word in one
+    /// message. Now the every-word pass runs first, and when it finds
+    /// nothing the any-word pass answers — labelled as the looser match.
+    #[tokio::test]
+    async fn the_drill_falls_back_to_any_word_when_no_message_holds_every_word() {
+        use crate::chat::repository::CommitUserMessage;
+
+        let path = mail_fixture("drill-loose");
+        let me = built_in(&path);
+        let repository = ChatRepository::open(&path).expect("archive should open");
+        repository
+            .commit_user_message(CommitUserMessage {
+                role: "user",
+                conversation_id: None,
+                companion_id: &me,
+                content: "Let's design your avatar today.",
+                title: "Avatar day",
+                timestamp: 1_756_900_000_000,
+                new_conversation_id: "conversation-avatar",
+                message_id: "message-avatar-user",
+                attachments: &[],
+            })
+            .expect("the seed turn should commit");
+        drop(repository);
+
+        let context = ToolContext {
+            database_path: Some(path.clone()),
+            companion_id: Some(me),
+            ..ToolContext::default()
+        };
+        let call = |query: &str| ToolCall {
+            id: "call-1".to_owned(),
+            name: super::SEARCH_CONVERSATIONS.to_owned(),
+            arguments: format!(r#"{{"query":"{query}"}}"#),
+        };
+
+        // Every word present: the strict pass answers, no caveat.
+        let strict = execute(&call("avatar design"), &context).await.expect("drill runs");
+        assert!(strict.starts_with("1 message(s) from your past conversations"), "{strict}");
+
+        // A sentence with words nobody said: the loose pass answers, and says so.
+        let loose = execute(&call("memory gap avatar conversation search"), &context)
+            .await
+            .expect("drill runs");
+        assert!(loose.starts_with("no message holds every word of"), "{loose}");
+        assert!(loose.contains("Let's design your avatar today."), "{loose}");
+
+        // Nothing at all matches: still an honest nothing.
+        let nothing = execute(&call("serpent keel"), &context).await.expect("drill runs");
+        assert!(nothing.starts_with("nothing in your past conversations"), "{nothing}");
+
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn archive_hits_render_whole_messages_with_who_when_and_where() {
         assert_eq!(
-            render_archive_hits("ships", &[]),
+            render_archive_hits("ships", &[], false),
             "nothing in your past conversations matches \"ships\""
         );
         let rendered = render_archive_hits(
             "ships",
             &[ArchiveHit {
+                conversation_id: "conversation-ships".to_owned(),
+                sequence: 4,
                 conversation_title: "Longships".to_owned(),
                 role: "user".to_owned(),
                 day: "2026-08-22".to_owned(),
                 content: "My favorite ship is the Long Serpent.\nA whole message, every line of it.".to_owned(),
                 source: None,
+                in_this_conversation: false,
             }],
+            false,
         );
         assert_eq!(
             rendered,
             "1 message(s) from your past conversations, best match first:\n\n\
-             [2026-08-22 · Longships · the user said]\n\
+             [2026-08-22 · Longships · the user said · turn 4 · conversation conversation-ships]\n\
              My favorite ship is the Long Serpent.\nA whole message, every line of it."
         );
+    }
+
+    /// A hit from the drilling thread is placed as "earlier in this
+    /// conversation", and a loosened result carries its caveat in the header.
+    #[test]
+    fn archive_render_places_own_thread_hits_and_flags_loose_matches() {
+        let rendered = render_archive_hits(
+            "avatar creation",
+            &[ArchiveHit {
+                conversation_id: "114a3d4a".to_owned(),
+                sequence: 11,
+                conversation_title: "Hi Hugin, how is your new home".to_owned(),
+                role: "assistant".to_owned(),
+                day: "2026-09-04".to_owned(),
+                content: "Carved. Now, what about Rook's avatar?".to_owned(),
+                source: None,
+                in_this_conversation: true,
+            }],
+            true,
+        );
+        assert_eq!(
+            rendered,
+            "no message holds every word of \"avatar creation\" — 1 message(s) holding some of them, closest first:\n\n\
+             [2026-09-04 · earlier in this conversation · you said · turn 11 · conversation 114a3d4a]\n\
+             Carved. Now, what about Rook's avatar?"
+        );
+    }
+
+    /// The reader's render: turns in order, the asked-for turn marked, an
+    /// image counted where it was shown, and a foreign or missing
+    /// conversation refused in the same words either way.
+    #[test]
+    fn conversation_window_renders_turns_in_order_and_marks_the_one_asked_for() {
+        use crate::chat::repository::{ArchiveTurn, ArchiveWindow};
+
+        let window = ReadWindow {
+            conversation: "114a3d4a".to_owned(),
+            around: 7,
+            from: 6,
+            to: 8,
+        };
+        let read = ArchiveWindow {
+            conversation_title: "Hi Hugin, how is your new home".to_owned(),
+            source: None,
+            last_sequence: 52,
+            turns: vec![
+                ArchiveTurn {
+                    sequence: 6,
+                    role: "user".to_owned(),
+                    day: "2026-09-04".to_owned(),
+                    content: "Is this close to what you had in mind?".to_owned(),
+                    image_count: 1,
+                },
+                ArchiveTurn {
+                    sequence: 7,
+                    role: "assistant".to_owned(),
+                    day: "2026-09-04".to_owned(),
+                    content: "Oh wow, yes!".to_owned(),
+                    image_count: 0,
+                },
+            ],
+        };
+        assert_eq!(
+            render_conversation_window(&window, Some(&read)),
+            "\"Hi Hugin, how is your new home\" · turns 6-7 of 0-52:\n\n\
+             [turn 6 · 2026-09-04 · the user said · 1 image shown here (not carried)]\n\
+             Is this close to what you had in mind?\n\n\
+             [turn 7 · 2026-09-04 · you said] ◀\n\
+             Oh wow, yes!"
+        );
+        assert_eq!(
+            render_conversation_window(&window, None),
+            "conversation 114a3d4a is not one of yours — only your own past conversations can be read"
+        );
+        let empty = ArchiveWindow { turns: vec![], ..read };
+        assert_eq!(
+            render_conversation_window(&window, Some(&empty)),
+            "\"Hi Hugin, how is your new home\" has no turns 6-8 to read — it runs from turn 0 to turn 52"
+        );
+    }
+
+    #[test]
+    fn read_arguments_resolve_to_a_clamped_window() {
+        let window = parse_read_arguments(r#"{"conversation":" abc ","around_turn":13}"#).unwrap();
+        assert_eq!((window.conversation.as_str(), window.around, window.from, window.to), ("abc", 13, 7, 19));
+        let edge = parse_read_arguments(r#"{"conversation":"abc","around_turn":2,"before":99,"after":0}"#).unwrap();
+        assert_eq!((edge.from, edge.to), (0, 2));
+        assert!(parse_read_arguments(r#"{"conversation":"abc"}"#).is_err());
+        assert!(parse_read_arguments(r#"{"conversation":"","around_turn":1}"#).is_err());
+        assert!(parse_read_arguments(r#"{"conversation":"abc","around_turn":-1}"#).is_err());
+    }
+
+    /// s559, the second half of Hugin's report: the drill found turn 13 of the
+    /// avatar thread and Hugin had no way to read the turns around it. Now a
+    /// hit is an address, and read_conversation follows it — behind the same
+    /// wall as the drill.
+    #[tokio::test]
+    async fn the_reader_follows_a_hit_back_to_the_moment_and_refuses_other_threads() {
+        use crate::chat::repository::CommitUserMessage;
+
+        let path = mail_fixture("drill-read");
+        let me = built_in(&path);
+        let other = companion(&path, "Hugin");
+        let repository = ChatRepository::open(&path).expect("archive should open");
+        let seed = |companion: &str, id: &str, turns: &[&str]| {
+            for (index, text) in turns.iter().enumerate() {
+                repository
+                    .commit_user_message(CommitUserMessage {
+                        role: "user",
+                        conversation_id: (index > 0).then_some(id),
+                        companion_id: companion,
+                        content: text,
+                        title: "Avatar day",
+                        timestamp: 1_756_900_000_000 + index as i64,
+                        new_conversation_id: id,
+                        message_id: &format!("{id}-{index}"),
+                        attachments: &[],
+                    })
+                    .expect("the seed turn should commit");
+            }
+        };
+        seed(&me, "mine", &["Let's design your avatar.", "Is this close?", "One shotted it.", "So, the roadmap."]);
+        seed(&other, "theirs", &["Hugin, between us.", "The keel was rotten."]);
+        drop(repository);
+
+        let context = ToolContext {
+            database_path: Some(path.clone()),
+            companion_id: Some(me),
+            ..ToolContext::default()
+        };
+        let call = |arguments: &str| ToolCall {
+            id: "call-1".to_owned(),
+            name: super::READ_CONVERSATION.to_owned(),
+            arguments: arguments.to_owned(),
+        };
+
+        // A search hit names the thread and turn; reading around it gives the moment.
+        let found = execute(
+            &ToolCall {
+                id: "call-0".to_owned(),
+                name: super::SEARCH_CONVERSATIONS.to_owned(),
+                arguments: r#"{"query":"avatar"}"#.to_owned(),
+            },
+            &context,
+        )
+        .await
+        .expect("drill runs");
+        assert!(found.contains("turn 0 · conversation mine"), "{found}");
+
+        let moment = execute(&call(r#"{"conversation":"mine","around_turn":1,"before":1,"after":1}"#), &context)
+            .await
+            .expect("reading runs");
+        assert!(moment.starts_with("\"Avatar day\" · turns 0-2 of 0-3:"), "{moment}");
+        assert!(moment.contains("[turn 1 · "), "{moment}");
+        assert!(moment.contains("Is this close?") && moment.contains("One shotted it."), "{moment}");
+        assert!(!moment.contains("So, the roadmap."), "{moment}");
+
+        // Another companion's thread: refused, and not told whether it exists.
+        let refused = execute(&call(r#"{"conversation":"theirs","around_turn":0}"#), &context)
+            .await
+            .expect("the refusal is an answer, not an error");
+        assert!(refused.contains("not one of yours"), "{refused}");
+        assert!(!refused.contains("keel"), "{refused}");
+
+        // And no identity, no reading at all.
+        let unowned = ToolContext {
+            database_path: Some(path.clone()),
+            ..ToolContext::default()
+        };
+        let error = execute(&call(r#"{"conversation":"mine","around_turn":0}"#), &unowned)
+            .await
+            .expect_err("an unowned read must be refused");
+        assert!(error.contains("who is asking"), "{error}");
+
+        std::fs::remove_file(path).ok();
     }
 
     /// An imported hit names its origin, and its assistant turns are never
@@ -2244,10 +2737,14 @@ mod tests {
                 day: "2024-11-05".to_owned(),
                 content: "Casually put: the research says the mind does it.".to_owned(),
                 source: Some("claude".to_owned()),
+                in_this_conversation: false,
+                conversation_id: "import:claude:dmt".to_owned(),
+                sequence: 3,
             }],
+            false,
         );
         assert!(rendered.contains(
-            "[2024-11-05 · Discussing DMT Responsibly · from their imported Claude history · the assistant said]"
+            "[2024-11-05 · Discussing DMT Responsibly · from their imported Claude history · the assistant said · turn 3 · conversation import:claude:dmt]"
         ));
         assert!(!rendered.contains("you said"));
     }
@@ -2260,9 +2757,12 @@ mod tests {
             day: "2026-08-22".to_owned(),
             content: format!("{tag} ").repeat(5_000),
             source: None,
+            in_this_conversation: false,
+            conversation_id: format!("conversation-{tag}"),
+            sequence: 1,
         };
         let hits = vec![huge("alpha"), huge("beta"), huge("gamma")];
-        let rendered = render_archive_hits("saga", &hits);
+        let rendered = render_archive_hits("saga", &hits, false);
         // The best match always comes back whole, even alone over budget.
         assert!(rendered.contains(&hits[0].content));
         assert!(rendered.starts_with("1 message(s)"));

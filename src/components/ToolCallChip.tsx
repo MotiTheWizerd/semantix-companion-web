@@ -160,6 +160,13 @@ const FACES: Record<string, ToolFace> = {
     done: "searched past conversations for",
     argument: { kind: "text", key: "query" },
   },
+  read_conversation: {
+    family: "tool",
+    icon: "wrench",
+    running: "reading back a past conversation",
+    done: "read back a past conversation",
+    argument: { kind: "none" },
+  },
 };
 
 /** A tool the chip has no face for still gets an honest pill: its raw name
