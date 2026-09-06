@@ -4,6 +4,7 @@ mod gateway;
 mod protocol;
 mod provider;
 mod providers;
+mod salvage;
 
 pub(crate) use catalog::{api_provider_spec, API_PROVIDERS};
 pub(crate) use gateway::{InferenceExecution, InferenceGateway};

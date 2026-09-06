@@ -7,6 +7,7 @@ use super::{
     catalog::{ApiProviderProtocol, API_PROVIDERS},
     provider::{InferenceProvider, ProviderCredential, ToolRunner},
     providers::{ClaudeProvider, OpenAiCompatibleProvider, TestProvider},
+    salvage::SalvagingSink,
     InferenceDelta, InferenceRequest,
 };
 use crate::streaming::{DeltaSink, StreamError, StreamSource};
@@ -76,6 +77,15 @@ impl StreamSource for InferenceGateway {
                 "Provider '{provider_id}' cannot satisfy this streaming request."
             )));
         }
+
+        // Some models write their tool calls into the content stream as prose
+        // instead of emitting real calls. That is the model's mistake, not any
+        // one wire format's, so the rescue sits here — once, for every provider
+        // including the ones not written yet.
+        let salvage = SalvagingSink::wrap(sink, &execution.request);
+        let sink = salvage
+            .as_ref()
+            .map_or(sink, |salvage| salvage as &dyn DeltaSink<InferenceDelta>);
 
         provider
             .stream(
