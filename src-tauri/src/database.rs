@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 25;
+const LATEST_SCHEMA_VERSION: i64 = 26;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -803,6 +803,32 @@ fn migration_sql(version: i64) -> &'static str {
             // blank name from the form stores NULL rather than an empty string,
             // so "never set" and "cleared" read identically downstream.
             "ALTER TABLE user_preferences ADD COLUMN display_name TEXT;"
+        }
+        26 => {
+            // WHO SPOKE IS FROZEN ON THE ROW. Until now a message's companion
+            // was read off its conversation — and `conversations.companion_id`
+            // is MUTABLE: the composer's picker rewrites it for the whole
+            // thread, history included. Found the hard way (s564): four turns
+            // Rook answered on DeepSeek were filed under Qwen because the
+            // picker was flipped after they were said, and a raven carved
+            // "Qwen runs DeepSeek" from the label. The label lied; the row's
+            // own model_id, stamped when the row opened, told the truth.
+            //
+            // So the companion joins provider_id and model_id as a fact of the
+            // ROW, written at the moment the turn is committed and never
+            // touched by a picker again. The conversation's companion_id
+            // remains — it now means "who answers NEXT", nothing more.
+            //
+            // The backfill can only copy the label, because the label is all
+            // the past has. Rows the label misfiled stay misfiled until
+            // corrected by hand from model_id; nothing here pretends to know.
+            "ALTER TABLE messages ADD COLUMN companion_id TEXT;
+             UPDATE messages
+                SET companion_id = (SELECT c.companion_id
+                                    FROM conversations c
+                                    WHERE c.id = messages.conversation_id);
+             CREATE INDEX IF NOT EXISTS idx_messages_companion
+                 ON messages(companion_id);"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

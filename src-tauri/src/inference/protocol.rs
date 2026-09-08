@@ -146,6 +146,13 @@ pub(crate) enum InferenceDelta {
     /// fragments and emit one of these per call, before the Finish delta.
     ToolCall(ToolCall),
     Usage(TokenUsage),
+    /// Which model actually answered, as the PROVIDER reports it — not the
+    /// one the request asked for. A router can substitute (OpenRouter
+    /// fallbacks), an alias can resolve to a dated snapshot, and a record
+    /// built from the request would carry the wish rather than the fact. A
+    /// provider that reports nothing simply never emits this, and the
+    /// request's target stands as the best available answer.
+    Served { model_id: String },
     Finish(FinishReason),
 }
 

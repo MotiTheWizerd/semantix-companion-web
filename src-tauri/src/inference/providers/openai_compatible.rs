@@ -282,6 +282,9 @@ struct OpenAiFunctionOut<'a> {
 
 #[derive(Deserialize)]
 struct OpenAiChunk {
+    /// The model the server says produced this chunk. Every chunk of a
+    /// stream repeats it; it is reported downstream once.
+    model: Option<String>,
     #[serde(default)]
     choices: Vec<OpenAiChoice>,
     usage: Option<OpenAiUsage>,
@@ -340,10 +343,15 @@ struct AssembledToolCall {
     emitted_arguments: usize,
 }
 
+/// Per-stream bookkeeping the chunk parser keeps between chunks: the tool
+/// calls being assembled, and whether the serving model has been reported.
 #[derive(Default)]
 struct ToolCallAssembler {
     calls: Vec<AssembledToolCall>,
     flushed: bool,
+    /// The `model` field rides every chunk; `Served` is emitted for the first
+    /// non-empty one and never again for this stream.
+    served_reported: bool,
 }
 
 impl ToolCallAssembler {
@@ -434,6 +442,14 @@ fn emit_chunk(
             "{provider_name}'s stream failed: {}",
             error.message()
         )));
+    }
+    // Who is answering, from the server's mouth — ahead of the first token,
+    // so the row carries the right name before it carries any text.
+    if !assembler.served_reported {
+        if let Some(model_id) = chunk.model.filter(|model| !model.trim().is_empty()) {
+            assembler.served_reported = true;
+            sink.emit_delta(InferenceDelta::Served { model_id })?;
+        }
     }
     for choice in chunk.choices {
         if let Some(text) = choice.delta.reasoning.filter(|text| !text.is_empty()) {
@@ -756,6 +772,54 @@ mod tests {
         );
         assert_eq!(events[1], InferenceDelta::Finish(FinishReason::Stop));
         assert!(matches!(events[2], InferenceDelta::Usage(_)));
+    }
+
+    /// The server names the model on every chunk; downstream hears it once,
+    /// ahead of the first token, and never again for the stream. A chunk with
+    /// no model (or an empty one) reports nothing — the request's target
+    /// stands.
+    #[test]
+    fn the_served_model_is_reported_once_before_the_first_token() {
+        let collector = Collector::default();
+        let mut assembler = super::ToolCallAssembler::default();
+        emit_chunk(
+            "OpenRouter",
+            r#"{"model":"","choices":[{"delta":{"content":""},"finish_reason":null}]}"#,
+            &collector,
+            &mut assembler,
+        )
+        .expect("an unnamed chunk should normalize");
+        emit_chunk(
+            "OpenRouter",
+            r#"{"model":"qwen/qwen3.8-27b","choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#,
+            &collector,
+            &mut assembler,
+        )
+        .expect("the first named chunk should normalize");
+        emit_chunk(
+            "OpenRouter",
+            r#"{"model":"qwen/qwen3.8-27b","choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}"#,
+            &collector,
+            &mut assembler,
+        )
+        .expect("the second named chunk should normalize");
+        let events = collector.0.lock().expect("collector should lock");
+        assert_eq!(
+            events[0],
+            InferenceDelta::Served {
+                model_id: "qwen/qwen3.8-27b".to_owned()
+            },
+            "who answers is known before what they say"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, InferenceDelta::Served { .. }))
+                .count(),
+            1,
+            "one stream, one report"
+        );
+        assert_eq!(events.last(), Some(&InferenceDelta::Finish(FinishReason::Stop)));
     }
 
     #[test]

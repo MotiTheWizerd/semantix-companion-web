@@ -806,6 +806,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                   content: message,
                   providerId: null,
                   modelId: null,
+                  companionId: tab.companionId,
                   errorMessage: null,
                   createdAt: now,
                   updatedAt: now,

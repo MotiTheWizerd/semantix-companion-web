@@ -25,6 +25,7 @@
 //   ← { id, event: "toolCallDelta", callId, name, argumentsDelta }
 //   ← { id, event: "toolCall", callId, name, arguments }
 //   ← { id, event: "usage", inputTokens, outputTokens }
+//   ← { id, event: "served", model }        (the model that actually answered)
 //   ← { id, event: "done" }
 //   ← { id, event: "error", message }
 
@@ -261,6 +262,10 @@ async function handleQuery(request) {
   if (request.systemPrompt) options.systemPrompt = request.systemPrompt;
 
   let sawText = false;
+  // The alias we asked for ("sonnet") is not the model that answers; the
+  // server names the real one on the first message of the turn. Reported
+  // once, so the row records what served rather than what was requested.
+  let servedReported = false;
   // SDK content-block ids are stable for the life of a streamed tool call.
   // Keep that provider-native bookkeeping here; Rust only sees the canonical
   // call id, tool name and JSON-argument fragment.
@@ -272,6 +277,16 @@ async function handleQuery(request) {
     }
     if (message.type === "stream_event") {
       const event = message.event;
+      if (
+        !servedReported &&
+        event?.type === "message_start" &&
+        typeof event.message?.model === "string" &&
+        event.message.model
+      ) {
+        servedReported = true;
+        send({ id: request.id, event: "served", model: event.message.model });
+        continue;
+      }
       if (
         event?.type === "content_block_delta" &&
         event.delta?.type === "thinking_delta" &&

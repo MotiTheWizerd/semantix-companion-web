@@ -34,7 +34,13 @@ export interface ChatMessage {
   status: MessageStatus;
   content: string;
   providerId: string | null;
+  /** The model that answered, as the provider reported it (falls back to the
+   *  one requested). Settled per row, never rewritten. */
   modelId: string | null;
+  /** Who this row belongs to — the companion answering, or being addressed —
+   *  frozen when the row was committed. The conversation's companionId is a
+   *  label the picker rewrites for the whole thread; this is not. */
+  companionId: string | null;
   errorMessage: string | null;
   createdAt: number;
   updatedAt: number;

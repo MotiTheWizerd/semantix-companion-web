@@ -96,6 +96,25 @@
   margin-top: -8px;
 }
 
+/* ── the byline ── a row said by someone other than who the thread answers
+   to now. The picker can re-point a thread; it cannot re-attribute what was
+   already said (s564). Face and name, small and muted, above the words. */
+.chat-message__byline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  letter-spacing: 0.01em;
+  user-select: none;
+}
+
+.chat-message__byline .companion-mark {
+  width: 16px;
+  height: 16px;
+}
+
 /* ── the presence line ── the companion, visibly at work. One small glass
    pill at the thread's end for the whole of a turn: the companion's mark
    breathes in it, and the sentence says what kind of work — thinking,

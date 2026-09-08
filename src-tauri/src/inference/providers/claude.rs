@@ -173,6 +173,11 @@ enum SidecarEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// The model Claude Code actually ran — the alias in the request
+    /// ("sonnet") resolves to a dated id on the server, and this is it.
+    Served {
+        model: String,
+    },
     Done,
     Error {
         message: String,
@@ -677,6 +682,9 @@ impl InferenceProvider for ClaudeProvider {
                             output_tokens,
                             total_tokens: input_tokens + output_tokens,
                         }))?;
+                    }
+                    SidecarEvent::Served { model } => {
+                        sink.emit_delta(InferenceDelta::Served { model_id: model })?;
                     }
                     SidecarEvent::Done => {
                         sink.emit_delta(InferenceDelta::Finish(FinishReason::Stop))?;

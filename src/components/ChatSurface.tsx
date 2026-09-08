@@ -178,6 +178,10 @@ interface ChatThreadProps {
   isRemembering: boolean;
   /** Who is working, for the presence line's sentence. */
   companionName: string;
+  /** Who the thread answers to NOW. A row frozen to a different companion is
+   *  bylined, so a picker switch mid-thread reads as a change of speaker
+   *  rather than silently re-attributing what was already said (s564). */
+  companionId: string | null;
 }
 
 /** How long after the last streamed token the companion still counts as
@@ -266,8 +270,19 @@ const ChatThread = memo(function ChatThread({
   isSending,
   isRemembering,
   companionName,
+  companionId,
 }: ChatThreadProps) {
   const contentRef = useRef<HTMLDivElement>(null);
+  // The thread's current companion, resolved the way the backend resolves an
+  // unpicked thread: to the built-in one. Rows stamped with anyone else were
+  // said by a different speaker and are bylined as such.
+  const currentCompanionId = useMemo(
+    () =>
+      companionId ??
+      companions.find((candidate) => candidate.isBuiltIn)?.id ??
+      null,
+    [companions, companionId],
+  );
   // Calls anchor against the same filtered list the reader sees, so a card
   // whose nearest real anchor is a hidden row lands after the latest VISIBLE
   // message instead of vanishing with its anchor.
@@ -390,6 +405,14 @@ const ChatThread = memo(function ChatThread({
             Boolean(message.errorMessage) ||
             Boolean(recall) ||
             showReasoning;
+          // Spoken by someone other than who the thread answers to now — the
+          // row keeps its speaker, and says so.
+          const bylineCompanionId =
+            message.role === "assistant" &&
+            message.companionId &&
+            message.companionId !== currentCompanionId
+              ? message.companionId
+              : null;
           return (
             <Fragment key={message.id}>
               {toolsBefore.length > 0 ? (
@@ -399,6 +422,12 @@ const ChatThread = memo(function ChatThread({
               ) : null}
               {showTextRow ? (
                 <article className={`chat-message chat-message--${message.role}`}>
+                  {bylineCompanionId ? (
+                    <span className="chat-message__byline">
+                      <CompanionMark src={callAgentAvatars.get(bylineCompanionId)} />
+                      {callAgentNames.get(bylineCompanionId) ?? "Another companion"}
+                    </span>
+                  ) : null}
                   {message.attachments.length > 0 ? (
                     <div className="chat-message__images">
                       {message.attachments.map((attachment) => (
@@ -689,6 +718,7 @@ export function ChatSurface({
           isSending={isSending}
           isRemembering={isRemembering}
           companionName={companionName}
+          companionId={companionId}
         />
       ) : (
         <EmptyState />

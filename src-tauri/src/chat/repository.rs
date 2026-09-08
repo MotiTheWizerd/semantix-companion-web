@@ -12,6 +12,11 @@ use crate::{app_error::AppError, database};
 const CONVERSATION_COLUMNS: &str =
     "id, title, companion_id, created_at, updated_at, archived_at";
 
+/// Read in this order by `message_from_row` — keep the two in step.
+const MESSAGE_COLUMNS: &str = "id, conversation_id, sequence, role, status, content,
+     provider_id, model_id, error_message, created_at, updated_at, completed_at,
+     slept_at, companion_id";
+
 pub(crate) struct ChatRepository {
     connection: Mutex<Connection>,
 }
@@ -108,10 +113,13 @@ impl ChatRepository {
 
     /// Full-text search over every completed user/assistant message the
     /// given companion has had, best (bm25) matches first. The drill is ONE
-    /// companion's raw memory: a conversation belongs to the companion it was
-    /// had with, and no companion can read another's — the same wall the
+    /// companion's raw memory: a message belongs to the companion it was said
+    /// by or to, and no companion can read another's — the same wall the
     /// UNIQUE memory_agent_name puts around their distilled memories (s491),
     /// drawn here around the raw ones (s541: Rook could drill Hugin's past).
+    /// The wall is the ROW's companion, not the thread's (s564): the thread
+    /// label follows the picker, so a thread re-pointed from Rook to Qwen
+    /// would have handed Qwen every word Rook said in it.
     /// The conversation the drill runs from is searched too, all but its LIVE
     /// turn (the latest user message and whatever followed it — the one part
     /// the model is guaranteed to be holding). It used to be excluded whole,
@@ -140,7 +148,7 @@ impl ChatRepository {
                  JOIN messages m ON m.rowid = messages_fts.rowid
                  JOIN conversations c ON c.id = m.conversation_id
                  WHERE messages_fts MATCH ?1
-                   AND c.companion_id = ?2
+                   AND COALESCE(m.companion_id, c.companion_id) = ?2
                    AND m.status = 'completed'
                    AND m.role IN ('user', 'assistant')
                    AND (?3 IS NULL
@@ -187,12 +195,18 @@ impl ChatRepository {
         to: i64,
     ) -> Result<Option<ArchiveWindow>, AppError> {
         let connection = self.connection()?;
+        // A thread the companion took part in is one it may read back — its
+        // own rows say so, whatever the thread's label says now. A thread it
+        // never spoke in stays closed even if the picker points there today.
         let header: Option<(String, Option<String>, i64)> = connection
             .query_row(
                 "SELECT c.title, c.source,
                         (SELECT COALESCE(MAX(sequence), 0) FROM messages WHERE conversation_id = c.id)
                  FROM conversations c
-                 WHERE c.id = ?1 AND c.companion_id = ?2",
+                 WHERE c.id = ?1
+                   AND EXISTS (SELECT 1 FROM messages m
+                               WHERE m.conversation_id = c.id
+                                 AND COALESCE(m.companion_id, c.companion_id) = ?2)",
                 params![conversation_id, companion_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -310,10 +324,10 @@ impl ChatRepository {
                     .execute(
                         "INSERT INTO messages (
                             id, conversation_id, sequence, role, status, content,
-                            provider_id, model_id, error_message,
+                            provider_id, model_id, companion_id, error_message,
                             created_at, updated_at, completed_at, slept_at
                          ) VALUES (?1, ?2, ?3, ?4, 'completed', ?5,
-                                   NULL, NULL, NULL, ?6, ?6, ?6, ?6)",
+                                   NULL, NULL, ?7, NULL, ?6, ?6, ?6, ?6)",
                         params![
                             format!("{}#{sequence}", record.id),
                             record.id,
@@ -321,6 +335,7 @@ impl ChatRepository {
                             turn.role,
                             turn.text,
                             record.created_at,
+                            record.companion_id,
                         ],
                     )
                     .map_err(AppError::database)?;
@@ -419,14 +434,12 @@ impl ChatRepository {
         };
 
         let mut statement = connection
-            .prepare(
-                "SELECT id, conversation_id, sequence, role, status, content,
-                        provider_id, model_id, error_message, created_at, updated_at, completed_at,
-                        slept_at
+            .prepare(&format!(
+                "SELECT {MESSAGE_COLUMNS}
                  FROM messages
                  WHERE conversation_id = ?1
-                 ORDER BY sequence ASC",
-            )
+                 ORDER BY sequence ASC"
+            ))
             .map_err(AppError::database)?;
         let mut messages = statement
             .query_map([conversation_id], message_from_row)
@@ -520,9 +533,18 @@ impl ChatRepository {
             .execute(
                 "INSERT INTO messages (
                     id, conversation_id, sequence, role, status, content,
-                    provider_id, model_id, error_message, created_at, updated_at, completed_at
-                 ) VALUES (?1, ?2, ?3, ?6, 'completed', ?4, NULL, NULL, NULL, ?5, ?5, ?5)",
-                params![message_id, conversation.id, sequence, content, timestamp, role],
+                    provider_id, model_id, companion_id, error_message,
+                    created_at, updated_at, completed_at
+                 ) VALUES (?1, ?2, ?3, ?6, 'completed', ?4, NULL, NULL, ?7, NULL, ?5, ?5, ?5)",
+                params![
+                    message_id,
+                    conversation.id,
+                    sequence,
+                    content,
+                    timestamp,
+                    role,
+                    companion_id
+                ],
             )
             .map_err(AppError::database)?;
         for attachment in attachments {
@@ -564,6 +586,7 @@ impl ChatRepository {
                 content: content.to_owned(),
                 provider_id: None,
                 model_id: None,
+                companion_id: Some(companion_id.to_owned()),
                 error_message: None,
                 created_at: timestamp,
                 updated_at: timestamp,
@@ -604,6 +627,7 @@ impl ChatRepository {
         &self,
         conversation_id: &str,
         message_id: &str,
+        companion_id: &str,
         provider_id: &str,
         model_id: &str,
         timestamp: i64,
@@ -638,15 +662,17 @@ impl ChatRepository {
             .execute(
                 "INSERT INTO messages (
                     id, conversation_id, sequence, role, status, content,
-                    provider_id, model_id, error_message, created_at, updated_at, completed_at
-                 ) VALUES (?1, ?2, ?3, 'assistant', 'streaming', '', ?4, ?5, NULL, ?6, ?6, NULL)",
+                    provider_id, model_id, companion_id, error_message,
+                    created_at, updated_at, completed_at
+                 ) VALUES (?1, ?2, ?3, 'assistant', 'streaming', '', ?4, ?5, ?7, NULL, ?6, ?6, NULL)",
                 params![
                     message_id,
                     conversation_id,
                     sequence,
                     provider_id,
                     model_id,
-                    timestamp
+                    timestamp,
+                    companion_id
                 ],
             )
             .map_err(AppError::database)?;
@@ -667,6 +693,7 @@ impl ChatRepository {
             content: String::new(),
             provider_id: Some(provider_id.to_owned()),
             model_id: Some(model_id.to_owned()),
+            companion_id: Some(companion_id.to_owned()),
             error_message: None,
             created_at: timestamp,
             updated_at: timestamp,
@@ -674,6 +701,32 @@ impl ChatRepository {
             slept_at: None,
             attachments: Vec::new(),
         })
+    }
+
+    /// The provider named the model that is actually answering this row —
+    /// overwrite the one the request asked for. Streaming rows only: a
+    /// closed row's record is settled.
+    pub(crate) fn record_served_model(
+        &self,
+        message_id: &str,
+        model_id: &str,
+    ) -> Result<Message, AppError> {
+        let connection = self.connection()?;
+        let updated = connection
+            .execute(
+                "UPDATE messages
+                 SET model_id = ?2
+                 WHERE id = ?1 AND role = 'assistant' AND status = 'streaming'",
+                params![message_id, model_id],
+            )
+            .map_err(AppError::database)?;
+        if updated != 1 {
+            return Err(AppError::internal(
+                "the assistant message was not in a streamable state",
+            ));
+        }
+        message_by_id(&connection, message_id)?
+            .ok_or_else(|| AppError::internal("the served assistant message could not be reloaded"))
     }
 
     pub(crate) fn complete_assistant_message(
@@ -803,6 +856,7 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         updated_at: row.get(10)?,
         completed_at: row.get(11)?,
         slept_at: row.get(12)?,
+        companion_id: row.get(13)?,
         attachments: Vec::new(),
     })
 }
@@ -847,11 +901,7 @@ fn attachments_for_conversation(
 fn message_by_id(connection: &Connection, message_id: &str) -> Result<Option<Message>, AppError> {
     connection
         .query_row(
-            "SELECT id, conversation_id, sequence, role, status, content,
-                    provider_id, model_id, error_message, created_at, updated_at, completed_at,
-                    slept_at
-             FROM messages
-             WHERE id = ?1",
+            &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1"),
             [message_id],
             message_from_row,
         )
@@ -912,6 +962,7 @@ mod tests {
             .begin_assistant_message(
                 &conversation_id,
                 &format!("message-{tag}-assistant"),
+                companion_id,
                 "test",
                 "test-model",
                 1_755_800_001_000,
@@ -996,7 +1047,7 @@ mod tests {
 
         // A message still streaming (never completed) must be invisible.
         repository
-            .begin_assistant_message(&ships, "message-ships-streaming", "test", "test-model", 1_755_800_003_000)
+            .begin_assistant_message(&ships, "message-ships-streaming", &companion_id, "test", "test-model", 1_755_800_003_000)
             .expect("streaming message should begin");
         let hits = repository
             .search_messages("\"serpent\"", &companion_id, None, 10)
@@ -1061,7 +1112,7 @@ mod tests {
             })
             .expect("the picture turn should commit");
         repository
-            .begin_assistant_message(&thread, "message-avatar-yes", "test", "test-model", 1_755_800_011_000)
+            .begin_assistant_message(&thread, "message-avatar-yes", &hugin, "test", "test-model", 1_755_800_011_000)
             .expect("assistant message should begin");
         repository
             .complete_assistant_message("message-avatar-yes", "Oh wow, yes! That's incredibly close.", 1_755_800_012_000)
@@ -1172,6 +1223,126 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    /// The wall is drawn around the ROW, not the thread (s564). A thread's
+    /// companion is a label the picker rewrites; the rows keep who actually
+    /// spoke. Re-pointing Rook's thread at Hugin must not hand Hugin Rook's
+    /// words — and must not take them from Rook.
+    #[test]
+    fn re_pointing_a_thread_does_not_re_attribute_what_was_already_said() {
+        let (repository, path) = open_repository("row-attribution");
+        let rook = built_in_id(&path);
+        let hugin = companion(&path, "Hugin");
+        let thread = seed_conversation(
+            &repository,
+            &rook,
+            "rook-serpent",
+            "Rook, my favorite ship is the Long Serpent.",
+            "The Long Serpent — Olaf's flagship, sixty oars.",
+        );
+
+        // The picker flips the thread to Hugin. Label changes; rows do not.
+        repository
+            .update_companion(&thread, &hugin)
+            .expect("the thread should re-point");
+        let relabelled = repository
+            .get_thread(&thread)
+            .expect("thread should reload")
+            .expect("thread should exist");
+        assert_eq!(relabelled.conversation.companion_id.as_deref(), Some(hugin.as_str()));
+        assert!(
+            relabelled
+                .messages
+                .iter()
+                .all(|message| message.companion_id.as_deref() == Some(rook.as_str())),
+            "every row still belongs to the companion it was said by or to"
+        );
+
+        // Hugin drills for the Serpent and finds nothing: he was not there.
+        assert!(
+            repository
+                .search_messages("\"serpent\"", &hugin, None, 10)
+                .expect("search should succeed")
+                .is_empty(),
+            "a label change is not a memory transfer"
+        );
+        assert!(repository
+            .read_turns(&thread, &hugin, None, 0, 10)
+            .expect("read should succeed")
+            .is_none());
+
+        // Rook still owns what he said, whatever the label says now.
+        let rook_hits = repository
+            .search_messages("\"serpent\"", &rook, None, 10)
+            .expect("search should succeed");
+        assert_eq!(rook_hits.len(), 2);
+        let window = repository
+            .read_turns(&thread, &rook, None, 0, 10)
+            .expect("read should succeed")
+            .expect("Rook can read back the thread he spoke in");
+        assert_eq!(window.turns.len(), 2);
+
+        // Hugin's first answer on the re-pointed thread is HIS row, on a thread
+        // that now holds both speakers — each row telling the truth about itself.
+        repository
+            .begin_assistant_message(&thread, "message-hugin-first", &hugin, "test", "test-model", 1_755_800_005_000)
+            .expect("assistant message should begin");
+        repository
+            .complete_assistant_message("message-hugin-first", "I hear the Serpent had a rotten keel.", 1_755_800_006_000)
+            .expect("assistant message should complete");
+        let mixed = repository
+            .get_thread(&thread)
+            .expect("thread should reload")
+            .expect("thread should exist");
+        let speakers: Vec<Option<&str>> = mixed
+            .messages
+            .iter()
+            .map(|message| message.companion_id.as_deref())
+            .collect();
+        assert_eq!(speakers, vec![Some(rook.as_str()), Some(rook.as_str()), Some(hugin.as_str())]);
+        let hugin_hits = repository
+            .search_messages("\"serpent\"", &hugin, None, 10)
+            .expect("search should succeed");
+        assert_eq!(hugin_hits.len(), 1, "Hugin finds his own word, not Rook's two");
+
+        drop(repository);
+        let _ = fs::remove_file(path);
+    }
+
+    /// The provider's word on which model answered overwrites the request's
+    /// guess — on a streaming row only; a settled row is settled.
+    #[test]
+    fn the_served_model_corrects_the_row_while_it_streams() {
+        let (repository, path) = open_repository("served-model");
+        let companion_id = built_in_id(&path);
+        let thread = seed_conversation(
+            &repository,
+            &companion_id,
+            "served",
+            "Which model are you, really?",
+            "The one you asked for, I hope.",
+        );
+        repository
+            .begin_assistant_message(&thread, "message-served", &companion_id, "openrouter", "qwen/qwen3.8-27b", 1_755_800_005_000)
+            .expect("assistant message should begin");
+        let served = repository
+            .record_served_model("message-served", "deepseek-ai/DeepSeek-V4-Flash-0731")
+            .expect("the served model should record");
+        assert_eq!(served.model_id.as_deref(), Some("deepseek-ai/DeepSeek-V4-Flash-0731"));
+        assert_eq!(served.provider_id.as_deref(), Some("openrouter"), "the provider is unchanged");
+        repository
+            .complete_assistant_message("message-served", "Not the one you asked for.", 1_755_800_006_000)
+            .expect("assistant message should complete");
+        assert!(
+            repository
+                .record_served_model("message-served", "something-else")
+                .is_err(),
+            "a completed row's record is settled"
+        );
+
+        drop(repository);
+        let _ = fs::remove_file(path);
+    }
+
     /// The sleeper's ripeness read counts exactly what a pass would distil:
     /// completed, non-empty user/assistant turns the ledger has not claimed.
     /// A streaming reply is not a turn yet; a stamped one is not fresh.
@@ -1190,7 +1361,7 @@ mod tests {
 
         // A reply still streaming does not count until it lands.
         repository
-            .begin_assistant_message(&conversation, "message-ripe-open", "test", "test-model", 1_755_800_003_000)
+            .begin_assistant_message(&conversation, "message-ripe-open", &companion_id, "test", "test-model", 1_755_800_003_000)
             .expect("streaming message should begin");
         assert_eq!(repository.count_unslept(&conversation).unwrap(), 2);
         repository

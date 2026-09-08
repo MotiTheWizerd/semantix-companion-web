@@ -68,7 +68,15 @@ pub(crate) struct Message {
     pub(crate) status: String,
     pub(crate) content: String,
     pub(crate) provider_id: Option<String>,
+    /// The model that ANSWERED, as the provider reported it — falling back to
+    /// the one asked for when a provider says nothing. Row-level truth: the
+    /// conversation's companion can be re-pointed later, this cannot.
     pub(crate) model_id: Option<String>,
+    /// Who this row belongs to — the companion answering (assistant rows) or
+    /// being addressed (user/system rows) at the moment it was committed.
+    /// Frozen here because `Conversation::companion_id` is a mutable label
+    /// the picker rewrites for the whole thread (s564).
+    pub(crate) companion_id: Option<String>,
     pub(crate) error_message: Option<String>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
@@ -603,6 +611,7 @@ impl ChatService {
         Ok(PreparedSubmission {
             provider_id: target.provider_id.clone(),
             model_id: target.model_id.clone(),
+            companion_id: companion.id.clone(),
             accepted,
             execution: InferenceExecution {
                 request: InferenceRequest {
@@ -823,16 +832,22 @@ impl ChatService {
     fn begin_assistant(
         &self,
         conversation_id: &str,
+        companion_id: &str,
         provider_id: &str,
         model_id: &str,
     ) -> Result<Message, AppError> {
         self.repository.begin_assistant_message(
             conversation_id,
             &Uuid::new_v4().to_string(),
+            companion_id,
             provider_id,
             model_id,
             unix_timestamp_ms()?,
         )
+    }
+
+    fn serve_assistant(&self, message_id: &str, model_id: &str) -> Result<Message, AppError> {
+        self.repository.record_served_model(message_id, model_id)
     }
 
     fn complete_assistant(&self, message_id: &str, content: &str) -> Result<Message, AppError> {
@@ -851,6 +866,10 @@ pub(crate) struct PreparedSubmission {
     execution: InferenceExecution,
     provider_id: String,
     model_id: String,
+    /// The RESOLVED companion — stamped on every assistant row this turn
+    /// opens, so who answered is a fact of the row and not of a label the
+    /// picker can rewrite later.
+    companion_id: String,
     tool_context: ToolContext,
 }
 
@@ -942,11 +961,15 @@ impl ToolRunner for ChatToolRunner {
 trait AssistantRows: Send + Sync {
     fn close(&self, message_id: &str, content: &str) -> Result<Message, String>;
     fn open(&self) -> Result<Message, String>;
+    /// The provider said which model is answering this row — correct the
+    /// record from what was asked for to what actually served.
+    fn serve(&self, message_id: &str, model_id: &str) -> Result<Message, String>;
 }
 
 struct ServiceRows {
     service: Arc<ChatService>,
     conversation_id: String,
+    companion_id: String,
     provider_id: String,
     model_id: String,
 }
@@ -960,7 +983,18 @@ impl AssistantRows for ServiceRows {
 
     fn open(&self) -> Result<Message, String> {
         self.service
-            .begin_assistant(&self.conversation_id, &self.provider_id, &self.model_id)
+            .begin_assistant(
+                &self.conversation_id,
+                &self.companion_id,
+                &self.provider_id,
+                &self.model_id,
+            )
+            .map_err(String::from)
+    }
+
+    fn serve(&self, message_id: &str, model_id: &str) -> Result<Message, String> {
+        self.service
+            .serve_assistant(message_id, model_id)
             .map_err(String::from)
     }
 }
@@ -1002,6 +1036,11 @@ struct ChatTextState {
     /// Text of each round that ended in tool calls since the loop last took
     /// it — replayed to the provider beside the calls it led into.
     round_texts: Vec<String>,
+    /// The model the provider says is answering, once it has said. Applied to
+    /// the row streaming when it arrives AND to every row this turn opens
+    /// after it — a stream reports its model once, and the rows a tool splits
+    /// it into were all served by the same one.
+    served_model: Option<String>,
 }
 
 impl ChatStreamAdapter {
@@ -1019,6 +1058,7 @@ impl ChatStreamAdapter {
                 current: assistant,
                 tool_seen: false,
                 round_texts: Vec::new(),
+                served_model: None,
             }),
             started: AtomicBool::new(false),
             tool_calls: Mutex::new(Vec::new()),
@@ -1072,10 +1112,22 @@ impl ChatStreamAdapter {
                     .map_err(|error| StreamError::new(&error))?;
                 self.on_event
                     .send(ChatEvent::AssistantCompleted { message: closed });
-                let opened = self
+                let mut opened = self
                     .rows
                     .open()
                     .map_err(|error| StreamError::new(&error))?;
+                // A row opened mid-stream is born with the model the request
+                // asked for; the stream already said who is really answering.
+                if let Some(model_id) = state
+                    .served_model
+                    .as_deref()
+                    .filter(|served| opened.model_id.as_deref() != Some(served))
+                {
+                    opened = self
+                        .rows
+                        .serve(&opened.id, model_id)
+                        .map_err(|error| StreamError::new(&error))?;
+                }
                 self.on_event.send(ChatEvent::AssistantStarted {
                     message: opened.clone(),
                 });
@@ -1084,6 +1136,22 @@ impl ChatStreamAdapter {
         }
         state.current.content.push_str(text);
         Ok(state.current.id.clone())
+    }
+
+    /// The provider named the model answering this turn. Recorded on the row
+    /// streaming now and remembered for the rows still to open in this turn.
+    fn record_served(&self, model_id: String) -> Result<(), StreamError> {
+        let mut state = self.state()?;
+        if state.current.model_id.as_deref() != Some(model_id.as_str()) {
+            let served = self
+                .rows
+                .serve(&state.current.id, &model_id)
+                .map_err(|error| StreamError::new(&error))?;
+            // Keep the streamed text: the reloaded row has none yet.
+            state.current.model_id = served.model_id;
+        }
+        state.served_model = Some(model_id);
+        Ok(())
     }
 
     /// The first tool signal after some text: what the row says so far is
@@ -1165,6 +1233,7 @@ impl StreamSink<InferenceDelta> for ChatStreamAdapter {
                         delta: text,
                     });
                 }
+                InferenceDelta::Served { model_id } => self.record_served(model_id)?,
                 InferenceDelta::Usage(_) | InferenceDelta::Finish(_) => {}
             },
             StreamEvent::Completed | StreamEvent::Failed { .. } => {}
@@ -1282,6 +1351,7 @@ pub(crate) async fn drive_turn(
         mut execution,
         provider_id,
         model_id,
+        companion_id,
         tool_context,
     } = prepared;
 
@@ -1295,8 +1365,14 @@ pub(crate) async fn drive_turn(
     let assistant_conversation_id = conversation_id.clone();
     let row_provider_id = provider_id.clone();
     let row_model_id = model_id.clone();
+    let row_companion_id = companion_id.clone();
     let assistant = match tauri::async_runtime::spawn_blocking(move || {
-        assistant_service.begin_assistant(&assistant_conversation_id, &provider_id, &model_id)
+        assistant_service.begin_assistant(
+            &assistant_conversation_id,
+            &companion_id,
+            &provider_id,
+            &model_id,
+        )
     })
     .await
     .map_err(|error| format!("Assistant task failed: {error}"))?
@@ -1320,6 +1396,7 @@ pub(crate) async fn drive_turn(
         Box::new(ServiceRows {
             service: Arc::clone(&service),
             conversation_id: conversation_id.clone(),
+            companion_id: row_companion_id,
             provider_id: row_provider_id,
             model_id: row_model_id,
         }),
@@ -1855,6 +1932,7 @@ mod tests {
             content: String::new(),
             provider_id: Some("together".to_owned()),
             model_id: Some("test-model".to_owned()),
+            companion_id: Some("companion-1".to_owned()),
             error_message: None,
             created_at: 1,
             updated_at: 1,
@@ -1915,9 +1993,22 @@ mod tests {
     struct RecordingRows {
         opened: AtomicUsize,
         closed: Mutex<Vec<(String, String)>>,
+        /// (message id, model id) each time the provider named who answered.
+        served: Mutex<Vec<(String, String)>>,
     }
 
     impl AssistantRows for Arc<RecordingRows> {
+        fn serve(&self, message_id: &str, model_id: &str) -> Result<Message, String> {
+            self.served
+                .lock()
+                .expect("served rows should lock")
+                .push((message_id.to_owned(), model_id.to_owned()));
+            let mut message = streaming_assistant();
+            message.id = message_id.to_owned();
+            message.model_id = Some(model_id.to_owned());
+            Ok(message)
+        }
+
         fn close(&self, message_id: &str, content: &str) -> Result<Message, String> {
             self.closed
                 .lock()
@@ -1950,6 +2041,76 @@ mod tests {
         InferenceDelta::Text {
             text: text.to_owned(),
         }
+    }
+
+    /// The provider names who is really answering; the row streaming takes
+    /// the name at once, and every row the turn opens afterwards is born
+    /// with it — a stream says it once, and a tool split does not change who
+    /// served. A row already carrying the right name is left alone.
+    #[test]
+    fn the_served_model_lands_on_the_streaming_row_and_the_rows_after_it() {
+        let events = Arc::new(RecordingEvents::default());
+        let rows = Arc::new(RecordingRows::default());
+        let adapter = ChatStreamAdapter::new(
+            streaming_assistant(),
+            None,
+            events.clone(),
+            Box::new(rows.clone()),
+        );
+
+        adapter.emit(StreamEvent::Started).expect("should start");
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 0,
+                payload: InferenceDelta::Served {
+                    model_id: "served-model".to_owned(),
+                },
+            })
+            .expect("the served model should record");
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 1,
+                payload: text("Said before the tool."),
+            })
+            .expect("text should stream");
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 2,
+                payload: tool_call("call-1"),
+            })
+            .expect("the tool boundary should hold");
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 3,
+                payload: text("Said after the tool."),
+            })
+            .expect("the next row should open");
+
+        let served = rows.served.lock().expect("served rows should lock");
+        assert_eq!(
+            *served,
+            vec![
+                ("assistant-1".to_owned(), "served-model".to_owned()),
+                ("assistant-2".to_owned(), "served-model".to_owned()),
+            ],
+            "the streaming row is corrected on arrival; the row opened after the tool at birth"
+        );
+        drop(served);
+
+        // The same name again is not a second correction.
+        adapter
+            .emit(StreamEvent::Delta {
+                sequence: 4,
+                payload: InferenceDelta::Served {
+                    model_id: "served-model".to_owned(),
+                },
+            })
+            .expect("a repeated report should be harmless");
+        assert_eq!(
+            rows.served.lock().expect("served rows should lock").len(),
+            2,
+            "a row already carrying the served model is left alone"
+        );
     }
 
     #[test]
@@ -2683,8 +2844,18 @@ mod tests {
             );
 
             let assistant = service
-                .begin_assistant(&accepted.accepted.conversation.id, "test", "test-stream")
+                .begin_assistant(
+                    &accepted.accepted.conversation.id,
+                    &built_in_id,
+                    "test",
+                    "test-stream",
+                )
                 .expect("assistant message should begin");
+            assert_eq!(
+                assistant.companion_id.as_deref(),
+                Some(built_in_id.as_str()),
+                "the answering companion is frozen on the row, not read off the thread"
+            );
             let completed = service
                 .complete_assistant(&assistant.id, "A persisted streamed response.")
                 .expect("assistant message should complete");
@@ -2705,7 +2876,12 @@ mod tests {
             assert_eq!(thread.messages[1].content, "A persisted streamed response.");
 
             let interrupted = service
-                .begin_assistant(&accepted.accepted.conversation.id, "test", "test-stream")
+                .begin_assistant(
+                    &accepted.accepted.conversation.id,
+                    &built_in_id,
+                    "test",
+                    "test-stream",
+                )
                 .expect("a second assistant message should begin");
             assert_eq!(
                 service
