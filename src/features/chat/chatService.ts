@@ -16,6 +16,16 @@ import type {
  *  cards own. */
 const CHAT_EVENT = "chat://event";
 
+/** App-wide: the titler gave a conversation its real name. Fires once the
+ *  thread is a couple of answers in and the background model has read its
+ *  opening — off the composer's path, so this is the only way it arrives. */
+const TITLED_EVENT = "chat://titled";
+
+export interface ConversationTitledEvent {
+  conversationId: string;
+  title: string;
+}
+
 export function listConversations(): Promise<Conversation[]> {
   return invoke<Conversation[]>("list_conversations");
 }
@@ -51,4 +61,10 @@ export function stopTurn(conversationId: string): Promise<boolean> {
  *  next reload. */
 export function onWokenChatEvent(handler: (event: ChatEvent) => void): Promise<UnlistenFn> {
   return listen<ChatEvent>(CHAT_EVENT, ({ payload }) => handler(payload));
+}
+
+export function onConversationTitled(
+  handler: (event: ConversationTitledEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ConversationTitledEvent>(TITLED_EVENT, ({ payload }) => handler(payload));
 }

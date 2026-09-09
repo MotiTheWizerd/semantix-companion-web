@@ -661,6 +661,33 @@ impl ChatRepository {
             .map_err(AppError::database)
     }
 
+    /// The titler's write: the thread's name, once a model has read enough
+    /// of it to give a real one. Not activity — `updated_at` stays put, so a
+    /// rename never reorders the sidebar.
+    pub(crate) fn rename_conversation(
+        &self,
+        conversation_id: &str,
+        title: &str,
+    ) -> Result<Conversation, AppError> {
+        let connection = self.connection()?;
+        let changed = connection
+            .execute(
+                "UPDATE conversations SET title = ?2 WHERE id = ?1 AND archived_at IS NULL",
+                params![conversation_id, title],
+            )
+            .map_err(AppError::database)?;
+        if changed == 0 {
+            return Err(AppError::validation("That conversation no longer exists."));
+        }
+        connection
+            .query_row(
+                &format!("SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE id = ?1"),
+                [conversation_id],
+                conversation_from_row,
+            )
+            .map_err(AppError::database)
+    }
+
     pub(crate) fn begin_assistant_message(
         &self,
         conversation_id: &str,

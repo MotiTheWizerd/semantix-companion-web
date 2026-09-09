@@ -1,4 +1,5 @@
 pub(crate) mod repository;
+mod titler;
 mod tool_streaming;
 
 use std::{
@@ -1344,12 +1345,15 @@ pub(crate) async fn submit_message(
     let driven = drive_turn(
         service,
         prepared,
-        Arc::new(WindowEventSink::new(on_event, app)),
+        Arc::new(WindowEventSink::new(on_event, app.clone())),
         Some(stop),
     )
     .await;
     state.disarm_stop(&conversation_id);
     let accepted = driven?;
+    // The thread earns its name off the composer's path: the turn is already
+    // home when the namer reads it, and it reports through the app bus.
+    titler::title_after_turn(Arc::clone(&state.service), app, conversation_id.clone());
     if let (Some(sleeper), Some(agent_id)) = (sleeper, sleep_into) {
         sleeper.turn_completed(conversation_id, agent_id);
     }

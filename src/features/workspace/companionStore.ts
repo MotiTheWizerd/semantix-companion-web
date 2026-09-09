@@ -4,6 +4,7 @@ import { create } from "zustand";
 import {
   getConversationThread,
   listConversations,
+  onConversationTitled,
   onWokenChatEvent,
   stopTurn as requestStopTurn,
   submitMessage,
@@ -374,7 +375,8 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
         get().openNewConversation();
       }
 
-      const [stopModels, stopPreferences, stopCompanions, stopWokenEvents, stopSlept] = await Promise.all([
+      const [stopModels, stopPreferences, stopCompanions, stopWokenEvents, stopSlept, stopTitled] =
+        await Promise.all([
         onModelsChanged(() => {
           void Promise.all([
             listConfiguredModels(),
@@ -465,8 +467,35 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
             status: "success",
           });
         }),
+        // The titler's report: the thread's real name, once the background
+        // model has read its opening. The sidebar entry and the tab rename
+        // together; the row order does not move — a name is not activity.
+        onConversationTitled((event) => {
+          set((state) => ({
+            conversations: state.conversations.map((conversation) =>
+              conversation.id === event.conversationId
+                ? { ...conversation, title: event.title }
+                : conversation,
+            ),
+            tabsById: Object.fromEntries(
+              Object.entries(state.tabsById).map(([tabId, tab]) => [
+                tabId,
+                tab.conversationId === event.conversationId
+                  ? { ...tab, title: event.title }
+                  : tab,
+              ]),
+            ),
+          }));
+        }),
       ]);
-      unlisteners = [stopModels, stopPreferences, stopCompanions, stopWokenEvents, stopSlept];
+      unlisteners = [
+        stopModels,
+        stopPreferences,
+        stopCompanions,
+        stopWokenEvents,
+        stopSlept,
+        stopTitled,
+      ];
       set({ isInitialised: true, isInitialising: false });
     } catch (error) {
       const tab = newConversationTab();
