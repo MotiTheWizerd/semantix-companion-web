@@ -536,6 +536,11 @@ export function ChatSurface({
       companions.find((candidate) => candidate.isBuiltIn);
     return companion ? companionLabel(companion) : "Companion";
   }, [companions, companionId]);
+  // No companion change mid-conversation (s569): a conversation exists only
+  // once its first message has landed, and from then on it is with whoever
+  // answered it. The picker is free on an empty tab and closed on a thread —
+  // Rust refuses the switch too; this just keeps the control honest.
+  const isCompanionSettled = activeConversationId !== null;
   // A thread whose every row is backstage still shows its call cards — the
   // cards are the one surface a call is allowed to have.
   const hasMessages = messages.some(isUserFacing) || callThreads.length > 0;
@@ -799,7 +804,12 @@ export function ChatSurface({
               id="companion-picker"
               companions={companions}
               value={companionId}
-              disabled={isLoading || isSending}
+              disabled={isLoading || isSending || isCompanionSettled}
+              title={
+                isCompanionSettled
+                  ? `This conversation is with ${companionName}. Start a new conversation to talk with someone else.`
+                  : undefined
+              }
               onChange={onCompanionChange}
             />
             {isSending ? (

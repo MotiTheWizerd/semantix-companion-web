@@ -678,15 +678,22 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     const tab = get().tabsById[tabId];
     if (!tab || tab.companionId === companionId) return;
     const previous = tab.companionId;
-    set((state) => ({
-      tabsById: {
-        ...state.tabsById,
-        [tabId]: { ...state.tabsById[tabId], companionId, error: null },
-      },
-    }));
     // A tab with no conversation yet has nothing to persist against; the pick
     // rides along on the first send instead.
-    if (!tab.conversationId) return;
+    if (!tab.conversationId) {
+      set((state) => ({
+        tabsById: {
+          ...state.tabsById,
+          [tabId]: { ...state.tabsById[tabId], companionId, error: null },
+        },
+      }));
+      return;
+    }
+    // A thread with a conversation behind it has been spoken in, and Rust
+    // will refuse to re-point it (s569). No optimistic flip here: the picker
+    // is closed on such a tab, so reaching this is a stale control — let the
+    // refusal land as the tab's error instead of flashing a change that
+    // never happened.
 
     try {
       const conversation = await updateConversationCompanion({

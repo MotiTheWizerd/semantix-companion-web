@@ -69,6 +69,20 @@
   white-space: nowrap;
 }
 
+/* The face of who the tab talks to — a companion's avatar, or the mark when
+   it has none. Sits at the tab's leading edge, smaller than the sidebar's
+   20px so the title keeps its room. */
+.conversation-tab__face {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+}
+
+.conversation-tab__face .companion-mark {
+  width: 16px;
+  height: 16px;
+}
+
 .conversation-tab__unread {
   width: 5px;
   height: 5px;

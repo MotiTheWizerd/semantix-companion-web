@@ -25,6 +25,9 @@ interface CompanionSelectProps {
   /** The small line above the menu's title — what choosing here means. */
   eyebrow?: string;
   ariaLabel?: string;
+  /** Why the control is closed, when it is — shown on hover even while
+   *  disabled (s569: a spoken thread keeps its companion). */
+  title?: string;
 }
 
 export function CompanionSelect({
@@ -37,6 +40,7 @@ export function CompanionSelect({
   variant = "composer",
   eyebrow = "Conversation partner",
   ariaLabel = "Companion",
+  title,
 }: CompanionSelectProps) {
   const builtIn = companions.find((companion) => companion.isBuiltIn);
   // An unpicked thread already answers to the built-in companion in Rust;
@@ -87,6 +91,7 @@ export function CompanionSelect({
       )}
       placeholder="Loading companions…"
       disabled={disabled || companions.length === 0}
+      title={title}
       id={id}
       ariaLabel={ariaLabel}
       menuLabel="Available companions"

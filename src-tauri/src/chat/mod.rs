@@ -51,7 +51,9 @@ pub(crate) struct Conversation {
     pub(crate) id: String,
     pub(crate) title: String,
     /// Who this thread talks to. The companion carries the model and the
-    /// memory, so the conversation itself holds neither.
+    /// memory, so the conversation itself holds neither. Settled by the first
+    /// message: the service refuses to re-point a thread anyone has spoken
+    /// in (s569), so on a live thread this and the rows always agree.
     pub(crate) companion_id: Option<String>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
@@ -74,8 +76,9 @@ pub(crate) struct Message {
     pub(crate) model_id: Option<String>,
     /// Who this row belongs to — the companion answering (assistant rows) or
     /// being addressed (user/system rows) at the moment it was committed.
-    /// Frozen here because `Conversation::companion_id` is a mutable label
-    /// the picker rewrites for the whole thread (s564).
+    /// Frozen here (s564) so the row tells its own truth whatever the thread's
+    /// label says; since s569 the service also refuses to move that label once
+    /// a row exists, so the two only disagree on threads older than the lock.
     pub(crate) companion_id: Option<String>,
     pub(crate) error_message: Option<String>,
     pub(crate) created_at: i64,
@@ -438,8 +441,40 @@ impl ChatService {
         // Resolving first turns a stale id into the built-in companion rather
         // than writing a dangling reference the thread would trip over later.
         let companion = self.companions.resolve(Some(&input.companion_id))?;
+        self.refuse_if_spoken_for(conversation_id, &companion.id)?;
         self.repository
             .update_companion(conversation_id, &companion.id)
+    }
+
+    /// No companion change mid-conversation (Moti, s569). The picker is free
+    /// while a thread is empty; the first message settles who the thread is
+    /// with, and from then on every door that could re-point it — the picker's
+    /// update, a send that names someone else — is refused here rather than
+    /// quietly honoured. Fails closed: the s564 rows already tell the truth
+    /// about who spoke, this keeps the thread from ever contradicting them.
+    fn refuse_if_spoken_for(
+        &self,
+        conversation_id: &str,
+        companion_id: &str,
+    ) -> Result<(), AppError> {
+        let Some(ownership) = self.repository.ownership(conversation_id)? else {
+            return Ok(());
+        };
+        let Some(owner_id) = ownership.companion_id.filter(|_| ownership.spoken) else {
+            return Ok(());
+        };
+        if owner_id == companion_id {
+            return Ok(());
+        }
+        let owner = self
+            .companions
+            .resolve(Some(&owner_id))
+            .ok()
+            .and_then(|owner| owner.name)
+            .unwrap_or_else(|| "its companion".to_owned());
+        Err(AppError::validation(format!(
+            "This conversation is with {owner}. Start a new conversation to talk with someone else."
+        )))
     }
 
     fn submit(
@@ -466,14 +501,19 @@ impl ChatService {
         // Who answers decides what answers: the composer picks a companion, and
         // the companion's own model preference resolves to the actual target.
         let stored_companion_id = conversation_id
-            .and_then(|id| self.repository.get_thread(id).ok().flatten())
-            .and_then(|thread| thread.conversation.companion_id);
+            .and_then(|id| self.repository.ownership(id).ok().flatten())
+            .and_then(|ownership| ownership.companion_id);
         let companion = self.companions.resolve(
             input
                 .companion_id
                 .as_deref()
                 .or(stored_companion_id.as_deref()),
         )?;
+        // A spoken thread answers to one companion; a send that names another
+        // is a bug upstream, not a request to switch.
+        if let Some(conversation_id) = conversation_id {
+            self.refuse_if_spoken_for(conversation_id, &companion.id)?;
+        }
         let voice = self
             .preferences
             .resolve_voice(&companion.model_preference)?;
@@ -1894,7 +1934,7 @@ mod tests {
         canonical_messages, companion_identity, conversation_title, drive_turn,
         repository::ChatRepository, style_directive, workspace_awareness, AssistantRows,
         ChatEvent, ChatEventSink, ChatService, ChatStreamAdapter, Message, SubmitMessageInput,
-        MAX_TOOL_ROUNDS, ORIGIN_CLOCK_ETIQUETTE,
+        UpdateConversationCompanionInput, MAX_TOOL_ROUNDS, ORIGIN_CLOCK_ETIQUETTE,
     };
     use crate::{
         companions::{Companion, CompanionResolver},
@@ -2900,6 +2940,118 @@ mod tests {
             );
         }
 
+        for path in [
+            database_path.clone(),
+            database_path.with_extension("db-wal"),
+            database_path.with_extension("db-shm"),
+        ] {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    /// No companion change mid-conversation (s569). The picker is free until
+    /// the first message lands; after that, both doors that could re-point the
+    /// thread — the picker's update and a send naming someone else — say no.
+    #[test]
+    fn the_first_message_settles_who_a_conversation_is_with() {
+        let database_path = std::env::temp_dir().join(format!(
+            "semantix-companion-companion-lock-{}.db",
+            Uuid::new_v4()
+        ));
+        database::initialise(&database_path).expect("test database should initialise");
+        let service = ChatService::new(
+            ChatRepository::open(&database_path).expect("chat repository should open"),
+            ModelResolver::open(&database_path).expect("model resolver should open"),
+            CompanionResolver::open(&database_path).expect("companion resolver should open"),
+            StyleRepository::open(&database_path).expect("style repository should open"),
+            PreferenceRepository::open(&database_path).expect("preference repository should open"),
+            StreamingService::new(Arc::new(InferenceGateway::default())),
+            database_path.clone(),
+        );
+        let connection =
+            rusqlite::Connection::open(&database_path).expect("test database should open");
+        let built_in_id: String = connection
+            .query_row("SELECT id FROM companions WHERE is_built_in = 1", [], |row| row.get(0))
+            .expect("the built-in companion should exist");
+        let hugin = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO companions (
+                    id, name, memory_agent_name, is_built_in,
+                    model_preference_mode, created_at, updated_at
+                 ) VALUES (?1, 'Hugin', ?2, 0, 'inherit', 1, 1)",
+                rusqlite::params![hugin, format!("agent-{hugin}")],
+            )
+            .expect("Hugin should insert");
+        let send = |conversation_id: Option<&str>, companion_id: Option<&str>, content: &str| {
+            service.submit(
+                SubmitMessageInput {
+                    conversation_id: conversation_id.map(str::to_owned),
+                    companion_id: companion_id.map(str::to_owned),
+                    content: content.to_owned(),
+                    memory_context: None,
+                    memory_agent_id: None,
+                    auto_sleep_agent_id: None,
+                    attachments: Vec::new(),
+                },
+                "user",
+            )
+        };
+
+        // An empty thread is anyone's: the pick on the first send is honoured.
+        let accepted = send(None, Some(&hugin), "Hugin, between us: the keel was rotten.")
+            .expect("the first message should land");
+        let thread_id = accepted.accepted.conversation.id.clone();
+        assert_eq!(
+            accepted.accepted.conversation.companion_id.as_deref(),
+            Some(hugin.as_str())
+        );
+
+        // Door one: the picker. Refused, and the thread names who it is with.
+        let refused = service
+            .update_companion(UpdateConversationCompanionInput {
+                conversation_id: thread_id.clone(),
+                companion_id: built_in_id.clone(),
+            })
+            .expect_err("a spoken thread must not change companion");
+        assert!(
+            refused.to_string().contains("This conversation is with Hugin"),
+            "the refusal names the companion: {refused}"
+        );
+        assert_eq!(
+            service
+                .repository
+                .ownership(&thread_id)
+                .expect("ownership should read")
+                .expect("the thread should exist")
+                .companion_id
+                .as_deref(),
+            Some(hugin.as_str()),
+            "the refused update wrote nothing"
+        );
+
+        // Door two: a send that names someone else. Same refusal, no row written.
+        assert!(
+            send(Some(&thread_id), Some(&built_in_id), "Rook, are you there?").is_err(),
+            "a send naming another companion must not land"
+        );
+        assert_eq!(
+            service.get_thread(&thread_id).expect("thread should reload").messages.len(),
+            1,
+            "the refused send left no row behind"
+        );
+
+        // The thread's own companion still answers — named, or left to the row.
+        send(Some(&thread_id), Some(&hugin), "Hugin, still you?")
+            .expect("the thread's companion may keep talking");
+        let later = send(Some(&thread_id), None, "And with no pick at all.")
+            .expect("an unpicked send falls to the thread's companion");
+        assert_eq!(
+            later.accepted.conversation.companion_id.as_deref(),
+            Some(hugin.as_str())
+        );
+
+        drop(connection);
         for path in [
             database_path.clone(),
             database_path.with_extension("db-wal"),

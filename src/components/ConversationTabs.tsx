@@ -1,6 +1,7 @@
 import { useShallow } from "zustand/react/shallow";
 
 import { useCompanionStore } from "../features/workspace/companionStore";
+import { CompanionMark } from "./CompanionMark";
 
 function CloseIcon() {
   return (
@@ -19,17 +20,26 @@ function PlusIcon() {
 }
 
 export function ConversationTabs() {
-  const { tabOrder, tabsById, activeTabId, setActiveTab, closeTab, openNewConversation } =
-    useCompanionStore(
-      useShallow((state) => ({
-        tabOrder: state.tabOrder,
-        tabsById: state.tabsById,
-        activeTabId: state.activeTabId,
-        setActiveTab: state.setActiveTab,
-        closeTab: state.closeTab,
-        openNewConversation: state.openNewConversation,
-      })),
-    );
+  const {
+    tabOrder,
+    tabsById,
+    activeTabId,
+    companions,
+    setActiveTab,
+    closeTab,
+    openNewConversation,
+  } = useCompanionStore(
+    useShallow((state) => ({
+      tabOrder: state.tabOrder,
+      tabsById: state.tabsById,
+      activeTabId: state.activeTabId,
+      companions: state.companions,
+      setActiveTab: state.setActiveTab,
+      closeTab: state.closeTab,
+      openNewConversation: state.openNewConversation,
+    })),
+  );
+  const builtIn = companions.find((companion) => companion.isBuiltIn) ?? null;
 
   return (
     <div className="conversation-tabs" role="tablist" aria-label="Open conversations">
@@ -38,6 +48,11 @@ export function ConversationTabs() {
           const tab = tabsById[tabId];
           if (!tab) return null;
           const isActive = tabId === activeTabId;
+          // Each tab wears the face of who it talks to (s569). An unpicked
+          // tab answers to the built-in companion, so it wears that face;
+          // a companion without a picture wears the mark, as everywhere.
+          const companion =
+            companions.find((candidate) => candidate.id === tab.companionId) ?? builtIn;
           return (
             <div className={`conversation-tab ${isActive ? "is-active" : ""}`} key={tabId}>
               <button
@@ -48,6 +63,9 @@ export function ConversationTabs() {
                 title={tab.title}
                 onClick={() => setActiveTab(tabId)}
               >
+                <span className="conversation-tab__face">
+                  <CompanionMark src={companion?.avatarUrl} />
+                </span>
                 {tab.unreadCount > 0 ? <span className="conversation-tab__unread" /> : null}
                 <span>{tab.title}</span>
               </button>

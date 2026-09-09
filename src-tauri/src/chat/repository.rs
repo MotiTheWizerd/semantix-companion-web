@@ -40,6 +40,14 @@ pub(crate) struct CommitUserMessage<'a> {
     pub(crate) attachments: &'a [MessageAttachment],
 }
 
+/// The two facts the companion lock turns on (s569): who a conversation
+/// answers to, and whether a single message has landed in it yet. A thread
+/// nobody has spoken in is still anyone's; the first message settles it.
+pub(crate) struct Ownership {
+    pub(crate) companion_id: Option<String>,
+    pub(crate) spoken: bool,
+}
+
 /// One hit from the raw-memory drill (search_conversations tool): where the
 /// match sits and the WHOLE message it sits in — a snippet proved too thin to
 /// answer from, so the full text rides along and size is governed by message
@@ -595,6 +603,36 @@ impl ChatRepository {
                 attachments: attachments.to_vec(),
             },
         })
+    }
+
+    /// Who a live conversation answers to, and whether anyone has spoken in
+    /// it yet — the two facts the companion lock is decided on (s569). Cheap
+    /// on purpose: the lock is asked on every send, and loading the whole
+    /// thread to read one column was the old cost.
+    pub(crate) fn ownership(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<Ownership>, AppError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT companion_id,
+                        EXISTS(
+                            SELECT 1 FROM messages
+                            WHERE messages.conversation_id = conversations.id
+                        )
+                 FROM conversations
+                 WHERE conversations.id = ?1 AND archived_at IS NULL",
+                [conversation_id],
+                |row| {
+                    Ok(Ownership {
+                        companion_id: row.get(0)?,
+                        spoken: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(AppError::database)
     }
 
     pub(crate) fn update_companion(
@@ -1224,9 +1262,11 @@ mod tests {
     }
 
     /// The wall is drawn around the ROW, not the thread (s564). A thread's
-    /// companion is a label the picker rewrites; the rows keep who actually
-    /// spoke. Re-pointing Rook's thread at Hugin must not hand Hugin Rook's
-    /// words — and must not take them from Rook.
+    /// companion is a label; the rows keep who actually spoke. Re-pointing
+    /// Rook's thread at Hugin must not hand Hugin Rook's words — and must not
+    /// take them from Rook. Since s569 the SERVICE refuses this re-point on a
+    /// spoken thread; the repository stays permissive so the row wall is
+    /// proven on its own, for the threads that predate the lock.
     #[test]
     fn re_pointing_a_thread_does_not_re_attribute_what_was_already_said() {
         let (repository, path) = open_repository("row-attribution");

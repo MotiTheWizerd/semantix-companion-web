@@ -101,6 +101,10 @@ export interface DropdownProps<T> {
   /** Extra classes on the trigger button — scoped restyles, same contract as
    *  menuClassName. */
   triggerClassName?: string;
+  /** Native tooltip on the whole control. Sits on the wrapper, not the
+   *  button, so it still shows while the control is disabled — which is
+   *  exactly when a caller has something to explain. */
+  title?: string;
 }
 
 export function Dropdown<T>({
@@ -125,6 +129,7 @@ export function Dropdown<T>({
   menuSubheader,
   menuClassName = "",
   triggerClassName = "",
+  title,
 }: DropdownProps<T>) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -317,6 +322,7 @@ export function Dropdown<T>({
       ref={dropdownRef}
       className={`${styles.dropdown} ${className} ${disabled ? styles.disabled : ""}`}
       data-direction={direction}
+      title={title}
     >
       <button
         ref={triggerRef}
