@@ -81,6 +81,9 @@ interface ChatSurfaceProps {
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
   /** Provider-supplied reasoning per assistant message — live-session only. */
   reasoningByMessageId: Record<string, string>;
+  /** The row whose thoughts are arriving now, if any — the only row whose
+   * disclosure may pulse "Thinking…". */
+  thinkingMessageId: string | null;
   content: string;
   /** Composer images awaiting send. */
   pendingAttachments: PendingAttachment[];
@@ -166,6 +169,7 @@ interface ChatThreadProps {
   recallByMessageId: Record<string, MemoryRecallChipData>;
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
   reasoningByMessageId: Record<string, string>;
+  thinkingMessageId: string | null;
   callThreads: CallThread[];
   streamingCallMessages: StreamingCallMessage[];
   /** callId → agentId while a woken reply is in flight — changes only on wake
@@ -262,6 +266,7 @@ const ChatThread = memo(function ChatThread({
   recallByMessageId,
   toolCallsByMessageId,
   reasoningByMessageId,
+  thinkingMessageId,
   callThreads,
   streamingCallMessages,
   replyingByCallId,
@@ -391,9 +396,10 @@ const ChatThread = memo(function ChatThread({
           const reasoning = reasoningByMessageId[message.id] ?? "";
           const callsAfterMessage = callPlacements.afterMessageId.get(message.id) ?? [];
           const hasToolRow = toolCalls.length > 0;
-          const showReasoning =
-            message.role === "assistant" &&
-            (Boolean(reasoning) || (message.status === "streaming" && !message.content));
+          // The disclosure exists only once the provider has actually sent a
+          // thought. Waiting for the first token is not thinking, and the
+          // presence line already says the companion is working.
+          const showReasoning = message.role === "assistant" && Boolean(reasoning);
           // A tool call opens its own row, like a message of its own; later
           // calls on the same side of the text join that row. The text row
           // only appears once it actually has something to show — otherwise
@@ -442,7 +448,7 @@ const ChatThread = memo(function ChatThread({
                   {showReasoning ? (
                     <ReasoningDisclosure
                       reasoning={reasoning}
-                      isStreaming={message.status === "streaming"}
+                      isThinking={thinkingMessageId === message.id}
                     />
                   ) : null}
                   {message.role === "assistant" && message.content ? (
@@ -501,6 +507,7 @@ export function ChatSurface({
   recallByMessageId,
   toolCallsByMessageId,
   reasoningByMessageId,
+  thinkingMessageId,
   content,
   pendingAttachments,
   companions,
@@ -715,6 +722,7 @@ export function ChatSurface({
           recallByMessageId={recallByMessageId}
           toolCallsByMessageId={toolCallsByMessageId}
           reasoningByMessageId={reasoningByMessageId}
+          thinkingMessageId={thinkingMessageId}
           callThreads={callThreads}
           streamingCallMessages={streamingCallMessages}
           replyingByCallId={replyingByCallId}

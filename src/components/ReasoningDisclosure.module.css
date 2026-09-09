@@ -94,8 +94,7 @@
   animation: reasoning-reveal 160ms ease-out;
 }
 
-.content,
-.waiting {
+.content {
   max-height: 220px;
   overflow-y: auto;
   color: var(--text-muted);
@@ -105,11 +104,6 @@
   scrollbar-color: var(--border) transparent;
   scrollbar-width: thin;
   white-space: pre-wrap;
-}
-
-.waiting {
-  color: var(--text-faint);
-  font-style: italic;
 }
 
 @keyframes reasoning-reveal {

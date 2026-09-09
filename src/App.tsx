@@ -141,6 +141,7 @@ export function App() {
             recallByMessageId={runtime?.recallByMessageId ?? {}}
             toolCallsByMessageId={runtime?.toolCallsByMessageId ?? {}}
             reasoningByMessageId={runtime?.reasoningByMessageId ?? {}}
+            thinkingMessageId={runtime?.thinkingMessageId ?? null}
             content={activeTab?.draft ?? ""}
             pendingAttachments={activeTab?.attachments ?? []}
             companions={companions}

@@ -74,9 +74,14 @@ interface ConversationRuntime {
   recallByMessageId: Record<string, MemoryRecallChipData>;
   /** 📖 tool chips per assistant message — same live-session contract. */
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
-  /** Provider-supplied thoughts + tool-round progress narration per assistant
-   *  message. Runtime-only so neither becomes later conversation context. */
+  /** Provider-supplied thoughts per assistant message. Runtime-only so they
+   *  never become later conversation context. */
   reasoningByMessageId: Record<string, string>;
+  /** The row whose thoughts are arriving RIGHT NOW — the only time the
+   *  disclosure may say "Thinking…". Set by a reasoning delta, cleared by the
+   *  first text after it, a tool event, or the turn's end. A wait for the
+   *  first token is not thinking, and neither is a tool running. */
+  thinkingMessageId: string | null;
 }
 
 interface CompanionStore {
@@ -175,6 +180,7 @@ function emptyRuntime(isLoading = false): ConversationRuntime {
     recallByMessageId: {},
     toolCallsByMessageId: {},
     reasoningByMessageId: {},
+    thinkingMessageId: null,
   };
 }
 
@@ -220,7 +226,13 @@ function settleRuntime(runtime: ConversationRuntime, now: number): ConversationR
       ),
     ]),
   );
-  return { ...runtime, isStreaming: false, isRemembering: false, toolCallsByMessageId };
+  return {
+    ...runtime,
+    isStreaming: false,
+    isRemembering: false,
+    thinkingMessageId: null,
+    toolCallsByMessageId,
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -535,6 +547,8 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                 state.runtimeByConversationId[conversationId]?.toolCallsByMessageId ?? {},
               reasoningByMessageId:
                 state.runtimeByConversationId[conversationId]?.reasoningByMessageId ?? {},
+              thinkingMessageId:
+                state.runtimeByConversationId[conversationId]?.thinkingMessageId ?? null,
             },
           },
         };
@@ -939,6 +953,10 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
               ...state.runtimeByConversationId,
               [conversationId]: {
                 ...runtimeState,
+                // A tool signal means the model stopped thinking and asked
+                // for something. If it thinks again after the result, the
+                // next reasoning delta re-arms this.
+                thinkingMessageId: null,
                 toolCallsByMessageId: {
                   ...runtimeState.toolCallsByMessageId,
                   [event.messageId]: reconcileToolCall(
@@ -986,6 +1004,10 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
               [conversationId]: {
                 ...runtimeState,
                 isStreaming: true,
+                // The first word of the answer ends the thinking — whichever
+                // row the thoughts landed on (after a tool, the text opens a
+                // new row while the thoughts stayed on the old one).
+                thinkingMessageId: null,
                 messages: runtimeState.messages.map((item) =>
                   item.id === event.messageId
                     ? {
@@ -1007,6 +1029,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
               [conversationId]: {
                 ...runtimeState,
                 isStreaming: true,
+                thinkingMessageId: event.messageId,
                 reasoningByMessageId: {
                   ...runtimeState.reasoningByMessageId,
                   [event.messageId]:
@@ -1039,6 +1062,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
                 messages: reconcileMessage(runtimeState.messages, event.message),
                 isStreaming: false,
                 isRemembering: false,
+                thinkingMessageId: null,
                 error: null,
               },
             },
@@ -1052,6 +1076,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
               ...runtimeState,
               isStreaming: false,
               isRemembering: false,
+              thinkingMessageId: null,
               error: event.message,
               messages: event.messageId
                 ? runtimeState.messages.map((item) =>

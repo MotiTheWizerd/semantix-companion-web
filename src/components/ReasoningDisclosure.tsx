@@ -8,8 +8,13 @@ import styles from "./ReasoningDisclosure.module.css";
 const PINNED_TO_END_SLACK_PX = 48;
 
 interface ReasoningDisclosureProps {
+  /** The thoughts so far — never empty; the caller mounts this only once the
+   * provider has sent one. */
   reasoning: string;
-  isStreaming: boolean;
+  /** Thoughts are still arriving for this row. Not "the message is
+   * streaming": once the answer's text begins, the thinking is over and the
+   * label says so, even while the rest of the message is still being typed. */
+  isThinking: boolean;
 }
 
 function ThinkingIcon() {
@@ -29,18 +34,15 @@ function ChevronIcon() {
   );
 }
 
-/** A provider-neutral view of explicitly exposed reasoning and progress text
- * reclassified when a tool begins. Hidden reasoning is never synthesized. */
-export function ReasoningDisclosure({
-  reasoning,
-  isStreaming,
-}: ReasoningDisclosureProps) {
+/** A provider-neutral view of explicitly exposed reasoning. Hidden reasoning
+ * is never synthesized, and "Thinking…" is never a guess: it shows only while
+ * thoughts are actually arriving. */
+export function ReasoningDisclosure({ reasoning, isThinking }: ReasoningDisclosureProps) {
   const [isOpen, setIsOpen] = useState(false);
   const panelId = useId();
   const contentRef = useRef<HTMLDivElement>(null);
   const pinnedToEndRef = useRef(true);
-  const hasReasoning = reasoning.length > 0;
-  const label = isStreaming ? "Thinking…" : "Thought process";
+  const label = isThinking ? "Thinking…" : "Thought process";
 
   // The panel is its own 220px scroller, so it needs its own bottom pin —
   // the thread-level one cannot see inside it. Same contract as the thread:
@@ -56,16 +58,16 @@ export function ReasoningDisclosure({
     };
     content.addEventListener("scroll", measure, { passive: true });
     return () => content.removeEventListener("scroll", measure);
-  }, [isOpen, hasReasoning]);
+  }, [isOpen]);
 
   // Ride the newest thought while it streams. A finished thought opens at
   // its top for reading; a live one opens at its edge and stays there.
   useLayoutEffect(() => {
     const content = contentRef.current;
-    if (content && isStreaming && pinnedToEndRef.current) {
+    if (content && isThinking && pinnedToEndRef.current) {
       content.scrollTop = content.scrollHeight;
     }
-  }, [reasoning, isStreaming, isOpen]);
+  }, [reasoning, isThinking, isOpen]);
 
   return (
     <div className={`${styles.root} ${isOpen ? styles.open : ""}`}>
@@ -84,20 +86,16 @@ export function ReasoningDisclosure({
           <ThinkingIcon />
         </span>
         <span>{label}</span>
-        {isStreaming ? <span className={styles.pulse} aria-hidden="true" /> : null}
+        {isThinking ? <span className={styles.pulse} aria-hidden="true" /> : null}
         <span className={styles.chevron}>
           <ChevronIcon />
         </span>
       </button>
       {isOpen ? (
         <div id={panelId} className={styles.panel}>
-          {hasReasoning ? (
-            <div ref={contentRef} className={styles.content}>
-              {reasoning}
-            </div>
-          ) : (
-            <div className={styles.waiting}>Waiting for provider-supplied thoughts…</div>
-          )}
+          <div ref={contentRef} className={styles.content}>
+            {reasoning}
+          </div>
         </div>
       ) : null}
     </div>
