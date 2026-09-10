@@ -5,6 +5,7 @@ export { CallTranscriptError, CallTranscriptItem } from "./CallTranscriptItem";
 export { useConversationCalls } from "./useConversationCalls";
 export { listConversationCalls } from "./callService";
 export type {
+  CallSegment,
   CallStatus,
   CallThread,
   RavenCall,

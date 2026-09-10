@@ -1,15 +1,20 @@
 // ☎ CALL TRANSCRIPT ITEM — one exchange your companion had with another agent
 // while working in this thread.
 //
-// A call is a first-class row in the conversation timeline. The host decides
-// where it belongs; this component only knows how one call looks and expands.
+// A call is a first-class row in the conversation timeline — and a long one
+// is several rows: the host cuts a call into segments, one per stretch
+// between the conversation's own messages, and decides where each belongs.
+// This component only knows how one segment looks: the opening wears the
+// header, a continuation wears a slim strip, and the latest carries whatever
+// is live. Open/closed is one state for the whole call, held by the host, so
+// every segment of a call opens and closes together.
 
 import { useEffect, useState } from "react";
 
 import { retryCallWake } from "./callService";
 import {
   MAX_MESSAGES_PER_CALL,
-  type CallThread,
+  type CallSegment,
   type RavenCallMessage,
   type StreamingCallMessage,
 } from "./types";
@@ -279,13 +284,19 @@ function SilenceNotice({
 }
 
 export function CallTranscriptItem({
-  thread,
+  segment,
+  expanded,
+  onExpandedChange,
   streamingMessages = [],
   replyingAgentId = null,
   agentNames,
   agentAvatars,
 }: {
-  thread: CallThread;
+  segment: CallSegment;
+  /** Whether the call's turns are shown — the same answer for every segment
+   *  of one call. */
+  expanded: boolean;
+  onExpandedChange: (callId: string, expanded: boolean) => void;
   streamingMessages?: StreamingCallMessage[];
   /** Who is composing a reply to this call right now — the waker's word, not
    *  a guess. Null when nothing is in flight. */
@@ -294,9 +305,10 @@ export function CallTranscriptItem({
   /** Companion id → its picture, for the companions that have one. */
   agentAvatars?: ReadonlyMap<string, string>;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [redialing, setRedialing] = useState(false);
+  const { thread, messages: turns, isOpening, isLatest } = segment;
   const { call, messages } = thread;
+  const setExpanded = (next: boolean) => onExpandedChange(call.id, next);
   const used = call.messageCount;
   const other =
     messages.find((message) => message.fromAgentId !== call.initiatorAgentId)?.fromAgentId ??
@@ -349,9 +361,12 @@ export function CallTranscriptItem({
   // Anything happening live inside a collapsed call must be visible without
   // making the user notice a changing meter and manually open it mid-sentence.
   // A ring counts: a phone that rings where nobody can see it rings for nobody.
+  // The latest segment is the one that shows the live part, so it is the one
+  // that asks — once per call, not once per segment.
+  const live = streamingMessages.length > 0 || replying || answering || ringing;
   useEffect(() => {
-    if (streamingMessages.length > 0 || replying || answering || ringing) setExpanded(true);
-  }, [streamingMessages.length, replying, answering, ringing]);
+    if (isLatest && live) onExpandedChange(call.id, true);
+  }, [isLatest, live, call.id, onExpandedChange]);
 
   // One press, one retry. Success flips the card back to ringing through the
   // refetch Rust's changed event triggers; the effect below re-arms the button
@@ -370,6 +385,121 @@ export function CallTranscriptItem({
       .catch(() => setRedialing(false));
   };
 
+  const statusPill = (
+    <span
+      className={`calls__status calls__status--${call.status}${
+        liveWord ? " calls__status--live" : ""
+      }${unanswered ? " calls__status--silent" : ""}`}
+    >
+      <span aria-hidden="true" />
+      {statusWord}
+    </span>
+  );
+
+  // What this stretch shows when open: its own turns, and — on the latest
+  // stretch only — the live tail. A call with nothing said yet says so once,
+  // at its live end; an opening whose first line landed later stays quiet
+  // rather than announcing an emptiness that is not true of the call.
+  const nothingSaid = messages.length === 0 && streamingMessages.length === 0 && !replying;
+  const tail = isLatest ? (
+    <>
+      {streamingMessages.map((message) => (
+        <CallTurn
+          key={message.streamId}
+          message={message}
+          initiatorAgentId={call.initiatorAgentId}
+          agentNames={agentNames}
+          agentAvatars={agentAvatars}
+          streaming
+        />
+      ))}
+      {replying && replyingAgentId !== null && (
+        <TypingTurn
+          agentId={replyingAgentId}
+          initiatorAgentId={call.initiatorAgentId}
+          agentNames={agentNames}
+          agentAvatars={agentAvatars}
+        />
+      )}
+      {ringing && newestMessage !== null && (
+        <RingingTurn
+          message={newestMessage}
+          initiatorAgentId={call.initiatorAgentId}
+          agentNames={agentNames}
+          agentAvatars={agentAvatars}
+          now={now}
+        />
+      )}
+      {unanswered && newestMessage !== null && (
+        <SilenceNotice
+          agentId={newestMessage.toAgentId}
+          agentNames={agentNames}
+          callId={call.id}
+          redialing={redialing}
+          onRedial={redial}
+        />
+      )}
+    </>
+  ) : null;
+  // An opening with no turns of its own and nothing live is header only.
+  const hasBody = turns.length > 0 || isLatest;
+  const body =
+    expanded && hasBody ? (
+      <div className="calls__turns">
+        {isLatest && nothingSaid ? (
+          <p className="calls__empty">Nothing was said in this call.</p>
+        ) : (
+          <>
+            {turns.map((message) => (
+              <CallTurn
+                key={message.id}
+                message={message}
+                initiatorAgentId={call.initiatorAgentId}
+                agentNames={agentNames}
+                agentAvatars={agentAvatars}
+              />
+            ))}
+            {tail}
+          </>
+        )}
+      </div>
+    ) : null;
+
+  if (!isOpening) {
+    // A continuation: the call carried on after the companion had said more
+    // in the thread. A slim strip names it and toggles the same open state
+    // as the header above; the status rides here only while this is the
+    // live end of the call, so "Ended" reads where the call actually ended.
+    return (
+      <article className="chat-message chat-message--call">
+        <div
+          className={`calls calls--${call.status} calls--continued`}
+          role="group"
+          aria-label={`Companion call, continued: ${title}`}
+        >
+          <div className="calls__row">
+            <button
+              type="button"
+              className="calls__continued"
+              aria-expanded={expanded}
+              onClick={() => setExpanded(!expanded)}
+            >
+              <span className="calls__continued-icon">
+                <PhoneIcon />
+              </span>
+              <span className="calls__continued-title">{title} · continued</span>
+              {isLatest ? statusPill : null}
+              <span className={`calls__chevron${expanded ? " calls__chevron--open" : ""}`}>
+                <ChevronIcon />
+              </span>
+            </button>
+            {body}
+          </div>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <article className="chat-message chat-message--call">
       <div
@@ -382,7 +512,7 @@ export function CallTranscriptItem({
             type="button"
             className="calls__summary"
             aria-expanded={expanded}
-            onClick={() => setExpanded((open) => !open)}
+            onClick={() => setExpanded(!expanded)}
           >
             <span className="calls__icon">
               <PhoneIcon />
@@ -392,14 +522,7 @@ export function CallTranscriptItem({
               <span className="calls__title">{title}</span>
             </span>
             <span className="calls__summary-meta">
-              <span
-                className={`calls__status calls__status--${call.status}${
-                  liveWord ? " calls__status--live" : ""
-                }${unanswered ? " calls__status--silent" : ""}`}
-              >
-                <span aria-hidden="true" />
-                {statusWord}
-              </span>
+              {statusPill}
               <span
                 className="calls__duration"
                 title={call.status === "open" ? "Call running for" : "Call lasted"}
@@ -414,62 +537,7 @@ export function CallTranscriptItem({
               <ChevronIcon />
             </span>
           </button>
-
-          {expanded && (
-            <div className="calls__turns">
-              {messages.length === 0 && streamingMessages.length === 0 && !replying ? (
-                <p className="calls__empty">Nothing was said in this call.</p>
-              ) : (
-                <>
-                  {messages.map((message) => (
-                    <CallTurn
-                      key={message.id}
-                      message={message}
-                      initiatorAgentId={call.initiatorAgentId}
-                      agentNames={agentNames}
-                      agentAvatars={agentAvatars}
-                    />
-                  ))}
-                  {streamingMessages.map((message) => (
-                    <CallTurn
-                      key={message.streamId}
-                      message={message}
-                      initiatorAgentId={call.initiatorAgentId}
-                      agentNames={agentNames}
-                      agentAvatars={agentAvatars}
-                      streaming
-                    />
-                  ))}
-                  {replying && replyingAgentId !== null && (
-                    <TypingTurn
-                      agentId={replyingAgentId}
-                      initiatorAgentId={call.initiatorAgentId}
-                      agentNames={agentNames}
-                      agentAvatars={agentAvatars}
-                    />
-                  )}
-                  {ringing && newestMessage !== null && (
-                    <RingingTurn
-                      message={newestMessage}
-                      initiatorAgentId={call.initiatorAgentId}
-                      agentNames={agentNames}
-                      agentAvatars={agentAvatars}
-                      now={now}
-                    />
-                  )}
-                  {unanswered && newestMessage !== null && (
-                    <SilenceNotice
-                      agentId={newestMessage.toAgentId}
-                      agentNames={agentNames}
-                      callId={call.id}
-                      redialing={redialing}
-                      onRedial={redial}
-                    />
-                  )}
-                </>
-              )}
-            </div>
-          )}
+          {body}
         </div>
       </div>
     </article>

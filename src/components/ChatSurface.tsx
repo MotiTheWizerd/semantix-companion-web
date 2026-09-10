@@ -1,6 +1,7 @@
 import {
   Fragment,
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -32,7 +33,9 @@ import {
   CallTranscriptError,
   CallTranscriptItem,
   useConversationCalls,
+  type CallSegment,
   type CallThread,
+  type RavenCallMessage,
   type StreamingCallMessage,
 } from "../features/calls";
 import { MemoryRecallChip } from "./MemoryRecallChip";
@@ -100,8 +103,8 @@ interface ChatSurfaceProps {
 }
 
 interface CallPlacements {
-  beforeFirstMessage: CallThread[];
-  afterMessageId: Map<string, CallThread[]>;
+  beforeFirstMessage: CallSegment[];
+  afterMessageId: Map<string, CallSegment[]>;
 }
 
 /** Backstage rows — persisted for the MODEL, never shown to the person. A
@@ -126,30 +129,66 @@ function isUserFacing(message: ChatMessage): boolean {
   return true;
 }
 
-/** Keep chat sequence authoritative and place each call after the latest
- * message that already existed when the call opened. The call's createdAt is
- * immutable, so later call turns update the same slot instead of moving it. */
+/** The latest message that already existed at `at` — null before the first. */
+function anchorAt(messages: ChatMessage[], at: number): string | null {
+  let anchorId: string | null = null;
+  for (const message of messages) {
+    if (message.createdAt <= at) anchorId = message.id;
+  }
+  return anchorId;
+}
+
+/** Keep chat sequence authoritative and place each piece of a call after the
+ * latest message that already existed when that piece happened.
+ *
+ * ⚑ A CALL IS PLACED TURN BY TURN, NOT AS ONE BLOCK. The opening sits where
+ * the call was placed; each later turn sits where it arrived. Anchoring the
+ * whole call at its opening pulled a reply that came seconds later ABOVE
+ * text the companion had written in between (seen live, s571: "Done! I've
+ * opened a call" pushed under Rook's answer to it). Turns that share an
+ * anchor form one segment; a call whose turns straddle the companion's next
+ * words shows as an opening and one or more continuations, each in its
+ * place. Timestamps are immutable, so a refetch never moves a piece. */
 function placeCalls(messages: ChatMessage[], threads: CallThread[]): CallPlacements {
-  const beforeFirstMessage: CallThread[] = [];
-  const afterMessageId = new Map<string, CallThread[]>();
+  const beforeFirstMessage: CallSegment[] = [];
+  const afterMessageId = new Map<string, CallSegment[]>();
   const oldestFirst = [...threads].sort(
     (left, right) =>
       left.call.createdAt - right.call.createdAt || left.call.id.localeCompare(right.call.id),
   );
-
-  for (const thread of oldestFirst) {
-    let anchorId: string | null = null;
-    for (const message of messages) {
-      if (message.createdAt <= thread.call.createdAt) anchorId = message.id;
-    }
-
+  const place = (anchorId: string | null, segment: CallSegment) => {
     if (!anchorId) {
-      beforeFirstMessage.push(thread);
-      continue;
+      beforeFirstMessage.push(segment);
+      return;
     }
     const anchored = afterMessageId.get(anchorId) ?? [];
-    anchored.push(thread);
+    anchored.push(segment);
     afterMessageId.set(anchorId, anchored);
+  };
+
+  for (const thread of oldestFirst) {
+    const turns = [...thread.messages].sort(
+      (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+    );
+    // Cut at every change of anchor. A turn never lands before the opening:
+    // it was said after the call was placed, so its anchor is at or past it.
+    const cuts: { anchorId: string | null; messages: RavenCallMessage[] }[] = [
+      { anchorId: anchorAt(messages, thread.call.createdAt), messages: [] },
+    ];
+    for (const turn of turns) {
+      const anchorId = anchorAt(messages, turn.createdAt);
+      const current = cuts[cuts.length - 1];
+      if (anchorId === current.anchorId) current.messages.push(turn);
+      else cuts.push({ anchorId, messages: [turn] });
+    }
+    cuts.forEach((cut, index) =>
+      place(cut.anchorId, {
+        thread,
+        messages: cut.messages,
+        isOpening: index === 0,
+        isLatest: index === cuts.length - 1,
+      }),
+    );
   }
 
   return { beforeFirstMessage, afterMessageId };
@@ -316,6 +355,37 @@ const ChatThread = memo(function ChatThread({
     [companions],
   );
 
+  // Open/closed per call, held here because a call can be several rows:
+  // its opening and its continuations share one answer, so a press on any
+  // of them opens or closes the whole call. Closed by default; a segment
+  // with something live asks to open.
+  const [expandedCallIds, setExpandedCallIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const setCallExpanded = useCallback((callId: string, expanded: boolean) => {
+    setExpandedCallIds((current) => {
+      if (current.has(callId) === expanded) return current;
+      const next = new Set(current);
+      if (expanded) next.add(callId);
+      else next.delete(callId);
+      return next;
+    });
+  }, []);
+  const renderCallSegment = (segment: CallSegment) => (
+    <CallTranscriptItem
+      key={segment.thread.call.id}
+      segment={segment}
+      expanded={expandedCallIds.has(segment.thread.call.id)}
+      onExpandedChange={setCallExpanded}
+      agentNames={callAgentNames}
+      agentAvatars={callAgentAvatars}
+      streamingMessages={streamingCallMessages.filter(
+        (message) => message.callId === segment.thread.call.id,
+      )}
+      replyingAgentId={replyingByCallId.get(segment.thread.call.id) ?? null}
+    />
+  );
+
   // ⚑ NOT EVERY GROWTH IS A COMMIT OF THIS COMPONENT. The follow below rides
   // ChatThread's own renders, which covers new messages and streamed tokens —
   // but a call card owns its `expanded` state privately and opens ITSELF the
@@ -372,18 +442,7 @@ const ChatThread = memo(function ChatThread({
       aria-live="polite"
     >
       <div className="chat-thread__content" ref={contentRef}>
-        {callPlacements.beforeFirstMessage.map((thread) => (
-          <CallTranscriptItem
-            key={thread.call.id}
-            thread={thread}
-            agentNames={callAgentNames}
-            agentAvatars={callAgentAvatars}
-            streamingMessages={streamingCallMessages.filter(
-              (message) => message.callId === thread.call.id,
-            )}
-            replyingAgentId={replyingByCallId.get(thread.call.id) ?? null}
-          />
-        ))}
+        {callPlacements.beforeFirstMessage.map(renderCallSegment)}
         {visibleMessages.map((message) => {
           const recall = recallByMessageId[message.id];
           const toolCalls = toolCallsByMessageId[message.id] ?? [];
@@ -467,18 +526,7 @@ const ChatThread = memo(function ChatThread({
                   <ToolCallChip calls={toolsAfter} agentNames={callAgentNames} />
                 </article>
               ) : null}
-              {callsAfterMessage.map((thread) => (
-                <CallTranscriptItem
-                  key={thread.call.id}
-                  thread={thread}
-                  agentNames={callAgentNames}
-                  agentAvatars={callAgentAvatars}
-                  streamingMessages={streamingCallMessages.filter(
-                    (streaming) => streaming.callId === thread.call.id,
-                  )}
-                  replyingAgentId={replyingByCallId.get(thread.call.id) ?? null}
-                />
-              ))}
+              {callsAfterMessage.map(renderCallSegment)}
             </Fragment>
           );
         })}

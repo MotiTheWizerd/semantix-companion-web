@@ -47,6 +47,24 @@ export interface CallThread {
   messages: RavenCallMessage[];
 }
 
+/** One stretch of a call as it sits in the thread: the turns that happened
+ *  between two of the conversation's own rows. A call that outlives the
+ *  companion's next words is shown in pieces, each where it happened — the
+ *  opening where the call was placed, the reply where it arrived — instead
+ *  of one block that pulls later turns above text written before them. */
+export interface CallSegment {
+  thread: CallThread;
+  /** This stretch's turns, oldest first. May be empty for an opening whose
+   *  first line landed after the companion had already said more. */
+  messages: RavenCallMessage[];
+  /** The first stretch: it carries the header — who called whom, the meter,
+   *  the clock. */
+  isOpening: boolean;
+  /** The newest stretch: it carries whatever is live — words streaming, a
+   *  reply in flight, the ring, the silence — and the call's close. */
+  isLatest: boolean;
+}
+
 /** Mirrors MAX_MESSAGES_PER_CALL in Rust — display only. The limit is
  *  enforced in the repository; this is just how the meter is drawn. */
 export const MAX_MESSAGES_PER_CALL = 5;
