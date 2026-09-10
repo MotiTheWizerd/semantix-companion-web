@@ -21,6 +21,7 @@ export function App() {
     activeView,
     isInitialising,
     conversations,
+    settlingTitles,
     companions,
     tabsById,
     activeTabId,
@@ -42,6 +43,7 @@ export function App() {
       activeView: state.activeView,
       isInitialising: state.isInitialising,
       conversations: state.conversations,
+      settlingTitles: state.settlingTitles,
       companions: state.companions,
       tabsById: state.tabsById,
       activeTabId: state.activeTabId,
@@ -102,6 +104,7 @@ export function App() {
       <AppSidebar
         activeView={activeView}
         conversations={conversations}
+        settlingTitles={settlingTitles}
         activeConversationId={activeConversationId}
         userPreferences={userPreferences}
         isInitialising={isInitialising}

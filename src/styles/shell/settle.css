@@ -1,0 +1,109 @@
+/* The settle — a conversation's real name arriving.
+   The titler renames a thread a couple of answers in. The rename is news for
+   about a second: the old name drifts up and out, the new one rises into its
+   place, and one sweep of the accent light crosses the row and the tab. Then
+   nothing — no badge, no dot, no state the person has to clear. Same dialect
+   as the presence line and the reasoning reveal: a small drift, a soft glow. */
+
+.title-settle {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+}
+
+.title-settle__old,
+.title-settle__new {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title-settle__old {
+  position: absolute;
+  inset: 0;
+  animation: title-settle-out 220ms ease-in forwards;
+}
+
+.title-settle__new {
+  animation: title-settle-in 280ms cubic-bezier(0.2, 0.8, 0.2, 1) 140ms both;
+}
+
+/* The row or tab wearing the rename: one pass of light, left to right, and
+   a ring that fades as it goes. `overflow: hidden` keeps the sweep inside the
+   rounded corners; the sidebar row already clips, the tab learns to. */
+.is-settling {
+  position: relative;
+  overflow: hidden;
+  animation: title-settle-ring 1200ms ease-out both;
+}
+
+.is-settling::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 25%,
+    rgba(var(--glow-blue), 0.2) 50%,
+    transparent 75%
+  );
+  transform: translateX(-100%);
+  animation: title-settle-sweep 900ms ease-out 120ms forwards;
+}
+
+@keyframes title-settle-out {
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes title-settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes title-settle-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes title-settle-ring {
+  0% {
+    box-shadow:
+      0 0 0 1px rgba(var(--glow-blue), 0.4),
+      0 0 14px rgba(var(--glow-blue), 0.22);
+  }
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(var(--glow-blue), 0),
+      0 0 0 rgba(var(--glow-blue), 0);
+  }
+}
+
+/* Less motion asked for: the name simply changes, the light still fades. */
+@media (prefers-reduced-motion: reduce) {
+  .title-settle__old {
+    display: none;
+  }
+
+  .title-settle__new,
+  .is-settling::after {
+    animation: none;
+  }
+
+  .is-settling::after {
+    display: none;
+  }
+}

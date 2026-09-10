@@ -99,6 +99,11 @@ interface CompanionStore {
   activeTabId: string | null;
   runtimeByConversationId: Record<string, ConversationRuntime>;
   submittingByTabId: Record<string, boolean>;
+  /** conversationId → the title it just stopped wearing, for the length of
+   *  the settle: the sidebar row and the tab swap the old name for the new
+   *  one with a small motion and a single sweep of light, then this empties
+   *  itself. A rename is news for a second, and then it is just the name. */
+  settlingTitles: Record<string, string>;
   initialise: () => Promise<void>;
   dispose: () => void;
   setActiveView: (view: WorkspaceView) => void;
@@ -131,6 +136,10 @@ const EMPTY_USER_PREFERENCES: UserPreferences = {
   displayName: null,
   updatedAt: 0,
 };
+
+/** How long a renamed row keeps its old name in hand — long enough for the
+ *  swap and the sweep of light to play out (see shell/settle.css), no longer. */
+const TITLE_SETTLE_MS = 1400;
 
 let unlisteners: UnlistenFn[] = [];
 
@@ -355,6 +364,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
   activeTabId: null,
   runtimeByConversationId: {},
   submittingByTabId: {},
+  settlingTitles: {},
 
   initialise: async () => {
     if (get().isInitialising || get().isInitialised) return;
@@ -470,22 +480,41 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
         // The titler's report: the thread's real name, once the background
         // model has read its opening. The sidebar entry and the tab rename
         // together; the row order does not move — a name is not activity.
+        // The old name is kept for the length of the settle so the swap can
+        // be seen happening, then forgotten.
         onConversationTitled((event) => {
-          set((state) => ({
-            conversations: state.conversations.map((conversation) =>
-              conversation.id === event.conversationId
-                ? { ...conversation, title: event.title }
-                : conversation,
-            ),
-            tabsById: Object.fromEntries(
-              Object.entries(state.tabsById).map(([tabId, tab]) => [
-                tabId,
-                tab.conversationId === event.conversationId
-                  ? { ...tab, title: event.title }
-                  : tab,
-              ]),
-            ),
-          }));
+          set((state) => {
+            const previous =
+              state.conversations.find((conversation) => conversation.id === event.conversationId)
+                ?.title ?? null;
+            return {
+              conversations: state.conversations.map((conversation) =>
+                conversation.id === event.conversationId
+                  ? { ...conversation, title: event.title }
+                  : conversation,
+              ),
+              tabsById: Object.fromEntries(
+                Object.entries(state.tabsById).map(([tabId, tab]) => [
+                  tabId,
+                  tab.conversationId === event.conversationId
+                    ? { ...tab, title: event.title }
+                    : tab,
+                ]),
+              ),
+              settlingTitles:
+                previous !== null && previous !== event.title
+                  ? { ...state.settlingTitles, [event.conversationId]: previous }
+                  : state.settlingTitles,
+            };
+          });
+          window.setTimeout(() => {
+            set((state) => {
+              if (!(event.conversationId in state.settlingTitles)) return state;
+              const settlingTitles = { ...state.settlingTitles };
+              delete settlingTitles[event.conversationId];
+              return { settlingTitles };
+            });
+          }, TITLE_SETTLE_MS);
         }),
       ]);
       unlisteners = [

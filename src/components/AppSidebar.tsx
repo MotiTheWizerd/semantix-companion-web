@@ -1,4 +1,5 @@
 import { CompanionMark } from "./CompanionMark";
+import { SettlingTitle } from "./SettlingTitle";
 import type { Conversation } from "../features/chat/types";
 import { SkyLegend } from "../features/memory-sky/SkyLegend";
 import {
@@ -46,6 +47,9 @@ function SettingsIcon() {
 interface AppSidebarProps {
   activeView: WorkspaceView;
   conversations: Conversation[];
+  /** conversationId → the name it just stopped wearing, while the rename
+   *  settles. Empty almost always. */
+  settlingTitles: Record<string, string>;
   activeConversationId: string | null;
   userPreferences: UserPreferences;
   /** Preferences start empty and arrive a beat later. Without this the footer
@@ -59,6 +63,7 @@ interface AppSidebarProps {
 export function AppSidebar({
   activeView,
   conversations,
+  settlingTitles,
   activeConversationId,
   userPreferences,
   isInitialising,
@@ -107,20 +112,23 @@ export function AppSidebar({
       ) : conversations.length > 0 ? (
         <div className="conversation-list" aria-label="Recent conversations">
           <p className="sidebar-section-label">Recent</p>
-          {conversations.map((conversation) => (
-            <button
-              className={`conversation-list__item ${
-                activeView === "chat" && activeConversationId === conversation.id
-                  ? "is-active"
-                  : ""
-              }`}
-              type="button"
-              key={conversation.id}
-              onClick={() => onConversationSelect(conversation.id)}
-            >
-              {conversation.title}
-            </button>
-          ))}
+          {conversations.map((conversation) => {
+            const settlingFrom = settlingTitles[conversation.id] ?? null;
+            return (
+              <button
+                className={`conversation-list__item ${
+                  activeView === "chat" && activeConversationId === conversation.id
+                    ? "is-active"
+                    : ""
+                } ${settlingFrom ? "is-settling" : ""}`}
+                type="button"
+                key={conversation.id}
+                onClick={() => onConversationSelect(conversation.id)}
+              >
+                <SettlingTitle title={conversation.title} from={settlingFrom} />
+              </button>
+            );
+          })}
         </div>
       ) : null}
 

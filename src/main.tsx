@@ -9,6 +9,7 @@ import "./styles/base/buttons.css";
 import "./styles/shell/layout.css";
 import "./styles/shell/sidebar.css";
 import "./styles/shell/tabs.css";
+import "./styles/shell/settle.css";
 import "./styles/shell/header.css";
 import "./styles/features/chat.css";
 import "./styles/components/memory-recall-chip.css";

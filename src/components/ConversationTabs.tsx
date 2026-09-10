@@ -2,6 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 
 import { useCompanionStore } from "../features/workspace/companionStore";
 import { CompanionMark } from "./CompanionMark";
+import { SettlingTitle } from "./SettlingTitle";
 
 function CloseIcon() {
   return (
@@ -25,6 +26,7 @@ export function ConversationTabs() {
     tabsById,
     activeTabId,
     companions,
+    settlingTitles,
     setActiveTab,
     closeTab,
     openNewConversation,
@@ -34,6 +36,7 @@ export function ConversationTabs() {
       tabsById: state.tabsById,
       activeTabId: state.activeTabId,
       companions: state.companions,
+      settlingTitles: state.settlingTitles,
       setActiveTab: state.setActiveTab,
       closeTab: state.closeTab,
       openNewConversation: state.openNewConversation,
@@ -53,8 +56,16 @@ export function ConversationTabs() {
           // a companion without a picture wears the mark, as everywhere.
           const companion =
             companions.find((candidate) => candidate.id === tab.companionId) ?? builtIn;
+          const settlingFrom = tab.conversationId
+            ? (settlingTitles[tab.conversationId] ?? null)
+            : null;
           return (
-            <div className={`conversation-tab ${isActive ? "is-active" : ""}`} key={tabId}>
+            <div
+              className={`conversation-tab ${isActive ? "is-active" : ""} ${
+                settlingFrom ? "is-settling" : ""
+              }`}
+              key={tabId}
+            >
               <button
                 className="conversation-tab__select"
                 type="button"
@@ -67,7 +78,7 @@ export function ConversationTabs() {
                   <CompanionMark src={companion?.avatarUrl} />
                 </span>
                 {tab.unreadCount > 0 ? <span className="conversation-tab__unread" /> : null}
-                <span>{tab.title}</span>
+                <SettlingTitle title={tab.title} from={settlingFrom} />
               </button>
               <button
                 className="conversation-tab__close"
