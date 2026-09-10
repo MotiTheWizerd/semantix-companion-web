@@ -38,6 +38,7 @@ const DEFAULT_MODEL_PREFERENCE: ModelPreference = { mode: "inherit" };
 const EMPTY_USER_PREFERENCES: UserPreferences = {
   defaultModel: { mode: "test" },
   displayName: null,
+  defaultCompanionId: null,
   updatedAt: 0,
 };
 

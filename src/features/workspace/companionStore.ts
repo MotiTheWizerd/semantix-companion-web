@@ -134,6 +134,7 @@ interface CompanionStore {
 const EMPTY_USER_PREFERENCES: UserPreferences = {
   defaultModel: { mode: "test" },
   displayName: null,
+  defaultCompanionId: null,
   updatedAt: 0,
 };
 
@@ -152,14 +153,17 @@ function createTabId(prefix: "new" | "conversation", id?: string): string {
   return id ? `${prefix}:${id}` : `${prefix}:${crypto.randomUUID()}`;
 }
 
-function newConversationTab(): ConversationTab {
+/** A fresh tab, talking to `companionId` — the remembered pick — or, with
+ *  null, to the built-in companion (Rust resolves an unpicked thread the
+ *  same way). */
+function newConversationTab(companionId: string | null = null): ConversationTab {
   return {
     id: createTabId("new"),
     conversationId: null,
     title: "New conversation",
     draft: "",
     attachments: [],
-    companionId: null,
+    companionId,
     unreadCount: 0,
     error: null,
     notice: null,
@@ -650,7 +654,17 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
   },
 
   openNewConversation: () => {
-    const tab = newConversationTab();
+    // The last companion picked is the next one offered (s571: "it always
+    // defaulting to Rook"). Read through the roster, so a remembered pick
+    // that names nobody any more falls back to the built-in companion
+    // rather than opening a tab on a face that no longer exists.
+    const { userPreferences, companions } = get();
+    const remembered = userPreferences.defaultCompanionId;
+    const tab = newConversationTab(
+      remembered && companions.some((companion) => companion.id === remembered)
+        ? remembered
+        : null,
+    );
     set((state) => ({
       activeView: "chat",
       activeTabId: tab.id,
@@ -773,6 +787,15 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     const tab = get().tabsById[tabId];
     if (!tab || tab.companionId === companionId) return;
     const previous = tab.companionId;
+    // The pick is also the person's standing preference: the next new
+    // conversation opens on it. Fail-open — the tab already changed, and a
+    // preference that did not save is a convenience lost, not an error to
+    // put in the composer.
+    const remember = () => {
+      void updateUserPreferences({ defaultCompanionId: companionId })
+        .then((userPreferences) => set({ userPreferences }))
+        .catch(() => undefined);
+    };
     // A tab with no conversation yet has nothing to persist against; the pick
     // rides along on the first send instead.
     if (!tab.conversationId) {
@@ -782,6 +805,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           [tabId]: { ...state.tabsById[tabId], companionId, error: null },
         },
       }));
+      remember();
       return;
     }
     // A thread with a conversation behind it has been spoken in, and Rust
@@ -806,6 +830,7 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
           ]),
         ),
       }));
+      remember();
     } catch (error) {
       set((state) => ({
         tabsById: {

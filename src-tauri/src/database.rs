@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 26;
+const LATEST_SCHEMA_VERSION: i64 = 27;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -829,6 +829,19 @@ fn migration_sql(version: i64) -> &'static str {
                                     WHERE c.id = messages.conversation_id);
              CREATE INDEX IF NOT EXISTS idx_messages_companion
                  ON messages(companion_id);"
+        }
+        27 => {
+            // THE LAST COMPANION PICKED IS THE NEXT ONE OFFERED. Until now
+            // every new conversation opened on the built-in companion, and a
+            // person who talks to someone else all day re-picked them on
+            // every tab (Moti, s571: "it always defaulting to Rook"). The
+            // composer's pick is remembered here — on the user's own row,
+            // because it is a fact about the person, not about any thread.
+            // NULL means never picked: the built-in one answers, as before.
+            // Not a foreign key on purpose: deleting a companion must not be
+            // refused by a preference, so the read side treats a pick that
+            // names nobody as unset.
+            "ALTER TABLE user_preferences ADD COLUMN default_companion_id TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

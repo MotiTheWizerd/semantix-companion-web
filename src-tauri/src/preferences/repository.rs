@@ -33,9 +33,14 @@ impl PreferenceRepository {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT default_model_mode, default_model_id, display_name, updated_at
-                 FROM user_preferences
-                 WHERE id = 1",
+                // The picked companion is read THROUGH the roster: a pick that
+                // names a companion since deleted comes back NULL, so every
+                // reader sees "unset" instead of an id that points at nobody.
+                "SELECT p.default_model_mode, p.default_model_id, p.display_name,
+                        (SELECT c.id FROM companions c WHERE c.id = p.default_companion_id),
+                        p.updated_at
+                 FROM user_preferences p
+                 WHERE p.id = 1",
                 [],
                 |row| {
                     let mode: String = row.get(0)?;
@@ -43,7 +48,8 @@ impl PreferenceRepository {
                     Ok(UserPreferences {
                         default_model: ModelPreference::from_storage(&mode, model_id),
                         display_name: row.get(2)?,
-                        updated_at: row.get(3)?,
+                        default_companion_id: row.get(3)?,
+                        updated_at: row.get(4)?,
                     })
                 },
             )
@@ -58,6 +64,7 @@ impl PreferenceRepository {
         &self,
         default_model: Option<&ModelPreference>,
         display_name: Option<&str>,
+        default_companion_id: Option<&str>,
         updated_at: i64,
     ) -> Result<UserPreferences, AppError> {
         if let Some(default_model) = default_model {
@@ -69,6 +76,16 @@ impl PreferenceRepository {
             self.validate_model_preference(default_model)?;
         }
         let name = display_name.map(normalize_display_name).transpose()?;
+        // Blank clears, like the name; anything else must name a companion
+        // that exists right now — a pick is made from the roster, never typed.
+        let companion = match default_companion_id.map(str::trim) {
+            None => None,
+            Some("") => Some(None),
+            Some(id) => {
+                self.require_companion(id)?;
+                Some(Some(id.to_owned()))
+            }
+        };
         let (mode, model_id) = match default_model {
             Some(preference) => {
                 let (mode, model_id) = preference.storage_parts();
@@ -90,10 +107,11 @@ impl PreferenceRepository {
                     // "did the caller send this field" flag rather than the
                     // value itself.
                     "UPDATE user_preferences
-                     SET default_model_mode = CASE WHEN ?1 THEN ?2 ELSE default_model_mode END,
-                         default_model_id   = CASE WHEN ?1 THEN ?3 ELSE default_model_id END,
-                         display_name       = CASE WHEN ?4 THEN ?5 ELSE display_name END,
-                         updated_at = ?6
+                     SET default_model_mode   = CASE WHEN ?1 THEN ?2 ELSE default_model_mode END,
+                         default_model_id     = CASE WHEN ?1 THEN ?3 ELSE default_model_id END,
+                         display_name         = CASE WHEN ?4 THEN ?5 ELSE display_name END,
+                         default_companion_id = CASE WHEN ?6 THEN ?7 ELSE default_companion_id END,
+                         updated_at = ?8
                      WHERE id = 1",
                     params![
                         mode.is_some(),
@@ -101,6 +119,8 @@ impl PreferenceRepository {
                         model_id,
                         display_name.is_some(),
                         name.flatten(),
+                        companion.is_some(),
+                        companion.flatten(),
                         updated_at
                     ],
                 )
@@ -110,6 +130,23 @@ impl PreferenceRepository {
         // Read back rather than assembling the answer from the inputs — the
         // untouched half of a patch is only knowable from the row.
         self.get_user_preferences()
+    }
+
+    fn require_companion(&self, companion_id: &str) -> Result<(), AppError> {
+        let connection = self.connection()?;
+        let exists = connection
+            .query_row(
+                "SELECT id FROM companions WHERE id = ?1",
+                [companion_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(AppError::database)?
+            .is_some();
+        if !exists {
+            return Err(AppError::validation("That companion no longer exists."));
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_model_preference(
@@ -253,11 +290,11 @@ mod tests {
         let database = ScratchDatabase::new();
         let repository = database.repository();
         repository
-            .update_user_preferences(Some(&ModelPreference::Test), None, 10)
+            .update_user_preferences(Some(&ModelPreference::Test), None, None, 10)
             .expect("the model should save");
 
         let named = repository
-            .update_user_preferences(None, Some("  Moti  "), 20)
+            .update_user_preferences(None, Some("  Moti  "), None, 20)
             .expect("the name should save");
 
         assert_eq!(named.display_name.as_deref(), Some("Moti"));
@@ -269,11 +306,11 @@ mod tests {
         let database = ScratchDatabase::new();
         let repository = database.repository();
         repository
-            .update_user_preferences(None, Some("Moti"), 10)
+            .update_user_preferences(None, Some("Moti"), None, 10)
             .expect("the name should save");
 
         let remodelled = repository
-            .update_user_preferences(Some(&ModelPreference::Test), None, 20)
+            .update_user_preferences(Some(&ModelPreference::Test), None, None, 20)
             .expect("the model should save");
 
         assert_eq!(remodelled.display_name.as_deref(), Some("Moti"));
@@ -284,11 +321,11 @@ mod tests {
         let database = ScratchDatabase::new();
         let repository = database.repository();
         repository
-            .update_user_preferences(None, Some("Moti"), 10)
+            .update_user_preferences(None, Some("Moti"), None, 10)
             .expect("the name should save");
 
         let cleared = repository
-            .update_user_preferences(None, Some("   "), 20)
+            .update_user_preferences(None, Some("   "), None, 20)
             .expect("the name should clear");
 
         assert_eq!(cleared.display_name, None);
@@ -301,7 +338,7 @@ mod tests {
         let too_long = "a".repeat(DISPLAY_NAME_MAX_CHARS + 1);
 
         let error = repository
-            .update_user_preferences(None, Some(&too_long), 10)
+            .update_user_preferences(None, Some(&too_long), None, 10)
             .expect_err("an oversized name should be refused");
 
         assert!(error.to_string().contains("60"), "got: {error}");
@@ -323,6 +360,108 @@ mod tests {
             normalize_display_name(&hebrew).expect("a 60-character name should pass"),
             Some(hebrew),
         );
+    }
+
+    fn built_in_companion_id(database: &ScratchDatabase) -> String {
+        let connection =
+            rusqlite::Connection::open(&database.path).expect("the scratch db should open");
+        connection
+            .query_row(
+                "SELECT id FROM companions WHERE is_built_in = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the migrations seed a built-in companion")
+    }
+
+    #[test]
+    fn a_fresh_install_has_no_picked_companion() {
+        let database = ScratchDatabase::new();
+        let preferences = database
+            .repository()
+            .get_user_preferences()
+            .expect("defaults should be readable");
+        assert_eq!(preferences.default_companion_id, None);
+    }
+
+    #[test]
+    fn picking_a_companion_persists_and_leaves_the_rest_alone() {
+        let database = ScratchDatabase::new();
+        let repository = database.repository();
+        let built_in = built_in_companion_id(&database);
+        repository
+            .update_user_preferences(None, Some("Moti"), None, 10)
+            .expect("the name should save");
+
+        let picked = repository
+            .update_user_preferences(None, None, Some(&built_in), 20)
+            .expect("the pick should save");
+
+        assert_eq!(picked.default_companion_id.as_deref(), Some(built_in.as_str()));
+        assert_eq!(picked.display_name.as_deref(), Some("Moti"));
+        assert_eq!(
+            repository
+                .get_user_preferences()
+                .expect("preferences should read back")
+                .default_companion_id
+                .as_deref(),
+            Some(built_in.as_str()),
+        );
+    }
+
+    #[test]
+    fn a_pick_that_names_nobody_is_refused_and_blank_clears() {
+        let database = ScratchDatabase::new();
+        let repository = database.repository();
+        let built_in = built_in_companion_id(&database);
+        repository
+            .update_user_preferences(None, None, Some(&built_in), 10)
+            .expect("the pick should save");
+
+        let error = repository
+            .update_user_preferences(None, None, Some("no-such-companion"), 20)
+            .expect_err("an unknown companion should be refused");
+        assert!(error.to_string().contains("no longer exists"), "got: {error}");
+        assert_eq!(
+            repository
+                .get_user_preferences()
+                .expect("preferences should still read")
+                .default_companion_id
+                .as_deref(),
+            Some(built_in.as_str()),
+            "a refused pick must not touch the stored one",
+        );
+
+        let cleared = repository
+            .update_user_preferences(None, None, Some("  "), 30)
+            .expect("blank should clear");
+        assert_eq!(cleared.default_companion_id, None);
+    }
+
+    #[test]
+    fn a_picked_companion_that_was_deleted_reads_as_unset() {
+        let database = ScratchDatabase::new();
+        let repository = database.repository();
+        let connection =
+            rusqlite::Connection::open(&database.path).expect("the scratch db should open");
+        connection
+            .execute(
+                "INSERT INTO companions (id, name, memory_agent_name, created_at, updated_at)
+                 VALUES ('companion-gone', 'Gone', 'gone', 1, 1)",
+                [],
+            )
+            .expect("a companion should insert");
+        repository
+            .update_user_preferences(None, None, Some("companion-gone"), 10)
+            .expect("the pick should save");
+        connection
+            .execute("DELETE FROM companions WHERE id = 'companion-gone'", [])
+            .expect("the companion should delete");
+
+        let preferences = repository
+            .get_user_preferences()
+            .expect("preferences should read");
+        assert_eq!(preferences.default_companion_id, None);
     }
 
     #[test]

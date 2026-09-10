@@ -56,6 +56,10 @@ pub(crate) struct UserPreferences {
     /// What to call the person using this install. None until they say — the
     /// interface falls back to "You" rather than guessing.
     display_name: Option<String>,
+    /// The companion a new conversation opens on: the last one picked in the
+    /// composer. None until a pick is made, or when the picked one has since
+    /// been deleted — either way the built-in companion answers.
+    default_companion_id: Option<String>,
     updated_at: i64,
 }
 
@@ -65,7 +69,7 @@ pub(crate) struct UserPreferences {
 /// one screen could silently revert a change made in another.
 ///
 /// `display_name: Some("")` is meaningful: it CLEARS the name (stored NULL).
-/// Absent leaves it alone.
+/// Absent leaves it alone. `default_companion_id` follows the same rule.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UpdateUserPreferencesInput {
@@ -73,6 +77,8 @@ pub(crate) struct UpdateUserPreferencesInput {
     default_model: Option<ModelPreference>,
     #[serde(default)]
     display_name: Option<String>,
+    #[serde(default)]
+    default_companion_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -124,6 +130,7 @@ pub(crate) async fn update_user_preferences(
         repository.update_user_preferences(
             input.default_model.as_ref(),
             input.display_name.as_deref(),
+            input.default_companion_id.as_deref(),
             unix_timestamp_ms()?,
         )
     })

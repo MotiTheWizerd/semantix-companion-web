@@ -11,14 +11,20 @@ export interface UserPreferences {
   /** What to call the person using this install. `null` until they say so —
    *  the interface falls back to "You" rather than inventing a name. */
   displayName: string | null;
+  /** The companion a new conversation opens on — the last one picked in the
+   *  composer. `null` until a pick is made, or once the picked one has been
+   *  deleted; either way the built-in companion answers. */
+  defaultCompanionId: string | null;
   updatedAt: number;
 }
 
 /** A PATCH: an omitted field is left as it was. Sending `displayName: ""`
- *  clears the name; omitting it entirely leaves the stored one alone. */
+ *  clears the name; omitting it entirely leaves the stored one alone.
+ *  `defaultCompanionId` follows the same rule. */
 export interface UpdateUserPreferencesInput {
   defaultModel?: Exclude<ModelPreference, { mode: "inherit" }>;
   displayName?: string;
+  defaultCompanionId?: string;
 }
 
 /** The name the interface actually shows. One function so the sidebar, the
