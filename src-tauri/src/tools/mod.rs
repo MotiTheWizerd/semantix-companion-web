@@ -514,8 +514,10 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                  was said on their behalf. \
                  You may open only {} calls a day, and each call holds only {} \
                  messages from both sides together, so open one for something \
-                 worth the exchange. The other agent will not answer inside \
-                 this turn.",
+                 worth the exchange. Placing the call ENDS YOUR TURN: say one \
+                 short line to your user first — that you are calling and why — \
+                 because you will not speak to them again until the call has \
+                 ended and you are woken with its record.",
                 raven_calls::MAX_CALLS_PER_DAY,
                 raven_calls::MAX_MESSAGES_PER_CALL,
             ),
@@ -543,16 +545,19 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
         });
         tools.push(ToolDeclaration {
             name: SEND_IN_CALL.to_owned(),
-            description: concat!(
-                "Say something into a call that is already open. This does NOT ",
-                "cost one of your daily calls — replying inside a call is ",
-                "free, and the call's own 5-message limit still applies. The ",
-                "call closes itself on its last message. When your message ",
-                "completes the exchange, pass final: true to hang up with it — ",
-                "the other side gets your last word through the call record ",
-                "instead of being woken again just to say goodbye.",
-            )
-            .to_owned(),
+            // The limit is formatted from the enforcing constant, like
+            // open_call's: this string said "5-message" by hand and kept saying
+            // it after the cap moved (s572).
+            description: format!(
+                "Say something into a call that is already open. This does NOT \
+                 cost one of your daily calls — replying inside a call is \
+                 free, and the call's own {}-message limit still applies. The \
+                 call closes itself on its last message. When your message \
+                 completes the exchange, pass final: true to hang up with it — \
+                 the other side gets your last word through the call record \
+                 instead of being woken again just to say goodbye.",
+                raven_calls::MAX_MESSAGES_PER_CALL,
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1954,7 +1959,9 @@ mod tests {
         )
         .expect("replying should succeed");
         assert!(replied.contains(&rook), "the reply is addressed back: {replied}");
-        assert!(replied.contains("3 more messages"), "got: {replied}");
+        // Two turns spent (the opening and this reply), the rest still fit.
+        let fit = raven_calls::MAX_MESSAGES_PER_CALL - 2;
+        assert!(replied.contains(&format!("{fit} more messages")), "got: {replied}");
 
         let read = execute_call(
             READ_CALL,

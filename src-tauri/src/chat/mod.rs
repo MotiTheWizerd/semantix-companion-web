@@ -1532,10 +1532,12 @@ pub(crate) async fn drive_turn(
                 calls.clone(),
             ));
 
+        let mut line_opened = false;
         for call in calls {
             let Some(result) = until_stopped(&stop, tool_runner.run(&call)).await else {
                 return close_stopped_turn(service, &on_event, adapter.as_ref(), accepted).await;
             };
+            line_opened |= call.name == tools::OPEN_CALL && result.is_ok();
             // A failed tool becomes a result the model reads and recovers
             // from — it never kills the stream.
             let text = result.unwrap_or_else(|error| format!("Tool error: {error}"));
@@ -1543,6 +1545,21 @@ pub(crate) async fn drive_turn(
                 .request
                 .messages
                 .push(InferenceMessage::tool_result(call.id, text));
+        }
+
+        // ⚑ A PLACED CALL ENDS THE TURN. Once the line is open the companion
+        // is on the phone: whatever it said before reaching for it stands as
+        // the lead-in, the call card carries the exchange, and the close
+        // report (waker.rs) brings it back to its user with the record in
+        // hand. Left to run, the next round narrated the call before anyone
+        // had answered — "Done! I rang Hugin, 98 calls left, anything else?"
+        // — and that report sat ABOVE the turns it claimed to describe
+        // (Moti, s572). Mechanical rather than asked for in the tool result:
+        // saying it was not enough is the whole lesson of the manifest. A
+        // REFUSED open_call still goes back to the model, so it can tell the
+        // person the cap is spent or the id was wrong.
+        if line_opened {
+            break;
         }
 
         rounds += 1;
@@ -2357,6 +2374,157 @@ mod tests {
                 thread[3].clone(),
             ])
         );
+    }
+
+    /// A provider that rings another companion and, given the chance, would
+    /// narrate the call to its user in the very next round.
+    struct RingsHugin {
+        hugin_id: String,
+        invocations: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl InferenceProvider for RingsHugin {
+        fn id(&self) -> &'static str {
+            "test"
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                tools: true,
+                ..ProviderCapabilities::TEXT_STREAMING
+            }
+        }
+
+        async fn stream(
+            &self,
+            _request: &InferenceRequest,
+            _credential: &ProviderCredential,
+            _tools: Option<&dyn ToolRunner>,
+            sink: &dyn DeltaSink<InferenceDelta>,
+        ) -> Result<(), StreamError> {
+            let round = self.invocations.fetch_add(1, Ordering::SeqCst);
+            if round > 0 {
+                sink.emit_delta(InferenceDelta::Text {
+                    text: "Done! I rang Hugin — the line is open, anything else?".to_owned(),
+                })?;
+                return sink.emit_delta(InferenceDelta::Finish(FinishReason::Stop));
+            }
+            sink.emit_delta(InferenceDelta::Text {
+                text: "One moment — I'll ring Hugin about this.".to_owned(),
+            })?;
+            sink.emit_delta(InferenceDelta::ToolCall(ToolCall {
+                id: "tool-open-call".to_owned(),
+                name: crate::tools::OPEN_CALL.to_owned(),
+                arguments: serde_json::json!({
+                    "to_agent_id": self.hugin_id,
+                    "body": "Hugin, Moti wants to know how the sky render is going."
+                })
+                .to_string(),
+            }))?;
+            sink.emit_delta(InferenceDelta::Finish(FinishReason::ToolCalls))
+        }
+    }
+
+    /// Placing a call ends the turn. What the companion said before reaching
+    /// for the phone stands as its lead-in; the report it would have given in
+    /// the next round — written before anyone had answered — never happens.
+    /// The close report at the call's end is where it speaks again.
+    #[tokio::test]
+    async fn placing_a_call_ends_the_turn_with_the_lead_in_standing() {
+        let database_path = std::env::temp_dir().join(format!(
+            "semantix-companion-call-ends-turn-test-{}.db",
+            Uuid::new_v4()
+        ));
+        database::initialise(&database_path).expect("test database should initialise");
+        let hugin_id = Uuid::new_v4().to_string();
+        let now = crate::credentials::unix_timestamp_ms().expect("a clock");
+        rusqlite::Connection::open(&database_path)
+            .expect("database should open")
+            .execute(
+                "INSERT INTO companions (
+                    id, name, memory_agent_name, is_built_in,
+                    model_preference_mode, created_at, updated_at
+                 ) VALUES (?1, 'Hugin', ?2, 0, 'inherit', ?3, ?3)",
+                rusqlite::params![hugin_id, format!("agent-{hugin_id}"), now],
+            )
+            .expect("Hugin should insert");
+
+        let provider = Arc::new(RingsHugin {
+            hugin_id,
+            invocations: AtomicUsize::new(0),
+        });
+        let service = Arc::new(ChatService::new(
+            ChatRepository::open(&database_path).expect("chat repository should open"),
+            ModelResolver::open(&database_path).expect("model resolver should open"),
+            CompanionResolver::open(&database_path).expect("companion resolver should open"),
+            StyleRepository::open(&database_path).expect("style repository should open"),
+            PreferenceRepository::open(&database_path).expect("preference repository should open"),
+            StreamingService::new(Arc::new(InferenceGateway::for_test(provider.clone()))),
+            database_path.clone(),
+        ));
+        let prepared = service
+            .submit(
+                SubmitMessageInput {
+                    conversation_id: None,
+                    companion_id: None,
+                    content: "Call Hugin and ask about the sky render.".to_owned(),
+                    memory_context: None,
+                    memory_agent_id: None,
+                    auto_sleep_agent_id: None,
+                    attachments: Vec::new(),
+                },
+                "user",
+            )
+            .expect("message should prepare");
+        let conversation_id = prepared.accepted.conversation.id.clone();
+
+        drive_turn(
+            service.clone(),
+            prepared,
+            Arc::new(RecordingEvents::default()),
+            None,
+        )
+        .await
+        .expect("the turn should close successfully");
+
+        assert_eq!(
+            provider.invocations.load(Ordering::SeqCst),
+            1,
+            "the model is not asked to speak again once the line is open"
+        );
+        let thread = service
+            .get_thread(&conversation_id)
+            .expect("completed thread should reload");
+        let assistant_rows: Vec<&Message> = thread
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect();
+        assert_eq!(assistant_rows.len(), 1, "one row: the lead-in");
+        assert_eq!(assistant_rows[0].status, "completed");
+        assert_eq!(
+            assistant_rows[0].content,
+            "One moment — I'll ring Hugin about this."
+        );
+
+        let open_calls: i64 = rusqlite::Connection::open(&database_path)
+            .expect("database should open")
+            .query_row(
+                "SELECT COUNT(*) FROM raven_calls WHERE status = 'open' AND root_conversation_id = ?1",
+                rusqlite::params![conversation_id],
+                |row| row.get(0),
+            )
+            .expect("calls should count");
+        assert_eq!(open_calls, 1, "the call itself was placed and is holding the line");
+
+        for path in [
+            database_path.clone(),
+            database_path.with_extension("db-wal"),
+            database_path.with_extension("db-shm"),
+        ] {
+            let _ = fs::remove_file(path);
+        }
     }
 
     #[tokio::test]
