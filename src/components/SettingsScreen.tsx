@@ -72,13 +72,10 @@ export function SettingsScreen() {
   const { Panel } = activeTab;
 
   return (
-    <main className="settings-screen" aria-labelledby="settings-title">
+    // No heading of its own: the tab and the page header already say
+    // "Settings" (s573), so the sections start where the eye lands.
+    <main className="settings-screen" aria-label="Settings">
       <div className="settings-screen__inner">
-        <div className="settings-screen__heading">
-          <p>Companion</p>
-          <h1 id="settings-title">Settings</h1>
-        </div>
-
         <div className="settings-tabs" role="tablist" aria-label="Settings sections">
           {SETTINGS_TABS.map((tab) => {
             const isActive = tab.id === activeTab.id;

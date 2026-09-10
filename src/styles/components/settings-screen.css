@@ -1,7 +1,7 @@
 .settings-screen {
   min-height: 0;
   overflow: auto;
-  padding: 46px 48px;
+  padding: 28px 48px 46px;
 }
 
 .settings-screen__inner {
@@ -9,28 +9,10 @@
   margin: 0 auto;
 }
 
-.settings-screen__heading p {
-  margin: 0 0 8px;
-  color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.settings-screen__heading h1 {
-  margin: 0;
-  color: var(--text);
-  font-size: 28px;
-  font-weight: 520;
-  letter-spacing: -0.035em;
-}
-
 .settings-tabs {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-top: 34px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -63,7 +45,7 @@
 
 @media (max-width: 720px) {
   .settings-screen {
-    padding: 34px 26px;
+    padding: 22px 26px 34px;
   }
 }
 
