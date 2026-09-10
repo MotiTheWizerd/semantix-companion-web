@@ -7,6 +7,7 @@
 // the write half of the loop — the model commits a memory in its own words,
 // freely, whenever something durable happens.
 
+mod explore;
 mod files;
 
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ use crate::web;
 
 pub(crate) const RECALL_MEMORY: &str = "recall_memory";
 pub(crate) const CARVE_MEMORY: &str = "carve_memory";
+pub(crate) use explore::EXPLORE_MEMORY;
 pub(crate) const SEARCH_CONVERSATIONS: &str = "search_conversations";
 pub(crate) const READ_CONVERSATION: &str = "read_conversation";
 pub(crate) const WEB_SEARCH: &str = "web_search";
@@ -41,7 +43,7 @@ pub(crate) const LIST_CALLS: &str = "list_calls";
 pub(crate) fn is_memory_tool(name: &str) -> bool {
     matches!(
         name,
-        RECALL_MEMORY | CARVE_MEMORY | SEARCH_CONVERSATIONS | READ_CONVERSATION
+        RECALL_MEMORY | CARVE_MEMORY | EXPLORE_MEMORY | SEARCH_CONVERSATIONS | READ_CONVERSATION
     )
 }
 
@@ -172,6 +174,8 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                 "required": ["name", "description", "body"]
             }),
         });
+        // The lens rides with the pen: same ground, same scope, reads only.
+        tools.push(explore::declaration());
     }
     // The drill rides only with an identity to scope it to: a companion
     // searches ITS past, and a search with no owner would be a search of
@@ -684,6 +688,11 @@ pub(crate) async fn execute(call: &ToolCall, context: &ToolContext) -> Result<St
             let payload = parse_carve_arguments(&call.arguments)?;
             let result = memory::write_memory(&target, &payload).await?;
             Ok(render_carve_outcome(&payload, &result))
+        }
+        EXPLORE_MEMORY => {
+            let target = memory_target(context)?;
+            let shape = explore::parse_arguments(&call.arguments)?;
+            explore::execute(shape, &target).await
         }
         SEARCH_CONVERSATIONS => {
             let path = context
@@ -2227,7 +2236,7 @@ mod tests {
             memory_agent_id: Some("agent-1".to_owned()),
             ..ToolContext::default()
         });
-        assert_eq!(memory_only.len(), 3);
+        assert_eq!(memory_only.len(), 4);
         assert_eq!(memory_only[0].name, "recall_memory");
         assert_eq!(memory_only[0].parameters["required"][0], "name");
         assert_eq!(memory_only[1].name, "carve_memory");
@@ -2235,6 +2244,10 @@ mod tests {
             memory_only[1].parameters["required"],
             serde_json::json!(["name", "description", "body"])
         );
+        // The lens rides with the pen, and is one of the invisible ones.
+        assert_eq!(memory_only[2].name, "explore_memory");
+        assert_eq!(memory_only[2].parameters["required"], serde_json::json!(["shape"]));
+        assert!(super::is_memory_tool("explore_memory"));
 
         // The archive alone declares no drill: a search needs an owner.
         let archive_unowned = declarations(&ToolContext {
@@ -2330,8 +2343,8 @@ mod tests {
         });
         assert_eq!(
             everything.len(),
-            19,
-            "eleven, plus the four mail tools and the four call tools"
+            20,
+            "twelve, plus the four mail tools and the four call tools"
         );
     }
 

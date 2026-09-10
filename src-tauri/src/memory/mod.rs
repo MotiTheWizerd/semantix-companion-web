@@ -678,8 +678,32 @@ pub(crate) async fn load_memory_graph(
     include_archived: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let target = MemoryTarget::resolve(&state.service.companions, &agent_id)?;
+    fetch_memory_graph(&target, &[], k, min_sim, include_archived).await
+}
+
+/// The graph door, target-resolved — the one fetch behind the sky's two
+/// commands and the model's `explore_memory` tool. `names` empty asks for
+/// the whole mind; named, for those memories and every edge touching them
+/// (the delta door, which answers the same shape). The model's tool is a
+/// LENS: this reads and never writes, and it is scoped by the target the
+/// roster resolved, never by anything the model said.
+pub(crate) async fn fetch_memory_graph(
+    target: &MemoryTarget,
+    names: &[String],
+    k: Option<u32>,
+    min_sim: Option<f64>,
+    include_archived: Option<bool>,
+) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let mut query: Vec<(&str, String)> = Vec::new();
+    let mut query: Vec<(&str, String)> = names
+        .iter()
+        .map(|name| ("name", name.trim().to_owned()))
+        .filter(|(_, name)| !name.is_empty())
+        .collect();
+    let whole = names.is_empty();
+    if !whole && query.is_empty() {
+        return Err("no memory named".to_owned());
+    }
     if let Some(k) = k {
         query.push(("k", k.to_string()));
     }
@@ -689,20 +713,22 @@ pub(crate) async fn load_memory_graph(
     if let Some(include_archived) = include_archived {
         query.push(("include_archived", include_archived.to_string()));
     }
+    let door = if whole { "graph" } else { "graph/nodes" };
 
-    let request = match &target {
+    let request = match target {
         MemoryTarget::Organ { agent_id } => client
-            .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/graph"))
+            .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/{door}"))
             .bearer_auth(organ_bearer().await?),
         MemoryTarget::Muninn { channel, .. } => {
             query.push(("channel", channel.clone()));
-            client.get(format!("{MUNINN_BASE}/graph"))
+            client.get(format!("{MUNINN_BASE}/{door}"))
         }
     };
     let response = request
         .query(&query)
-        // A 2,400-memory mind takes ~2s to draw server-side; leave room.
-        .timeout(std::time::Duration::from_secs(60))
+        // A 2,400-memory mind takes ~2s to draw server-side; leave room. A
+        // handful of named memories is one indexed neighbour query each.
+        .timeout(std::time::Duration::from_secs(if whole { 60 } else { 20 }))
         .send()
         .await
         .map_err(|error| format!("The memory organ could not be reached: {error}"))?;
@@ -734,49 +760,10 @@ pub(crate) async fn load_memory_nodes(
     include_archived: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let target = MemoryTarget::resolve(&state.service.companions, &agent_id)?;
-    let client = reqwest::Client::new();
-    let mut query: Vec<(&str, String)> = names
-        .iter()
-        .map(|name| ("name", name.trim().to_owned()))
-        .filter(|(_, name)| !name.is_empty())
-        .collect();
-    if query.is_empty() {
+    if names.is_empty() {
         return Err("no memory named".to_owned());
     }
-    if let Some(k) = k {
-        query.push(("k", k.to_string()));
-    }
-    if let Some(min_sim) = min_sim {
-        query.push(("min_sim", min_sim.to_string()));
-    }
-    if let Some(include_archived) = include_archived {
-        query.push(("include_archived", include_archived.to_string()));
-    }
-
-    let request = match &target {
-        MemoryTarget::Organ { agent_id } => client
-            .get(format!("{MEMORY_ORGAN_BASE}/agents/{agent_id}/graph/nodes"))
-            .bearer_auth(organ_bearer().await?),
-        MemoryTarget::Muninn { channel, .. } => {
-            query.push(("channel", channel.clone()));
-            client.get(format!("{MUNINN_BASE}/graph/nodes"))
-        }
-    };
-    let response = request
-        .query(&query)
-        // A handful of memories, one indexed neighbour query each.
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await
-        .map_err(|error| format!("The memory organ could not be reached: {error}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("memory nodes failed: HTTP {}", status.as_u16()));
-    }
-    response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| format!("The memory nodes could not be read: {error}"))
+    fetch_memory_graph(&target, &names, k, min_sim, include_archived).await
 }
 
 /// One full memory by name, for the frontend — the graph's click-through.

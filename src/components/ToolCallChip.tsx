@@ -153,6 +153,13 @@ const FACES: Record<string, ToolFace> = {
     done: "carved",
     argument: { kind: "text", key: "name" },
   },
+  explore_memory: {
+    family: "tool",
+    icon: "wrench",
+    running: "looking over its memory",
+    done: "looked over its memory",
+    argument: { kind: "text", key: "shape" },
+  },
   search_conversations: {
     family: "tool",
     icon: "wrench",
