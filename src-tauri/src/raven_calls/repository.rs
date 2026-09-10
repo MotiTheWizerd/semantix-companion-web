@@ -13,7 +13,7 @@ use super::{
 use crate::{app_error::AppError, credentials::unix_timestamp_ms, database};
 
 const CALL_COLUMNS: &str = "id, root_conversation_id, initiator_agent_id, status,
-     message_count, created_at, closed_at, woken_for_message_id, woken_at";
+     message_count, created_at, closed_at, woken_for_message_id, woken_at, wake_error";
 
 const MESSAGE_COLUMNS: &str = "id, call_id, from_agent_id, to_agent_id, body, created_at";
 
@@ -81,10 +81,12 @@ impl RavenCallRepository {
             initiator_agent_id: initiator.to_owned(),
             status: CallStatus::Open,
             message_count: 0,
+            message_limit: MAX_MESSAGES_PER_CALL,
             created_at: unix_timestamp_ms()?,
             closed_at: None,
             woken_for_message_id: None,
             woken_at: None,
+            wake_error: None,
         };
 
         connection
@@ -313,8 +315,32 @@ impl RavenCallRepository {
         let now = unix_timestamp_ms()?;
         self.connection()?
             .execute(
-                "UPDATE raven_calls SET woken_for_message_id = ?2, woken_at = ?3 WHERE id = ?1",
+                "UPDATE raven_calls
+                 SET woken_for_message_id = ?2, woken_at = ?3, wake_error = NULL
+                 WHERE id = ?1",
                 params![call_id, message_id, now],
+            )
+            .map_err(AppError::database)?;
+        Ok(())
+    }
+
+    /// Record that the wake fired for `message_id` produced nothing, and why.
+    ///
+    /// Scoped to the turn it was fired for: if a later wake has already moved
+    /// the guard on, this failure is history and must not overwrite the live
+    /// state. The card reads the reason off the row and names it at once
+    /// instead of showing "Replying" for a model that already died.
+    pub(crate) fn mark_wake_failed(
+        &self,
+        call_id: &str,
+        message_id: &str,
+        reason: &str,
+    ) -> Result<(), AppError> {
+        self.connection()?
+            .execute(
+                "UPDATE raven_calls SET wake_error = ?3
+                 WHERE id = ?1 AND woken_for_message_id = ?2",
+                params![call_id, message_id, reason],
             )
             .map_err(AppError::database)?;
         Ok(())
@@ -333,7 +359,7 @@ impl RavenCallRepository {
             .connection()?
             .execute(
                 "UPDATE raven_calls
-                 SET woken_for_message_id = NULL, woken_at = NULL
+                 SET woken_for_message_id = NULL, woken_at = NULL, wake_error = NULL
                  WHERE id = ?1 AND status = 'open' AND woken_for_message_id IS NOT NULL",
                 [call_id],
             )
@@ -573,10 +599,12 @@ fn map_call(row: &Row<'_>) -> rusqlite::Result<RavenCall> {
             )
         })?,
         message_count: row.get(4)?,
+        message_limit: MAX_MESSAGES_PER_CALL,
         created_at: row.get(5)?,
         closed_at: row.get(6)?,
         woken_for_message_id: row.get(7)?,
         woken_at: row.get(8)?,
+        wake_error: row.get(9)?,
     })
 }
 
@@ -939,6 +967,53 @@ mod tests {
         calls.close(&call.id).unwrap();
         assert!(!calls.retry_wake(&call.id).unwrap(), "a closed call does not re-arm");
         assert!(calls.calls_awaiting_wake(10).unwrap().is_empty());
+
+        fs::remove_file(path).ok();
+    }
+
+    /// A wake that died at the provider is named on the row, for the turn it
+    /// was fired for, until that turn is rung again by either door.
+    #[test]
+    fn a_failed_wake_is_named_until_the_turn_is_rung_again() {
+        let (calls, path) = open_calls("wake-failed");
+        let call = calls.open_call("rook", None).unwrap();
+        calls
+            .append_message(&call.id, "rook", "qwen", "are you there?")
+            .unwrap();
+        let pending = calls.calls_awaiting_wake(10).unwrap();
+        let turn = pending[0].message_id.clone();
+
+        calls.mark_woken(&call.id, &turn).unwrap();
+        assert_eq!(calls.get(&call.id).unwrap().unwrap().wake_error, None);
+
+        calls
+            .mark_wake_failed(&call.id, &turn, "OpenRouter's rate limit was reached")
+            .unwrap();
+        assert_eq!(
+            calls.get(&call.id).unwrap().unwrap().wake_error.as_deref(),
+            Some("OpenRouter's rate limit was reached"),
+            "the card can say WHY nothing came back"
+        );
+
+        // A stale failure never lands on a turn that has since been rung again.
+        calls
+            .mark_wake_failed(&call.id, "some-older-turn", "late news")
+            .unwrap();
+        assert_eq!(
+            calls.get(&call.id).unwrap().unwrap().wake_error.as_deref(),
+            Some("OpenRouter's rate limit was reached")
+        );
+
+        // Ring again clears it along with the guard…
+        assert!(calls.retry_wake(&call.id).unwrap());
+        assert_eq!(calls.get(&call.id).unwrap().unwrap().wake_error, None);
+
+        // …and so does the next wake firing.
+        calls
+            .mark_wake_failed(&call.id, &turn, "would be stale")
+            .unwrap();
+        calls.mark_woken(&call.id, &turn).unwrap();
+        assert_eq!(calls.get(&call.id).unwrap().unwrap().wake_error, None);
 
         fs::remove_file(path).ok();
     }

@@ -207,10 +207,12 @@ mod tests {
             initiator_agent_id: "hugin-id".to_owned(),
             status: CallStatus::Closed,
             message_count,
+            message_limit: MAX_MESSAGES_PER_CALL,
             created_at: 1_700_000_000_000,
             closed_at: Some(1_700_000_100_000),
             woken_for_message_id: None,
             woken_at: None,
+            wake_error: None,
         }
     }
 
@@ -251,8 +253,9 @@ mod tests {
     #[test]
     fn a_full_call_says_it_closed_at_the_limit() {
         let messages = vec![message("m1", "hugin-id", "rook-id", "opening word")];
-        let transcript = render_transcript(&call(5), &messages, &names(), "stamp");
-        assert!(transcript.contains("closed at its 5-turn limit"));
+        let transcript =
+            render_transcript(&call(MAX_MESSAGES_PER_CALL), &messages, &names(), "stamp");
+        assert!(transcript.contains(&format!("closed at its {MAX_MESSAGES_PER_CALL}-turn limit")));
     }
 
     #[test]

@@ -12,4 +12,3 @@ export type {
   RavenCallMessage,
   StreamingCallMessage,
 } from "./types";
-export { MAX_MESSAGES_PER_CALL } from "./types";

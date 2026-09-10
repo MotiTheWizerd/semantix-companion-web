@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 27;
+const LATEST_SCHEMA_VERSION: i64 = 28;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -842,6 +842,19 @@ fn migration_sql(version: i64) -> &'static str {
             // refused by a preference, so the read side treats a pick that
             // names nobody as unset.
             "ALTER TABLE user_preferences ADD COLUMN default_companion_id TEXT;"
+        }
+        28 => {
+            // A WAKE THAT FAILED SAYS SO. The wake guard (woken_for_message_id
+            // + woken_at) tells a card that a companion was woken; it cannot
+            // tell whether the woken turn ran or died at the provider. So a
+            // rate-limited model showed as "Replying" for the whole answering
+            // window and then as an unexplained "No answer" (Moti, s572: Qwen
+            // hit OpenRouter's rate limit and the card sat there). The waker
+            // stamps the failure here the moment it happens; the card names
+            // it at once. Cleared whenever the turn is rung again — by the
+            // next wake or by a person pressing Ring again. NULL is the
+            // ordinary state: nothing failed, or nothing was tried yet.
+            "ALTER TABLE raven_calls ADD COLUMN wake_error TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

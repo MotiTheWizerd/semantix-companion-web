@@ -13,7 +13,6 @@ import { useEffect, useState } from "react";
 
 import { retryCallWake } from "./callService";
 import {
-  MAX_MESSAGES_PER_CALL,
   type CallSegment,
   type RavenCallMessage,
   type StreamingCallMessage,
@@ -256,12 +255,17 @@ function SilenceNotice({
   agentId,
   agentNames,
   callId,
+  reason,
   redialing,
   onRedial,
 }: {
   agentId: string;
   agentNames: ReadonlyMap<string, string>;
   callId: string;
+  /** Rust's account of why the wake produced nothing, when it has one. A
+   *  named failure reads differently from a companion that simply did not
+   *  reply — and it is known the moment it happens, not two minutes later. */
+  reason: string | null;
   redialing: boolean;
   onRedial: (callId: string) => void;
 }) {
@@ -269,7 +273,9 @@ function SilenceNotice({
   return (
     <div className="calls__silence" role="status">
       <p className="calls__silence-word">
-        No answer — {name} was woken and no reply came.
+        {reason
+          ? `No answer — ${name}'s turn failed: ${reason}`
+          : `No answer — ${name} was woken and no reply came.`}
       </p>
       <button
         type="button"
@@ -346,9 +352,13 @@ export function CallTranscriptItem({
     newestMessage?.fromAgentId !== replyingAgentId;
   const atRest = call.status === "open" && !speaking && !replying && newestMessage !== null;
   const ringing = atRest && call.wokenForMessageId !== newestMessage.id;
+  // A wake Rust already knows failed is not "answering", however fresh its
+  // stamp: the model died at the provider, and the window would only make
+  // the card lie for two minutes before telling the truth (seen live, s572).
   const answering =
     atRest &&
     call.wokenForMessageId === newestMessage.id &&
+    call.wakeError === null &&
     call.wokenAt !== null &&
     now - call.wokenAt < ANSWER_BUDGET_MS;
   const unanswered =
@@ -435,6 +445,7 @@ export function CallTranscriptItem({
           agentId={newestMessage.toAgentId}
           agentNames={agentNames}
           callId={call.id}
+          reason={call.wakeError}
           redialing={redialing}
           onRedial={redial}
         />
@@ -530,7 +541,7 @@ export function CallTranscriptItem({
                 {duration}
               </span>
               <span className="calls__meter">
-                <strong>{used}</strong> / {MAX_MESSAGES_PER_CALL} turns
+                <strong>{used}</strong> / {call.messageLimit} turns
               </span>
             </span>
             <span className={`calls__chevron${expanded ? " calls__chevron--open" : ""}`}>

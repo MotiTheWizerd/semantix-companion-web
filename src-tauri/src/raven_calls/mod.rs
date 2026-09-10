@@ -13,11 +13,11 @@
 //! than inferred from a table that is growing while you scan it.
 //!
 //! THE TWO LIMITS, set by Moti and deliberately blunt until we have data:
-//!   · 30 CALLS PER COMPANION PER DAY, in total — not per correspondent. A
+//!   · 100 CALLS PER COMPANION PER DAY, in total — not per correspondent. A
 //!     companion that makes friends does not thereby earn more budget.
-//!     (Was 5 through the wiring era; raised in s533 when calls graduated
-//!     from wiring tests to real collaborative work sessions.)
-//!   · 5 MESSAGES PER CALL, counting both sides together.
+//!     (Was 5 through the wiring era; 30 from s533 when calls graduated
+//!     from wiring tests to real work; 100 from s572.)
+//!   · 10 MESSAGES PER CALL, counting both sides together (5 until s572).
 //!
 //! "A day" means the LOCAL calendar day — the clock on the machine the
 //! companion runs on, which is its owner's clock. Not UTC, and not a rolling
@@ -55,12 +55,13 @@ pub(crate) const CALL_WAKE_EVENT: &str = "calls://wake";
 
 /// Calls one companion may open between local midnight and local midnight.
 /// Counted across every recipient — the cap is on the companion, not the pair.
-pub(crate) const MAX_CALLS_PER_DAY: i64 = 30;
+pub(crate) const MAX_CALLS_PER_DAY: i64 = 100;
 
-/// Turns one call may hold, both sides together. Five total is roughly two
-/// round trips and a closing word: enough to ask and be answered, short enough
-/// that a confused pair cannot talk all night.
-pub(crate) const MAX_MESSAGES_PER_CALL: i64 = 5;
+/// Turns one call may hold, both sides together. Ten is roughly four round
+/// trips and a closing word from each side: enough for a real exchange, short
+/// enough that a confused pair cannot talk all night. Was five until s572;
+/// two round trips kept cutting real conversations off mid-thought.
+pub(crate) const MAX_MESSAGES_PER_CALL: i64 = 10;
 
 /// The longest a single turn may be. Same ceiling as a letter in `agent_mail` —
 /// generous for prose, low enough that a runaway agent cannot write the disk
@@ -82,6 +83,11 @@ pub(crate) struct RavenCall {
     /// cap check reads on every hop, and the message table it would otherwise
     /// scan is the one that grows at machine speed.
     pub(crate) message_count: i64,
+    /// How many turns this call may hold — the number the cap check enforces,
+    /// sent along so a meter draws the SAME limit the repository refuses at.
+    /// The UI once mirrored the constant by hand and would have kept drawing
+    /// the old number after any change here; now it has no number of its own.
+    pub(crate) message_limit: i64,
     pub(crate) created_at: i64,
     pub(crate) closed_at: Option<i64>,
     /// The newest turn a wake has been fired for — the wake guard, on the wire.
@@ -96,6 +102,13 @@ pub(crate) struct RavenCall {
     /// mid-thought "No answer" is lying (seen live, s533). With the stamp, the
     /// UI grants a woken companion an answering window before naming silence.
     pub(crate) woken_at: Option<i64>,
+    /// Why the wake for `woken_for_message_id` produced nothing, when the
+    /// waker knows: the provider refused, the model is unconfigured, the turn
+    /// died mid-stream. The guard alone reads as "composing" for the whole
+    /// answering window and then as an unexplained silence; this lets the card
+    /// say "their model failed: rate limit" the moment it is true (s572).
+    /// `None` while a wake is in flight or succeeded, and after any re-ring.
+    pub(crate) wake_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]

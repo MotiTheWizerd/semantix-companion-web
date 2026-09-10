@@ -135,9 +135,12 @@ async fn tick(
                 eprintln!("raven call waker: could not wake {}: {error}", wake.agent_id);
                 // The guard above is already set, so this call will never be
                 // tried again on its own — the one thing that must not happen
-                // is the UI still saying "ringing". The changed event makes
-                // every window re-read and find the guard on the newest turn:
-                // the silence becomes "no answer", which a person can retry.
+                // is the UI still saying "ringing". The failure is stamped on
+                // the row so the card can say WHY at once, and the changed
+                // event makes every window re-read and find it: the silence
+                // becomes a named "no answer", which a person can retry.
+                record_wake_failure(calls, &wake.call_id, &wake.message_id, &error.to_string())
+                    .await;
                 let _ = app.emit(CALLS_CHANGED_EVENT, ());
                 continue;
             }
@@ -153,6 +156,11 @@ async fn tick(
         let sink = Arc::new(AppEventSink::new(app.clone()));
         if let Err(error) = drive_turn(Arc::clone(chat), prepared, sink, None).await {
             eprintln!("raven call waker: woken turn failed: {error}");
+            // Seen live (s572): Qwen's model hit OpenRouter's rate limit and
+            // the card showed "Replying" for the whole answering window, then
+            // an unexplained silence. The reason is known right here — put
+            // it on the row so the card can say it now.
+            record_wake_failure(calls, &wake.call_id, &wake.message_id, &error).await;
         }
 
         // The call moved (or at least was read), so any window showing it
@@ -162,6 +170,29 @@ async fn tick(
     }
 
     report_closed_calls(app, calls, chat).await
+}
+
+/// Stamp a failed wake on its call. Best-effort: a stamp that cannot be
+/// written is logged, never allowed to stop the tick — the guard already
+/// keeps the failed turn from being retried in a loop.
+async fn record_wake_failure(
+    calls: &Arc<RavenCallRepository>,
+    call_id: &str,
+    message_id: &str,
+    reason: &str,
+) {
+    let repository = Arc::clone(calls);
+    let (call_id, message_id, reason) =
+        (call_id.to_owned(), message_id.to_owned(), reason.to_owned());
+    let stamped = tauri::async_runtime::spawn_blocking(move || {
+        repository.mark_wake_failed(&call_id, &message_id, &reason)
+    })
+    .await;
+    match stamped {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("raven call waker: could not record the failure: {error}"),
+        Err(error) => eprintln!("raven call waker: the failure stamp task failed: {error}"),
+    }
 }
 
 /// The second half of the tick: calls that have CLOSED since the last look get

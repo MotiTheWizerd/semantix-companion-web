@@ -10,6 +10,10 @@ export interface RavenCall {
   initiatorAgentId: string;
   status: CallStatus;
   messageCount: number;
+  /** How many turns the call may hold, from the same constant the repository
+   *  enforces. The meter draws this; nothing on this side has a number of
+   *  its own. */
+  messageLimit: number;
   createdAt: number;
   closedAt: number | null;
   /** The newest turn a wake has fired for — Rust's wake guard, on the wire.
@@ -21,6 +25,12 @@ export interface RavenCall {
    *  so this stamp is what separates "picked up, composing" from "gave up" —
    *  a fresh wake renders as Replying, only a stale one as No answer. */
   wokenAt: number | null;
+  /** Why the wake for `wokenForMessageId` produced nothing, when Rust knows:
+   *  a provider refusal, an unconfigured model, a turn that died mid-stream.
+   *  Null while a wake is in flight or succeeded, and after any re-ring. With
+   *  it the card names the failure at once instead of showing "Replying" for
+   *  a model that already died and then an unexplained silence. */
+  wakeError: string | null;
 }
 
 export interface RavenCallMessage {
@@ -64,7 +74,3 @@ export interface CallSegment {
    *  reply in flight, the ring, the silence — and the call's close. */
   isLatest: boolean;
 }
-
-/** Mirrors MAX_MESSAGES_PER_CALL in Rust — display only. The limit is
- *  enforced in the repository; this is just how the meter is drawn. */
-export const MAX_MESSAGES_PER_CALL = 5;
