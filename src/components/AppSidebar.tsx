@@ -58,7 +58,11 @@ interface AppSidebarProps {
   /** Preferences start empty and arrive a beat later. Without this the footer
    *  of a named install flashes "Set your name" on every launch. */
   isInitialising: boolean;
+  /** The settings tab is the active one. Settings lives in the tab strip,
+   *  so this is tab state, not a view — the Chat item steps aside for it. */
+  isSettingsOpen: boolean;
   onViewChange: (view: WorkspaceView) => void;
+  onOpenSettings: () => void;
   onNewConversation: () => void;
   onConversationSelect: (conversationId: string) => void;
 }
@@ -72,11 +76,14 @@ export const AppSidebar = memo(function AppSidebar({
   activeConversationId,
   userPreferences,
   isInitialising,
+  isSettingsOpen,
   onViewChange,
+  onOpenSettings,
   onNewConversation,
   onConversationSelect,
 }: AppSidebarProps) {
   const needsName = !isInitialising && !userPreferences.displayName;
+  const isChat = activeView === "chat" && !isSettingsOpen;
   return (
     <aside className="app-sidebar" aria-label="Companion navigation">
       <div className="sidebar-brand">
@@ -91,9 +98,9 @@ export const AppSidebar = memo(function AppSidebar({
 
       <nav className="sidebar-navigation" aria-label="Primary navigation">
         <button
-          className={`sidebar-navigation__item ${activeView === "chat" ? "is-active" : ""}`}
+          className={`sidebar-navigation__item ${isChat ? "is-active" : ""}`}
           type="button"
-          aria-current={activeView === "chat" ? "page" : undefined}
+          aria-current={isChat ? "page" : undefined}
           onClick={() => onViewChange("chat")}
         >
           <ChatIcon />
@@ -147,10 +154,10 @@ export const AppSidebar = memo(function AppSidebar({
 
       <div className="sidebar-footer">
         <button
-          className={`sidebar-settings-button ${activeView === "settings" ? "is-active" : ""}`}
+          className={`sidebar-settings-button ${isSettingsOpen ? "is-active" : ""}`}
           type="button"
-          aria-current={activeView === "settings" ? "page" : undefined}
-          onClick={() => onViewChange("settings")}
+          aria-current={isSettingsOpen ? "page" : undefined}
+          onClick={onOpenSettings}
         >
           <SettingsIcon />
           <span>Settings</span>
@@ -163,7 +170,7 @@ export const AppSidebar = memo(function AppSidebar({
         <button
           className="sidebar-profile"
           type="button"
-          onClick={() => onViewChange("settings")}
+          onClick={onOpenSettings}
           title={needsName ? "Set your name" : "Your settings"}
         >
           <span className="sidebar-profile__avatar">{userInitial(userPreferences)}</span>

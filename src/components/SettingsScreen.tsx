@@ -55,8 +55,18 @@ const SETTINGS_TABS: SettingsTab[] = [
   { id: "styles", label: "Styles", Panel: StylesPanel },
 ];
 
+/** The section last opened, kept across mounts: Settings is a tab (s573),
+ *  and the screen unmounts whenever another tab is up. Coming back from a
+ *  conversation should land where the reader left — on the API Manager,
+ *  not reset to "You". Not persisted; a fresh launch starts at the top. */
+let lastSectionId = SETTINGS_TABS[0].id;
+
 export function SettingsScreen() {
-  const [activeTabId, setActiveTabId] = useState(SETTINGS_TABS[0].id);
+  const [activeTabId, setActiveTabState] = useState(lastSectionId);
+  const setActiveTabId = (id: string) => {
+    lastSectionId = id;
+    setActiveTabState(id);
+  };
   const activeTab =
     SETTINGS_TABS.find((tab) => tab.id === activeTabId) ?? SETTINGS_TABS[0];
   const { Panel } = activeTab;

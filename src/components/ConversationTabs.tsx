@@ -23,6 +23,18 @@ function PlusIcon() {
   );
 }
 
+/** The settings tab's face — the sidebar's gear at the strip's 16px, since
+ *  that tab talks to nobody and wears no companion. */
+function GearIcon() {
+  return (
+    <svg className="conversation-tab__gear" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="3" />
+      <circle cx="10" cy="10" r="6.25" />
+      <path d="M10 1.75v2M10 16.25v2M1.75 10h2M16.25 10h2M4.17 4.17l1.42 1.42M14.41 14.41l1.42 1.42M15.83 4.17l-1.42 1.42M5.59 14.41l-1.42 1.42" />
+    </svg>
+  );
+}
+
 /** Behind memo with no props: it subscribes to the store itself, so the
  * shell re-rendering per streamed frame never reaches it. */
 export const ConversationTabs = memo(function ConversationTabs() {
@@ -50,7 +62,7 @@ export const ConversationTabs = memo(function ConversationTabs() {
   const builtIn = companions.find((companion) => companion.isBuiltIn) ?? null;
 
   return (
-    <div className="conversation-tabs" role="tablist" aria-label="Open conversations">
+    <div className="conversation-tabs" role="tablist" aria-label="Open tabs">
       <div className="conversation-tabs__track">
         {tabOrder.map((tabId) => {
           const tab = tabsById[tabId];
@@ -80,10 +92,14 @@ export const ConversationTabs = memo(function ConversationTabs() {
                   onClick={() => setActiveTab(tabId)}
                 >
                   <span className="conversation-tab__face">
-                    <CompanionMark
-                      src={companion?.avatarUrl}
-                      name={companion ? companionLabel(companion) : null}
-                    />
+                    {tab.kind === "settings" ? (
+                      <GearIcon />
+                    ) : (
+                      <CompanionMark
+                        src={companion?.avatarUrl}
+                        name={companion ? companionLabel(companion) : null}
+                      />
+                    )}
                   </span>
                   {tab.unreadCount > 0 ? <span className="conversation-tab__unread" /> : null}
                   <SettlingTitle title={tab.title} from={settlingFrom} />

@@ -83,6 +83,16 @@
   height: 16px;
 }
 
+/* The settings tab's gear, drawn like the sidebar's at the face's size. */
+.conversation-tab__gear {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.4;
+}
+
 .conversation-tab__unread {
   width: 5px;
   height: 5px;

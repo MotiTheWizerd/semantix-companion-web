@@ -44,10 +44,22 @@ import {
 } from "../preferences/preferenceService";
 import type { ModelPreference, UserPreferences } from "../preferences/types";
 
-export type WorkspaceView = "chat" | "memory" | "settings";
+/** The two whole-workspace views. Settings is NOT one of them any more
+ *  (s573: "it's annoying to move between the settings and the tabs") — it is
+ *  a tab in the strip, so a person can be halfway through a key and one click
+ *  from the conversation, and back. */
+export type WorkspaceView = "chat" | "memory";
+
+/** The one settings tab's id — fixed, so opening Settings twice finds the
+ *  same tab instead of growing a second. */
+export const SETTINGS_TAB_ID = "settings";
 
 export interface ConversationTab {
   id: string;
+  /** What the tab shows. A "settings" tab carries the conversation fields
+   *  empty and never a conversation — the shape stays one so every reader
+   *  of the strip keeps working; only the face and the surface differ. */
+  kind: "conversation" | "settings";
   conversationId: string | null;
   title: string;
   draft: string;
@@ -109,6 +121,8 @@ interface CompanionStore {
   setActiveView: (view: WorkspaceView) => void;
   openConversation: (conversationId: string) => Promise<void>;
   openNewConversation: () => void;
+  /** Settings as a tab: opens it once, and after that just moves to it. */
+  openSettings: () => void;
   setActiveTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   setDraft: (tabId: string, draft: string) => void;
@@ -159,6 +173,7 @@ function createTabId(prefix: "new" | "conversation", id?: string): string {
 function newConversationTab(companionId: string | null = null): ConversationTab {
   return {
     id: createTabId("new"),
+    kind: "conversation",
     conversationId: null,
     title: "New conversation",
     draft: "",
@@ -173,11 +188,27 @@ function newConversationTab(companionId: string | null = null): ConversationTab 
 function tabForConversation(conversation: Conversation): ConversationTab {
   return {
     id: createTabId("conversation", conversation.id),
+    kind: "conversation",
     conversationId: conversation.id,
     title: conversation.title,
     draft: "",
     attachments: [],
     companionId: conversation.companionId,
+    unreadCount: 0,
+    error: null,
+    notice: null,
+  };
+}
+
+function settingsTab(): ConversationTab {
+  return {
+    id: SETTINGS_TAB_ID,
+    kind: "settings",
+    conversationId: null,
+    title: "Settings",
+    draft: "",
+    attachments: [],
+    companionId: null,
     unreadCount: 0,
     error: null,
     notice: null,
@@ -572,7 +603,39 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     set({ isInitialised: false, isInitialising: false });
   },
 
-  setActiveView: (view) => set({ activeView: view }),
+  // "Chat" from the sidebar means a conversation, not whichever tab is up:
+  // if the settings tab is the active one, step to the nearest conversation
+  // tab (or open one) so the click always lands on a thread.
+  setActiveView: (view) => {
+    const state = get();
+    const active = state.activeTabId ? state.tabsById[state.activeTabId] : null;
+    if (view !== "chat" || !active || active.kind === "conversation") {
+      set({ activeView: view });
+      return;
+    }
+    const index = state.tabOrder.indexOf(active.id);
+    const nearest =
+      state.tabOrder
+        .map((id, at) => ({ id, distance: Math.abs(at - index) }))
+        .filter(({ id }) => state.tabsById[id]?.kind === "conversation")
+        .sort((left, right) => left.distance - right.distance)[0] ?? null;
+    if (nearest) get().setActiveTab(nearest.id);
+    else get().openNewConversation();
+  },
+
+  openSettings: () => {
+    if (get().tabsById[SETTINGS_TAB_ID]) {
+      get().setActiveTab(SETTINGS_TAB_ID);
+      return;
+    }
+    const tab = settingsTab();
+    set((state) => ({
+      activeView: "chat",
+      activeTabId: tab.id,
+      tabOrder: [...state.tabOrder, tab.id],
+      tabsById: { ...state.tabsById, [tab.id]: tab },
+    }));
+  },
 
   openConversation: async (conversationId) => {
     const existing = Object.values(get().tabsById).find(

@@ -31,6 +31,7 @@ export function App() {
     setActiveView,
     openConversation,
     openNewConversation,
+    openSettings,
     setDraft,
     setTabCompanion,
     sendMessage,
@@ -63,6 +64,7 @@ export function App() {
         setActiveView: state.setActiveView,
         openConversation: state.openConversation,
         openNewConversation: state.openNewConversation,
+        openSettings: state.openSettings,
         setDraft: state.setDraft,
         setTabCompanion: state.setTabCompanion,
         sendMessage: state.sendMessage,
@@ -97,8 +99,11 @@ export function App() {
     };
   }, []);
 
-  const isSettings = activeView === "settings";
+  // Settings is a tab, not a view (s573): it shows when its tab is the active
+  // one, with the strip above it like any conversation, so the way back is
+  // one click and the way there did not close anything.
   const isSky = activeView === "memory";
+  const isSettings = !isSky && activeTab?.kind === "settings";
   const activeConversationId = activeTab?.conversationId ?? null;
   const isSending = isSubmitting || Boolean(runtime?.isStreaming);
 
@@ -153,13 +158,13 @@ export function App() {
         activeConversationId={activeConversationId}
         userPreferences={userPreferences}
         isInitialising={isInitialising}
+        isSettingsOpen={isSettings}
         onViewChange={setActiveView}
+        onOpenSettings={openSettings}
         onNewConversation={openNewConversation}
         onConversationSelect={handleConversationSelect}
       />
-      <div
-        className={`app-workspace ${isSky ? "is-sky" : isSettings ? "" : "has-conversation-tabs"}`}
-      >
+      <div className={`app-workspace ${isSky ? "is-sky" : "has-conversation-tabs"}`}>
         {isSky ? null : (
           <AppHeader
             eyebrow={isSettings ? "Companion" : "Conversation"}
@@ -167,7 +172,7 @@ export function App() {
             showOptions={!isSettings}
           />
         )}
-        {isSettings || isSky ? null : <ConversationTabs />}
+        {isSky ? null : <ConversationTabs />}
         {isSky ? (
           <Suspense fallback={<div className="memory-sky" />}>
             <MemorySkyView
