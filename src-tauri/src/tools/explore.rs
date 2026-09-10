@@ -33,6 +33,10 @@ const FILTER_MAX_LIMIT: usize = 50;
 const MAP_TOP: usize = 8;
 /// Semantic neighbours drawn around a memory in a neighborhood.
 const NEIGHBORHOOD_K: u32 = 6;
+/// `MAX_DELTA_NODES` on both brains' `/graph/nodes`: names past this many in
+/// one call are dropped without a word, so neighbours are fetched this many
+/// at a time.
+const DELTA_PAGE: usize = 32;
 /// A description in a list row is cut here — the row is a signpost, and
 /// `inspect` or `recall_memory` is the door.
 const ROW_DESCRIPTION_CHARS: usize = 110;
@@ -194,22 +198,29 @@ pub(crate) async fn execute(shape: Shape, target: &MemoryTarget) -> Result<Strin
                 .into_iter()
                 .find(|node| node_str(node, "name") == name)
                 .ok_or_else(|| format!("no memory named \"{name}\" exists"))?;
-            let others: Vec<String> = graph_edges(&centre)
+            let mut others: Vec<String> = graph_edges(&centre)
                 .iter()
                 .filter_map(|edge| other_end(edge, &name))
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
-            let neighbours = if others.is_empty() {
-                serde_json::json!({ "nodes": [] })
-            } else {
-                memory::fetch_memory_graph(target, &others, Some(0), None, Some(true)).await?
-            };
+            others.sort_unstable();
+            // In pages: both brains' delta door answers at most DELTA_PAGE
+            // names per call and silently drops the rest, so a hub with 40
+            // links asked in one call came back with 8 neighbours rendered
+            // "(not yet written)" — a lie (found porting this to the muninn
+            // CLI, s574).
+            let mut neighbours = Vec::new();
+            for page in others.chunks(DELTA_PAGE) {
+                let graph =
+                    memory::fetch_memory_graph(target, page, Some(0), None, Some(true)).await?;
+                neighbours.extend(graph_nodes(&graph));
+            }
             Ok(render_neighborhood(
                 &name,
                 &node,
                 &graph_edges(&centre),
-                &graph_nodes(&neighbours),
+                &neighbours,
             ))
         }
         Shape::Inspect { name } => {
