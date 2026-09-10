@@ -3,6 +3,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { ConfirmDeleteButton } from "../../../components/ConfirmDeleteButton";
 import { EditButton } from "../../../components/EditButton";
+import { FormSelect } from "../../../components/FormSelect/FormSelect";
 import {
   createProviderCredential,
   deleteProviderCredential,
@@ -228,20 +229,20 @@ export function ProviderApiKeyStore() {
           </div>
 
           <div className="credential-form__fields">
-            <label className="credential-field">
+            <div className="credential-field">
               <span>Provider</span>
-              <select
+              <FormSelect
+                options={providers.map((provider) => ({
+                  value: provider.id,
+                  label: provider.name,
+                }))}
                 value={providerId}
-                required
-                onChange={(event) => setProviderId(event.target.value)}
-              >
-                {providers.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+                ariaLabel="Provider"
+                menuLabel="Providers"
+                disabled={isSaving}
+                onChange={setProviderId}
+              />
+            </div>
 
             <label className="credential-field">
               <span>Label <small>Optional</small></span>

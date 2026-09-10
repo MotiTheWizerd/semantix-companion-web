@@ -22,11 +22,17 @@ function ModelsPanel() {
   return (
     <>
       <UserPreferenceStore />
-      <ProviderApiKeyStore />
       <ConfiguredModelStore />
       <MemorySettingsSection />
     </>
   );
+}
+
+/** The keys live apart from the models that use them: a key is a credential
+ *  with a provider, a model is a choice — mixing the two on one tab made the
+ *  Models tab the longest page in Settings. */
+function ApiManagerPanel() {
+  return <ProviderApiKeyStore />;
 }
 
 function CompanionsPanel() {
@@ -44,6 +50,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   // the machinery — and the one a fresh install most needs answered.
   { id: "you", label: "You", Panel: YouPanel },
   { id: "models", label: "Models", Panel: ModelsPanel },
+  { id: "api-manager", label: "API Manager", Panel: ApiManagerPanel },
   { id: "companions", label: "Companions", Panel: CompanionsPanel },
   { id: "styles", label: "Styles", Panel: StylesPanel },
 ];

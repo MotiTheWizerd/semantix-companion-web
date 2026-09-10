@@ -1,0 +1,48 @@
+/* Single-line select on the shared Dropdown shell, sized to match
+   `.credential-field input` (38px) so it sits level with a text field. */
+
+.dropdown {
+  width: 100%;
+}
+
+.trigger {
+  width: 100%;
+  height: 38px;
+  min-height: 38px;
+}
+
+.menu {
+  min-width: min(260px, calc(100vw - 16px));
+}
+
+.row {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.label,
+.detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 540;
+}
+
+.detail {
+  color: var(--text-faint);
+  font-size: 10px;
+  flex: 0 1 auto;
+}
+
+.placeholder {
+  color: var(--text-faint);
+  font-size: 12px;
+}

@@ -12,6 +12,7 @@ import { ModelSelector } from "../models/ModelSelector";
 import { getUserPreferences } from "../preferences/preferenceService";
 import type { ModelPreference, UserPreferences } from "../preferences/types";
 import { listStyles, onStylesChanged, reconcileStyleEvent } from "../styles/styleService";
+import { StyleSelector } from "../styles/StyleSelector";
 import type { Style } from "../styles/types";
 import {
   clearCompanionAvatar,
@@ -470,26 +471,18 @@ export function CompanionRoster() {
               />
             </div>
 
-            <label className="credential-field credential-field--wide">
+            <div className="credential-field credential-field--wide">
               <span>
                 Style <small>Optional — a voice from your style library</small>
               </span>
-              <select
-                aria-label="Companion style"
-                value={styleId ?? ""}
-                onChange={(event) => setStyleId(event.target.value || null)}
-              >
-                <option value="">No style — speaks plainly</option>
-                {availableStyles.map((style) => (
-                  <option key={style.id} value={style.id}>
-                    {style.name}
-                    {style.exemplarCount > 0
-                      ? ` (${style.exemplarCount} exchanges)`
-                      : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <StyleSelector
+                value={styleId}
+                availableStyles={availableStyles}
+                disabled={isSaving}
+                ariaLabel="Companion style"
+                onChange={setStyleId}
+              />
+            </div>
 
             <div className="credential-field credential-field--wide">
               <WorkspaceFolderEditor

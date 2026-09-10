@@ -3,6 +3,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { ConfirmDeleteButton } from "../../../components/ConfirmDeleteButton";
 import { EditButton } from "../../../components/EditButton";
+import { FormSelect } from "../../../components/FormSelect/FormSelect";
 import {
   listKnownModelProviders,
   listProviderCredentials,
@@ -298,20 +299,20 @@ export function ConfiguredModelStore() {
           </div>
 
           <div className="credential-form__fields model-form__fields">
-            <label className="credential-field">
+            <div className="credential-field">
               <span>Provider</span>
-              <select
+              <FormSelect
+                options={providers.map((provider) => ({
+                  value: provider.id,
+                  label: provider.name,
+                }))}
                 value={providerId}
-                required
-                onChange={(event) => setProviderId(event.target.value)}
-              >
-                {providers.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+                ariaLabel="Provider"
+                menuLabel="Providers"
+                disabled={isSaving}
+                onChange={setProviderId}
+              />
+            </div>
 
             <label className="credential-field">
               <span>Model ID</span>
@@ -364,20 +365,21 @@ export function ConfiguredModelStore() {
 
             {credentialKind === "saved" ? (
               providerCredentials.length > 0 ? (
-                <label className="credential-field model-credential-source__field">
+                <div className="credential-field model-credential-source__field">
                   <span>{selectedProvider?.name ?? "Provider"} keys</span>
-                  <select
+                  <FormSelect
+                    options={providerCredentials.map((credential) => ({
+                      value: credential.id,
+                      label: credential.label,
+                      detail: credential.keyHint,
+                    }))}
                     value={credentialId}
-                    required
-                    onChange={(event) => setCredentialId(event.target.value)}
-                  >
-                    {providerCredentials.map((credential) => (
-                      <option key={credential.id} value={credential.id}>
-                        {credential.label} — {credential.keyHint}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    ariaLabel={`${selectedProvider?.name ?? "Provider"} keys`}
+                    menuLabel="Saved API keys"
+                    disabled={isSaving}
+                    onChange={setCredentialId}
+                  />
+                </div>
               ) : (
                 <div className="model-credential-source__empty">
                   <span>No saved {selectedProvider?.name ?? "provider"} key yet.</span>
