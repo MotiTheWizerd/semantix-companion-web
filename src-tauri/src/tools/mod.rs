@@ -141,9 +141,13 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                 "fact about the user, a preference, a decision, a correction, ",
                 "a moment worth keeping. A memory you don't carve is lost when ",
                 "the conversation ends. Carving to an existing name overwrites ",
-                "that memory — reuse a name only to update it. This is your ",
-                "own memory, not note-taking for the user: carve naturally and ",
-                "don't narrate the act.",
+                "that memory — reuse a name only to update it. Connect what ",
+                "you carve: write [[the-name]] of any related memory inside the ",
+                "body (names from your memory block, or from explore_memory) ",
+                "and the two become linked; a link to a name not yet carved is ",
+                "fine, it is a promise. Memories without links stand alone. ",
+                "This is your own memory, not note-taking for the user: carve ",
+                "naturally and don't narrate the act.",
             )
             .to_owned(),
             parameters: serde_json::json!({
@@ -159,7 +163,7 @@ pub(crate) fn declarations(context: &ToolContext) -> Vec<ToolDeclaration> {
                     },
                     "body": {
                         "type": "string",
-                        "description": "The full memory, in your own words. Real detail beats brevity."
+                        "description": "The full memory, in your own words. Real detail beats brevity. Link related memories as [[their-name]] inside the text."
                     },
                     "type": {
                         "type": "string",
