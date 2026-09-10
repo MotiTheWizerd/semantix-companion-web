@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { CompanionMark } from "./CompanionMark";
 import { SettlingTitle } from "./SettlingTitle";
 import { Tooltip } from "./Tooltip/Tooltip";
@@ -61,7 +63,9 @@ interface AppSidebarProps {
   onConversationSelect: (conversationId: string) => void;
 }
 
-export function AppSidebar({
+/** Behind memo: the shell re-renders per streamed frame; this list only
+ * changes when a conversation is added, renamed, chosen or reordered. */
+export const AppSidebar = memo(function AppSidebar({
   activeView,
   conversations,
   settlingTitles,
@@ -172,4 +176,4 @@ export function AppSidebar({
       </div>
     </aside>
   );
-}
+});

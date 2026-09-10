@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useCompanionStore } from "../features/workspace/companionStore";
@@ -21,7 +22,9 @@ function PlusIcon() {
   );
 }
 
-export function ConversationTabs() {
+/** Behind memo with no props: it subscribes to the store itself, so the
+ * shell re-rendering per streamed frame never reaches it. */
+export const ConversationTabs = memo(function ConversationTabs() {
   const {
     tabOrder,
     tabsById,
@@ -104,4 +107,4 @@ export function ConversationTabs() {
       </button>
     </div>
   );
-}
+});

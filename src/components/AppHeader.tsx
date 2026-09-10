@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 function MoreIcon() {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -14,7 +16,13 @@ interface AppHeaderProps {
   showOptions?: boolean;
 }
 
-export function AppHeader({ eyebrow, title, showOptions = false }: AppHeaderProps) {
+/** Behind memo: the shell re-renders per streamed frame, and nothing here
+ * changes with a token. */
+export const AppHeader = memo(function AppHeader({
+  eyebrow,
+  title,
+  showOptions = false,
+}: AppHeaderProps) {
   return (
     <header className="app-header">
       <div className="app-header__title">
@@ -34,4 +42,4 @@ export function AppHeader({ eyebrow, title, showOptions = false }: AppHeaderProp
       </div>
     </header>
   );
-}
+});

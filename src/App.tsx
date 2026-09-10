@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from "react";
+import { lazy, Suspense, useCallback, useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { AppHeader } from "./components/AppHeader";
@@ -23,10 +23,10 @@ export function App() {
     conversations,
     settlingTitles,
     companions,
-    tabsById,
+    activeTab,
     activeTabId,
-    runtimeByConversationId,
-    submittingByTabId,
+    runtime,
+    isSubmitting,
     initialise,
     setActiveView,
     openConversation,
@@ -39,28 +39,39 @@ export function App() {
     removeAttachment,
     userPreferences,
   } = useCompanionStore(
-    useShallow((state) => ({
-      activeView: state.activeView,
-      isInitialising: state.isInitialising,
-      conversations: state.conversations,
-      settlingTitles: state.settlingTitles,
-      companions: state.companions,
-      tabsById: state.tabsById,
-      activeTabId: state.activeTabId,
-      runtimeByConversationId: state.runtimeByConversationId,
-      submittingByTabId: state.submittingByTabId,
-      initialise: state.initialise,
-      setActiveView: state.setActiveView,
-      openConversation: state.openConversation,
-      openNewConversation: state.openNewConversation,
-      setDraft: state.setDraft,
-      setTabCompanion: state.setTabCompanion,
-      sendMessage: state.sendMessage,
-      stopTurn: state.stopTurn,
-      attachFiles: state.attachFiles,
-      removeAttachment: state.removeAttachment,
-      userPreferences: state.userPreferences,
-    })),
+    // ⚑ THE SHELL READS ONLY THE ACTIVE THREAD. Selecting the whole runtime
+    // map meant every streamed token — in any tab — replaced the map and
+    // re-rendered the shell top to bottom. Now a token in the active thread
+    // changes `runtime` and nothing else; a token in a background tab changes
+    // nothing here at all.
+    useShallow((state) => {
+      const activeTab = state.activeTabId ? (state.tabsById[state.activeTabId] ?? null) : null;
+      const activeConversationId = activeTab?.conversationId ?? null;
+      return {
+        activeView: state.activeView,
+        isInitialising: state.isInitialising,
+        conversations: state.conversations,
+        settlingTitles: state.settlingTitles,
+        companions: state.companions,
+        activeTab,
+        activeTabId: state.activeTabId,
+        runtime: activeConversationId
+          ? state.runtimeByConversationId[activeConversationId]
+          : undefined,
+        isSubmitting: Boolean(state.activeTabId && state.submittingByTabId[state.activeTabId]),
+        initialise: state.initialise,
+        setActiveView: state.setActiveView,
+        openConversation: state.openConversation,
+        openNewConversation: state.openNewConversation,
+        setDraft: state.setDraft,
+        setTabCompanion: state.setTabCompanion,
+        sendMessage: state.sendMessage,
+        stopTurn: state.stopTurn,
+        attachFiles: state.attachFiles,
+        removeAttachment: state.removeAttachment,
+        userPreferences: state.userPreferences,
+      };
+    }),
   );
 
   // Ctrl/Cmd +/- for the whole interface. Bound at the shell so it answers
@@ -88,13 +99,47 @@ export function App() {
 
   const isSettings = activeView === "settings";
   const isSky = activeView === "memory";
-  const activeTab = activeTabId ? tabsById[activeTabId] : null;
   const activeConversationId = activeTab?.conversationId ?? null;
-  const runtime = activeConversationId
-    ? runtimeByConversationId[activeConversationId]
-    : undefined;
-  const isSending = Boolean(
-    (activeTabId && submittingByTabId[activeTabId]) || runtime?.isStreaming,
+  const isSending = isSubmitting || Boolean(runtime?.isStreaming);
+
+  // Stable across renders so the memoized shell pieces (sidebar, header, tab
+  // strip) are not handed a fresh function per streamed frame.
+  const handleConversationSelect = useCallback(
+    (conversationId: string) => void openConversation(conversationId),
+    [openConversation],
+  );
+  const handleContentChange = useCallback(
+    (content: string) => {
+      if (activeTabId) setDraft(activeTabId, content);
+    },
+    [activeTabId, setDraft],
+  );
+  const handleCompanionChange = useCallback(
+    (companionId: string) => {
+      if (activeTabId) void setTabCompanion(activeTabId, companionId);
+    },
+    [activeTabId, setTabCompanion],
+  );
+  const handleSend = useCallback(
+    async (content: string) => {
+      if (activeTabId) await sendMessage(activeTabId, content);
+    },
+    [activeTabId, sendMessage],
+  );
+  const handleStop = useCallback(() => {
+    if (activeTabId) void stopTurn(activeTabId);
+  }, [activeTabId, stopTurn]);
+  const handleAttachFiles = useCallback(
+    (files: File[]) => {
+      if (activeTabId) void attachFiles(activeTabId, files);
+    },
+    [activeTabId, attachFiles],
+  );
+  const handleRemoveAttachment = useCallback(
+    (attachmentId: string) => {
+      if (activeTabId) removeAttachment(activeTabId, attachmentId);
+    },
+    [activeTabId, removeAttachment],
   );
 
   return (
@@ -110,7 +155,7 @@ export function App() {
         isInitialising={isInitialising}
         onViewChange={setActiveView}
         onNewConversation={openNewConversation}
-        onConversationSelect={(conversationId) => void openConversation(conversationId)}
+        onConversationSelect={handleConversationSelect}
       />
       <div
         className={`app-workspace ${isSky ? "is-sky" : isSettings ? "" : "has-conversation-tabs"}`}
@@ -149,24 +194,12 @@ export function App() {
             pendingAttachments={activeTab?.attachments ?? []}
             companions={companions}
             companionId={activeTab?.companionId ?? null}
-            onContentChange={(content) => {
-              if (activeTabId) setDraft(activeTabId, content);
-            }}
-            onCompanionChange={(companionId) => {
-              if (activeTabId) void setTabCompanion(activeTabId, companionId);
-            }}
-            onSend={async (content) => {
-              if (activeTabId) await sendMessage(activeTabId, content);
-            }}
-            onStop={() => {
-              if (activeTabId) void stopTurn(activeTabId);
-            }}
-            onAttachFiles={(files) => {
-              if (activeTabId) void attachFiles(activeTabId, files);
-            }}
-            onRemoveAttachment={(attachmentId) => {
-              if (activeTabId) removeAttachment(activeTabId, attachmentId);
-            }}
+            onContentChange={handleContentChange}
+            onCompanionChange={handleCompanionChange}
+            onSend={handleSend}
+            onStop={handleStop}
+            onAttachFiles={handleAttachFiles}
+            onRemoveAttachment={handleRemoveAttachment}
           />
         )}
       </div>

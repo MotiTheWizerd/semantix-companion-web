@@ -270,6 +270,29 @@ function acceptedEvent(accepted: AcceptedMessage): ChatEvent {
   return { kind: "accepted", ...accepted };
 }
 
+type StreamDelta = Extract<ChatEvent, { kind: "assistantDelta" | "assistantReasoningDelta" }>;
+
+function isStreamDelta(event: ChatEvent): event is StreamDelta {
+  return event.kind === "assistantDelta" || event.kind === "assistantReasoningDelta";
+}
+
+/** A frame's worth of deltas, neighbours of the same kind on the same row
+ * joined into one. Order is kept exactly — a reasoning delta between two
+ * text deltas stays between them — so folding changes how many times the
+ * row is rewritten, never what it ends up saying. */
+function foldStreamDeltas(deltas: StreamDelta[]): StreamDelta[] {
+  const folded: StreamDelta[] = [];
+  for (const delta of deltas) {
+    const last = folded[folded.length - 1];
+    if (last && last.kind === delta.kind && last.messageId === delta.messageId) {
+      folded[folded.length - 1] = { ...last, delta: last.delta + delta.delta };
+    } else {
+      folded.push(delta);
+    }
+  }
+  return folded;
+}
+
 /** Discrete moments only — send accepted, turn started, turn finished. The
  * continuous kinds (deltas, reasoning, tool chips) deliberately request
  * nothing: following a growing transcript belongs to ChatThread's bottom
@@ -950,203 +973,240 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
     }
 
     let wasAccepted = false;
-    const handleChatEvent = (event: ChatEvent) => {
-      // Call cards own their transient speech through the app-wide event bus;
-      // keep this boundary explicit if another sink forwards those variants.
-      if (event.kind === "callSpeechDelta" || event.kind === "callSpeechFinished") return;
-      if (event.kind === "accepted") wasAccepted = true;
-      set((state) => {
-        if (event.kind === "accepted") {
-          const conversationId = event.conversation.id;
-          const currentTab = state.tabsById[tabId];
-          const runtimeState =
-            state.runtimeByConversationId[conversationId] ?? emptyRuntime();
-          return {
-            conversations: reconcileConversation(state.conversations, event.conversation),
-            tabsById: currentTab
-              ? {
-                  ...state.tabsById,
-                  [tabId]: {
-                    ...currentTab,
-                    conversationId,
-                    title: event.conversation.title,
-                    companionId: event.conversation.companionId,
-                  },
-                }
-              : state.tabsById,
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: {
-                ...runtimeState,
-                // The authoritative row takes the optimistic echo's place.
-                messages: reconcileMessage(
-                  optimisticId
-                    ? runtimeState.messages.filter((item) => item.id !== optimisticId)
-                    : runtimeState.messages,
-                  event.message,
-                ),
-                // The 🧠 chip pins to the accepted user message — the memory
-                // pass already ran for this send by the time we get an id.
-                recallByMessageId: memory
-                  ? {
-                      ...runtimeState.recallByMessageId,
-                      [event.message.id]: memory.chip,
-                    }
-                  : runtimeState.recallByMessageId,
-                error: null,
-              },
-            },
-          };
-        }
-
-        const conversationId =
-          event.kind === "assistantStarted" || event.kind === "assistantCompleted"
-            ? event.message.conversationId
-            : event.conversationId;
+    // One event folded into the store — pure, so a frame's worth of deltas
+    // can be applied in a single set (below) instead of one commit each.
+    const reduceChatEvent = (
+      state: CompanionStore,
+      event: Exclude<ChatEvent, { kind: "callSpeechDelta" | "callSpeechFinished" }>,
+    ): Partial<CompanionStore> => {
+      if (event.kind === "accepted") {
+        const conversationId = event.conversation.id;
+        const currentTab = state.tabsById[tabId];
         const runtimeState =
           state.runtimeByConversationId[conversationId] ?? emptyRuntime();
-        if (event.kind === "toolCall") {
-          return {
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: {
-                ...runtimeState,
-                // A tool signal means the model stopped thinking and asked
-                // for something. If it thinks again after the result, the
-                // next reasoning delta re-arms this.
-                thinkingMessageId: null,
-                toolCallsByMessageId: {
-                  ...runtimeState.toolCallsByMessageId,
-                  [event.messageId]: reconcileToolCall(
-                    runtimeState.toolCallsByMessageId[event.messageId] ?? [],
-                    {
-                      callId: event.callId,
-                      name: event.name,
-                      arguments: event.arguments,
-                      status: event.status,
-                      detail: event.detail,
-                      afterText: event.afterText,
-                    },
-                    Date.now(),
-                  ),
+        return {
+          conversations: reconcileConversation(state.conversations, event.conversation),
+          tabsById: currentTab
+            ? {
+                ...state.tabsById,
+                [tabId]: {
+                  ...currentTab,
+                  conversationId,
+                  title: event.conversation.title,
+                  companionId: event.conversation.companionId,
                 },
-              },
+              }
+            : state.tabsById,
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [conversationId]: {
+              ...runtimeState,
+              // The authoritative row takes the optimistic echo's place.
+              messages: reconcileMessage(
+                optimisticId
+                  ? runtimeState.messages.filter((item) => item.id !== optimisticId)
+                  : runtimeState.messages,
+                event.message,
+              ),
+              // The 🧠 chip pins to the accepted user message — the memory
+              // pass already ran for this send by the time we get an id.
+              recallByMessageId: memory
+                ? {
+                    ...runtimeState.recallByMessageId,
+                    [event.message.id]: memory.chip,
+                  }
+                : runtimeState.recallByMessageId,
+              error: null,
             },
-          };
-        }
-        if (event.kind === "remembering") {
-          return {
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: { ...runtimeState, isRemembering: event.active },
-            },
-          };
-        }
-        if (event.kind === "assistantStarted") {
-          return {
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: {
-                ...runtimeState,
-                messages: reconcileMessage(runtimeState.messages, event.message),
-                isStreaming: true,
-                error: null,
-              },
-            },
-          };
-        }
-        if (event.kind === "assistantDelta") {
-          return {
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: {
-                ...runtimeState,
-                isStreaming: true,
-                // The first word of the answer ends the thinking — whichever
-                // row the thoughts landed on (after a tool, the text opens a
-                // new row while the thoughts stayed on the old one).
-                thinkingMessageId: null,
-                messages: runtimeState.messages.map((item) =>
-                  item.id === event.messageId
-                    ? {
-                        ...item,
-                        content: item.content + event.delta,
-                        status: "streaming",
-                        updatedAt: Date.now(),
-                      }
-                    : item,
-                ),
-              },
-            },
-          };
-        }
-        if (event.kind === "assistantReasoningDelta") {
-          return {
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: {
-                ...runtimeState,
-                isStreaming: true,
-                thinkingMessageId: event.messageId,
-                reasoningByMessageId: {
-                  ...runtimeState.reasoningByMessageId,
-                  [event.messageId]:
-                    (runtimeState.reasoningByMessageId[event.messageId] ?? "") + event.delta,
-                },
-              },
-            },
-          };
-        }
-        if (event.kind === "assistantCompleted") {
-          const targetTab = Object.values(state.tabsById).find(
-            (candidate) => candidate.conversationId === conversationId,
-          );
-          const isVisible =
-            state.activeView === "chat" && targetTab?.id === state.activeTabId;
-          return {
-            tabsById: targetTab
-              ? {
-                  ...state.tabsById,
-                  [targetTab.id]: {
-                    ...targetTab,
-                    unreadCount: isVisible ? 0 : targetTab.unreadCount + 1,
-                  },
-                }
-              : state.tabsById,
-            runtimeByConversationId: {
-              ...state.runtimeByConversationId,
-              [conversationId]: {
-                ...runtimeState,
-                messages: reconcileMessage(runtimeState.messages, event.message),
-                isStreaming: false,
-                isRemembering: false,
-                thinkingMessageId: null,
-                error: null,
-              },
-            },
-          };
-        }
+          },
+        };
+      }
 
+      const conversationId =
+        event.kind === "assistantStarted" || event.kind === "assistantCompleted"
+          ? event.message.conversationId
+          : event.conversationId;
+      const runtimeState =
+        state.runtimeByConversationId[conversationId] ?? emptyRuntime();
+      if (event.kind === "toolCall") {
         return {
           runtimeByConversationId: {
             ...state.runtimeByConversationId,
             [conversationId]: {
               ...runtimeState,
-              isStreaming: false,
-              isRemembering: false,
+              // A tool signal means the model stopped thinking and asked
+              // for something. If it thinks again after the result, the
+              // next reasoning delta re-arms this.
               thinkingMessageId: null,
-              error: event.message,
-              messages: event.messageId
-                ? runtimeState.messages.map((item) =>
-                    item.id === event.messageId
-                      ? { ...item, status: "failed", errorMessage: event.message }
-                      : item,
-                  )
-                : runtimeState.messages,
+              toolCallsByMessageId: {
+                ...runtimeState.toolCallsByMessageId,
+                [event.messageId]: reconcileToolCall(
+                  runtimeState.toolCallsByMessageId[event.messageId] ?? [],
+                  {
+                    callId: event.callId,
+                    name: event.name,
+                    arguments: event.arguments,
+                    status: event.status,
+                    detail: event.detail,
+                    afterText: event.afterText,
+                  },
+                  Date.now(),
+                ),
+              },
             },
           },
         };
+      }
+      if (event.kind === "remembering") {
+        return {
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [conversationId]: { ...runtimeState, isRemembering: event.active },
+          },
+        };
+      }
+      if (event.kind === "assistantStarted") {
+        return {
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [conversationId]: {
+              ...runtimeState,
+              messages: reconcileMessage(runtimeState.messages, event.message),
+              isStreaming: true,
+              error: null,
+            },
+          },
+        };
+      }
+      if (event.kind === "assistantDelta") {
+        return {
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [conversationId]: {
+              ...runtimeState,
+              isStreaming: true,
+              // The first word of the answer ends the thinking — whichever
+              // row the thoughts landed on (after a tool, the text opens a
+              // new row while the thoughts stayed on the old one).
+              thinkingMessageId: null,
+              messages: runtimeState.messages.map((item) =>
+                item.id === event.messageId
+                  ? {
+                      ...item,
+                      content: item.content + event.delta,
+                      status: "streaming",
+                      updatedAt: Date.now(),
+                    }
+                  : item,
+              ),
+            },
+          },
+        };
+      }
+      if (event.kind === "assistantReasoningDelta") {
+        return {
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [conversationId]: {
+              ...runtimeState,
+              isStreaming: true,
+              thinkingMessageId: event.messageId,
+              reasoningByMessageId: {
+                ...runtimeState.reasoningByMessageId,
+                [event.messageId]:
+                  (runtimeState.reasoningByMessageId[event.messageId] ?? "") + event.delta,
+              },
+            },
+          },
+        };
+      }
+      if (event.kind === "assistantCompleted") {
+        const targetTab = Object.values(state.tabsById).find(
+          (candidate) => candidate.conversationId === conversationId,
+        );
+        const isVisible =
+          state.activeView === "chat" && targetTab?.id === state.activeTabId;
+        return {
+          tabsById: targetTab
+            ? {
+                ...state.tabsById,
+                [targetTab.id]: {
+                  ...targetTab,
+                  unreadCount: isVisible ? 0 : targetTab.unreadCount + 1,
+                },
+              }
+            : state.tabsById,
+          runtimeByConversationId: {
+            ...state.runtimeByConversationId,
+            [conversationId]: {
+              ...runtimeState,
+              messages: reconcileMessage(runtimeState.messages, event.message),
+              isStreaming: false,
+              isRemembering: false,
+              thinkingMessageId: null,
+              error: null,
+            },
+          },
+        };
+      }
+
+      return {
+        runtimeByConversationId: {
+          ...state.runtimeByConversationId,
+          [conversationId]: {
+            ...runtimeState,
+            isStreaming: false,
+            isRemembering: false,
+            thinkingMessageId: null,
+            error: event.message,
+            messages: event.messageId
+              ? runtimeState.messages.map((item) =>
+                  item.id === event.messageId
+                    ? { ...item, status: "failed", errorMessage: event.message }
+                    : item,
+                )
+              : runtimeState.messages,
+          },
+        },
+      };
+    };
+
+    // ⚑ THE STREAM IS THE APP'S MOST PERF-SENSITIVE PATH (Studio, s335). Rust
+    // emits one event per token and every store commit re-renders the shell,
+    // so a fast local model produced a full-tree render — with the thread's
+    // forced layout — dozens of times a second, and the window stopped
+    // answering. Deltas are queued here and folded into ONE commit per
+    // animation frame; what the reader sees is the same text at the same
+    // moment, arriving in one write instead of many. Every other kind lands
+    // at once, behind whatever deltas came before it, so order is kept.
+    let pendingDeltas: StreamDelta[] = [];
+    let flushFrame: number | null = null;
+    const flushDeltas = () => {
+      if (flushFrame !== null) {
+        window.cancelAnimationFrame(flushFrame);
+        flushFrame = null;
+      }
+      if (pendingDeltas.length === 0) return;
+      const batch = foldStreamDeltas(pendingDeltas);
+      pendingDeltas = [];
+      set((state) => {
+        let next = state;
+        for (const delta of batch) next = { ...next, ...reduceChatEvent(next, delta) };
+        return next;
       });
+    };
+    const handleChatEvent = (event: ChatEvent) => {
+      // Call cards own their transient speech through the app-wide event bus;
+      // keep this boundary explicit if another sink forwards those variants.
+      if (event.kind === "callSpeechDelta" || event.kind === "callSpeechFinished") return;
+      if (isStreamDelta(event)) {
+        pendingDeltas.push(event);
+        if (flushFrame === null) flushFrame = window.requestAnimationFrame(flushDeltas);
+        return;
+      }
+      flushDeltas();
+      if (event.kind === "accepted") wasAccepted = true;
+      set((state) => reduceChatEvent(state, event));
       requestScrollForChatEvent(event);
     };
 
@@ -1205,6 +1265,9 @@ export const useCompanionStore = create<CompanionStore>()((set, get) => ({
       });
     } finally {
       stopRequests.delete(tabId);
+      // Whatever the last frame had not shown yet lands before the settle,
+      // so no delta can arrive after the row is marked done.
+      flushDeltas();
       set((state) => {
         const submittingByTabId = { ...state.submittingByTabId };
         delete submittingByTabId[tabId];
