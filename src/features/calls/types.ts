@@ -31,6 +31,11 @@ export interface RavenCall {
    *  it the card names the failure at once instead of showing "Replying" for
    *  a model that already died and then an unexplained silence. */
   wakeError: string | null;
+  /** Why a closed call closed, when it was not the ordinary way. "quiet":
+   *  nobody spoke for the waker's window and it hung the line up (s573) —
+   *  the card says "No answer" or "Went quiet" instead of "Ended". Null for
+   *  a call that reached its cap or was hung up with a final word. */
+  closeReason: string | null;
 }
 
 export interface RavenCallMessage {

@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use super::{RavenCall, RavenCallMessage, MAX_MESSAGES_PER_CALL};
+use super::{RavenCall, RavenCallMessage, CLOSE_REASON_QUIET, MAX_MESSAGES_PER_CALL};
 
 /// The most of one turn that rides into a record. A single turn may hold
 /// 16,000 characters; five of those verbatim would put 80k characters into a
@@ -61,7 +61,9 @@ pub(crate) fn render_transcript(
         .map(|id| display_name(names, id))
         .unwrap_or_else(|| initiator.clone());
 
-    let ending = if call.message_count >= MAX_MESSAGES_PER_CALL {
+    let ending = if call.close_reason.as_deref() == Some(CLOSE_REASON_QUIET) {
+        "went quiet and the line was closed".to_owned()
+    } else if call.message_count >= MAX_MESSAGES_PER_CALL {
         format!("closed at its {MAX_MESSAGES_PER_CALL}-turn limit")
     } else {
         "ended before its turn limit".to_owned()
@@ -122,6 +124,47 @@ pub(crate) fn close_notice(transcript: &str, carve_line: &str) -> String {
          your own voice. If it produced nothing, say only that the call ended. \
          Do not open another call unless something genuinely requires one, and do \
          not use read_call — the record above is already complete."
+    )
+}
+
+/// The woken shape for a call the waker hung up (s573): the same record, but
+/// the instruction says what actually happened — nobody answered, or the
+/// exchange trailed off — so the companion does not report a conclusion the
+/// call never reached. `answered` is whether the other side ever spoke;
+/// `quiet_minutes` is the window that ran out, so the sentence is true to
+/// the constant rather than a hand-written number.
+pub(crate) fn quiet_close_notice(
+    transcript: &str,
+    other_name: &str,
+    answered: bool,
+    quiet_minutes: u64,
+    carve_line: &str,
+) -> String {
+    let what_happened = if answered {
+        format!(
+            "The call you placed with {other_name} went quiet: nobody spoke for \
+             {quiet_minutes} minutes, so the line closed on its own without a closing word."
+        )
+    } else {
+        format!(
+            "The call you placed to {other_name} went unanswered: they never spoke, and \
+             after {quiet_minutes} minutes the line closed on its own."
+        )
+    };
+    let what_to_say = if answered {
+        "If the exchange produced something worth passing on, tell them briefly, in your \
+         own voice, and that it trailed off rather than ended. If it produced nothing, say \
+         only that the call went quiet."
+    } else {
+        "Tell them briefly that there was no answer. Do not ring again on your own — if it \
+         matters, they can ask you to try later."
+    };
+    format!(
+        "{what_happened} This is the record:\n\n{transcript}\n\
+         {carve_line} This record is also part of this conversation's history now.\n\
+         \n\
+         You are back in your own thread — your user can read what you write here. \
+         {what_to_say} Do not use read_call — the record above is already complete."
     )
 }
 
@@ -213,6 +256,7 @@ mod tests {
             woken_for_message_id: None,
             woken_at: None,
             wake_error: None,
+            close_reason: None,
         }
     }
 
@@ -295,6 +339,30 @@ mod tests {
         assert_eq!(slug("The  Night   Watch"), "the-night-watch");
         assert_eq!(slug("!!!"), "companion");
         assert!(slug("a very long companion name that keeps going").len() <= 24);
+    }
+
+    #[test]
+    fn a_quiet_call_says_so_in_its_record_and_its_notice() {
+        let mut quiet = call(1);
+        quiet.close_reason = Some(CLOSE_REASON_QUIET.to_owned());
+        let messages = vec![message("m1", "hugin-id", "rook-id", "anyone there?")];
+        let transcript = render_transcript(&quiet, &messages, &names(), "stamp");
+        assert!(transcript.contains("went quiet and the line was closed"), "{transcript}");
+        assert!(!transcript.contains("ended before its turn limit"));
+
+        let unanswered = quiet_close_notice("THE TRANSCRIPT", "Rook", false, 30, "No carve.");
+        assert!(unanswered.contains("went unanswered"));
+        assert!(unanswered.contains("after 30 minutes"));
+        assert!(unanswered.contains("there was no answer"));
+        assert!(unanswered.contains("Do not ring again on your own"));
+        assert!(unanswered.contains("THE TRANSCRIPT"));
+        assert!(unanswered.contains("not use read_call"));
+
+        let trailed = quiet_close_notice("THE TRANSCRIPT", "Rook", true, 30, "Carved as [x].");
+        assert!(trailed.contains("nobody spoke for 30 minutes"));
+        assert!(trailed.contains("trailed off rather than ended"));
+        assert!(trailed.contains("Carved as [x]."));
+        assert!(!trailed.contains("no answer"));
     }
 
     #[test]

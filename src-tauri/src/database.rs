@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::app_error::AppError;
 
-const LATEST_SCHEMA_VERSION: i64 = 28;
+const LATEST_SCHEMA_VERSION: i64 = 29;
 
 pub(crate) fn initialise(path: &Path) -> Result<(), AppError> {
     let mut connection = open_connection(path)?;
@@ -855,6 +855,18 @@ fn migration_sql(version: i64) -> &'static str {
             // next wake or by a person pressing Ring again. NULL is the
             // ordinary state: nothing failed, or nothing was tried yet.
             "ALTER TABLE raven_calls ADD COLUMN wake_error TEXT;"
+        }
+        29 => {
+            // A CALL THAT WENT QUIET SAYS SO. Until s573 a call closed two
+            // ways only — its turn cap, or a `final` hang-up — and the woken
+            // notice itself lets a callee read and stop, so calls went quiet
+            // by design and stayed open forever: five sat in Moti's table,
+            // two from August, and every list_calls told Rook someone was
+            // waiting on him. The waker now closes a call nobody has spoken
+            // in for a while, and stamps WHY here, so the close report can
+            // say "no answer" instead of pretending the exchange concluded.
+            // NULL = closed the ordinary way (cap or hang-up), as before.
+            "ALTER TABLE raven_calls ADD COLUMN close_reason TEXT;"
         }
         _ => unreachable!("all schema versions must have migration SQL"),
     }

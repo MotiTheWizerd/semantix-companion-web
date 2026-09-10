@@ -365,8 +365,12 @@ export function CallTranscriptItem({
     atRest && call.wokenForMessageId === newestMessage.id && !answering;
   const liveWord =
     speaking ? "Speaking" : replying || answering ? "Replying" : ringing ? "Ringing" : null;
+  // A closed call the waker hung up says what happened: nobody ever picked up
+  // (the opener is its only turn), or the exchange trailed off.
+  const wentQuiet = call.status === "closed" && call.closeReason === "quiet";
+  const closedWord = wentQuiet ? (call.messageCount <= 1 ? "No answer" : "Went quiet") : "Ended";
   const statusWord =
-    liveWord ?? (call.status === "open" ? (unanswered ? "No answer" : "Open") : "Ended");
+    liveWord ?? (call.status === "open" ? (unanswered ? "No answer" : "Open") : closedWord);
 
   // Anything happening live inside a collapsed call must be visible without
   // making the user notice a changing meter and manually open it mid-sentence.
@@ -399,7 +403,7 @@ export function CallTranscriptItem({
     <span
       className={`calls__status calls__status--${call.status}${
         liveWord ? " calls__status--live" : ""
-      }${unanswered ? " calls__status--silent" : ""}`}
+      }${unanswered || wentQuiet ? " calls__status--silent" : ""}`}
     >
       <span aria-hidden="true" />
       {statusWord}

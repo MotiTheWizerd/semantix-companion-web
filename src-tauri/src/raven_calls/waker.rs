@@ -31,7 +31,10 @@ use crate::{
     memory,
 };
 
-use super::{record, RavenCall, RavenCallRepository, CALLS_CHANGED_EVENT, CALL_WAKE_EVENT};
+use super::{
+    record, RavenCall, RavenCallRepository, CALLS_CHANGED_EVENT, CALL_WAKE_EVENT,
+    CLOSE_REASON_QUIET,
+};
 
 /// How often the table is read. Long enough that an idle machine is idle,
 /// short enough that an answer feels like a reply rather than a delivery.
@@ -45,6 +48,14 @@ const WAKES_PER_TICK: i64 = 1;
 /// Close records delivered per tick — same pacing, same reasoning: a report
 /// drives a model call of its own.
 const REPORTS_PER_TICK: i64 = 1;
+
+/// How long an open call may go untouched before the waker hangs it up. A
+/// wake fires within one TICK of a turn and a woken reply lands within a few
+/// minutes even on a slow model; a line silent for this long is a call
+/// nobody is on. Wide on purpose — the cost of a false hang-up is a report
+/// that lies, the cost of a late one is a stale row (s573: five open calls,
+/// two of them from August, and Rook was told about them on every check).
+const QUIET_AFTER: Duration = Duration::from_secs(30 * 60);
 
 /// Turns loaded to build one record. A call cannot exceed its message cap, so
 /// this only bites if that cap is raised — bounded on principle, because the
@@ -166,6 +177,25 @@ async fn tick(
         // The call moved (or at least was read), so any window showing it
         // should look again. Cheap, and it is the difference between a card
         // that updates itself and one you have to poke.
+        let _ = app.emit(CALLS_CHANGED_EVENT, ());
+    }
+
+    // Hang up the lines nobody is on. A cheap table write; the close report
+    // below then delivers each one's record at the same pace as any close.
+    let repository = Arc::clone(calls);
+    let quiet_for = i64::try_from(QUIET_AFTER.as_millis()).unwrap_or(i64::MAX);
+    let swept = tauri::async_runtime::spawn_blocking(move || repository.close_quiet_calls(quiet_for))
+        .await
+        .map_err(|error| format!("the quiet sweep failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+    if !swept.is_empty() {
+        for call in &swept {
+            eprintln!(
+                "raven call waker: call {} went quiet — closed after {}m of silence",
+                call.id,
+                QUIET_AFTER.as_secs() / 60
+            );
+        }
         let _ = app.emit(CALLS_CHANGED_EVENT, ());
     }
 
@@ -302,6 +332,13 @@ async fn deliver_close_record(
 
     let transcript = record::render_transcript(call, &messages, &names, &stamp);
 
+    // A call the waker hung up (s573), and whether the other side ever spoke
+    // in it. Both shape what is worth keeping and what the initiator is told.
+    let quiet = call.close_reason.as_deref() == Some(CLOSE_REASON_QUIET);
+    let answered = messages
+        .iter()
+        .any(|message| message.from_agent_id != initiator_id);
+
     // The other side's thread copy — persist-only, no turn driven. Their next
     // conversation simply knows the call happened, because `system` rows ride
     // every later request.
@@ -312,13 +349,19 @@ async fn deliver_close_record(
     // Both carves, each into that companion's OWN memory, each naming the
     // OTHER side. Best-effort: a missing Semantix account or a dead organ is
     // logged and stepped past — the thread copies above already hold the
-    // record.
+    // record. A quiet call nobody answered is not carved at all: its whole
+    // record is the opener, and "I rang and nobody picked up" is the thread's
+    // to hold, not a memory either side should recall by.
     let mut initiator_carved: Option<String> = None;
     let opener = messages[0].body.clone();
-    let sides = [
-        (initiator.as_ref(), other_name.clone()),
-        (other.as_ref(), initiator_name.clone()),
-    ];
+    let sides = if quiet && !answered {
+        Vec::new()
+    } else {
+        vec![
+            (initiator.as_ref(), other_name.clone()),
+            (other.as_ref(), initiator_name.clone()),
+        ]
+    };
     for (companion, counterpart) in sides {
         let Some(companion) = companion else { continue };
         let payload = record::carve_payload(call, &counterpart, &opener, &transcript, &stamp);
@@ -339,13 +382,26 @@ async fn deliver_close_record(
     // and tells its user what happened, in the conversation the call was born
     // from. The notice only claims a carve that actually landed.
     if initiator.is_some() {
-        let carve_line = match &initiator_carved {
-            Some(name) => format!("A copy was carved into your long-term memory as [{name}]."),
-            None => "It could not be carved into your long-term memory this time, so this \
-                     thread holds your only copy."
+        let carve_line = match (&initiator_carved, quiet && !answered) {
+            (Some(name), _) => {
+                format!("A copy was carved into your long-term memory as [{name}].")
+            }
+            (None, true) => "Nothing was carved — there was nothing to remember.".to_owned(),
+            (None, false) => "It could not be carved into your long-term memory this time, so \
+                              this thread holds your only copy."
                 .to_owned(),
         };
-        let notice = record::close_notice(&transcript, &carve_line);
+        let notice = if quiet {
+            record::quiet_close_notice(
+                &transcript,
+                &other_name,
+                answered,
+                QUIET_AFTER.as_secs() / 60,
+                &carve_line,
+            )
+        } else {
+            record::close_notice(&transcript, &carve_line)
+        };
         let service = Arc::clone(chat);
         let agent_id = initiator_id.clone();
         let root = call.root_conversation_id.clone();

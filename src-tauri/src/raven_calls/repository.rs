@@ -7,13 +7,14 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use super::{
-    CallStatus, PendingWake, RavenCall, RavenCallMessage, MAX_BODY_LENGTH, MAX_CALLS_PER_DAY,
-    MAX_MESSAGES_PER_CALL,
+    CallStatus, PendingWake, RavenCall, RavenCallMessage, CLOSE_REASON_QUIET, MAX_BODY_LENGTH,
+    MAX_CALLS_PER_DAY, MAX_MESSAGES_PER_CALL,
 };
 use crate::{app_error::AppError, credentials::unix_timestamp_ms, database};
 
 const CALL_COLUMNS: &str = "id, root_conversation_id, initiator_agent_id, status,
-     message_count, created_at, closed_at, woken_for_message_id, woken_at, wake_error";
+     message_count, created_at, closed_at, woken_for_message_id, woken_at, wake_error,
+     close_reason";
 
 const MESSAGE_COLUMNS: &str = "id, call_id, from_agent_id, to_agent_id, body, created_at";
 
@@ -87,6 +88,7 @@ impl RavenCallRepository {
             woken_for_message_id: None,
             woken_at: None,
             wake_error: None,
+            close_reason: None,
         };
 
         connection
@@ -555,6 +557,69 @@ impl RavenCallRepository {
         Ok(changed > 0)
     }
 
+    /// Hang up every open call nobody has touched for `quiet_for_ms`. Returns
+    /// the calls it closed, so the caller can tell every window.
+    ///
+    /// "Touched" is the newest of: the call opening, the newest turn in it,
+    /// and the newest wake — a woken companion composing a long answer is
+    /// activity, not silence. Until s573 a call closed only at its cap or on
+    /// a `final` hang-up, and the woken notice itself lets a callee read and
+    /// stop, so calls went quiet BY DESIGN and stayed open forever. Each one
+    /// then rode every `list_calls` as "someone is waiting on you".
+    ///
+    /// The close is stamped [`CLOSE_REASON_QUIET`] so the close report can
+    /// say what happened instead of pretending the exchange concluded; the
+    /// reporter picks these up through `calls_needing_close_report` like any
+    /// other close, one per tick.
+    pub(crate) fn close_quiet_calls(&self, quiet_for_ms: i64) -> Result<Vec<RavenCall>, AppError> {
+        let now = unix_timestamp_ms()?;
+        let cutoff = now - quiet_for_ms.max(0);
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction().map_err(AppError::database)?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT id FROM raven_calls
+                 WHERE status = 'open'
+                   AND max(
+                         created_at,
+                         coalesce(woken_at, 0),
+                         coalesce((SELECT max(created_at) FROM raven_call_messages
+                                   WHERE call_id = raven_calls.id), 0)
+                       ) < ?1
+                 ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(AppError::database)?;
+        let quiet = statement
+            .query_map([cutoff], |row| row.get::<_, String>(0))
+            .map_err(AppError::database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::database)?;
+        drop(statement);
+        for call_id in &quiet {
+            transaction
+                .execute(
+                    "UPDATE raven_calls
+                     SET status = 'closed', closed_at = ?2, close_reason = ?3
+                     WHERE id = ?1 AND status = 'open'",
+                    params![call_id, now, CLOSE_REASON_QUIET],
+                )
+                .map_err(AppError::database)?;
+        }
+        let closed = quiet
+            .iter()
+            .map(|call_id| {
+                transaction.query_row(
+                    &format!("SELECT {CALL_COLUMNS} FROM raven_calls WHERE id = ?1"),
+                    [call_id],
+                    map_call,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::database)?;
+        transaction.commit().map_err(AppError::database)?;
+        Ok(closed)
+    }
+
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, AppError> {
         self.connection
             .lock()
@@ -605,6 +670,7 @@ fn map_call(row: &Row<'_>) -> rusqlite::Result<RavenCall> {
         woken_for_message_id: row.get(7)?,
         woken_at: row.get(8)?,
         wake_error: row.get(9)?,
+        close_reason: row.get(10)?,
     })
 }
 
@@ -633,6 +699,87 @@ mod tests {
             RavenCallRepository::open(&path).expect("call repository should open"),
             path,
         )
+    }
+
+    /// Move a call's opening back in time — the only way a test can make a
+    /// call old without waiting.
+    fn backdate_call(calls: &RavenCallRepository, call_id: &str, by_ms: i64) {
+        calls
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE raven_calls SET created_at = created_at - ?2 WHERE id = ?1",
+                params![call_id, by_ms],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_sweep_hangs_up_only_the_calls_nobody_has_touched() {
+        let (calls, path) = open_calls("quiet-sweep");
+        let quiet_for = 30 * 60 * 1000;
+
+        // Opened an hour ago, one line, never answered: quiet.
+        let abandoned = calls.open_call("rook", None).unwrap();
+        calls.append_message(&abandoned.id, "rook", "hugin", "anyone?").unwrap();
+        backdate_call(&calls, &abandoned.id, 60 * 60 * 1000);
+        calls
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE raven_call_messages SET created_at = created_at - ?2 WHERE call_id = ?1",
+                params![abandoned.id, 60 * 60 * 1000],
+            )
+            .unwrap();
+
+        // Opened an hour ago but a turn landed just now: touched, stays open.
+        let alive = calls.open_call("rook", None).unwrap();
+        backdate_call(&calls, &alive.id, 60 * 60 * 1000);
+        calls.append_message(&alive.id, "rook", "hugin", "still here").unwrap();
+
+        // Opened an hour ago, no turns, but a wake fired just now: composing.
+        let composing = calls.open_call("rook", None).unwrap();
+        calls.append_message(&composing.id, "rook", "qwen", "thinking?").unwrap();
+        backdate_call(&calls, &composing.id, 60 * 60 * 1000);
+        calls
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE raven_call_messages SET created_at = created_at - ?2 WHERE call_id = ?1",
+                params![composing.id, 60 * 60 * 1000],
+            )
+            .unwrap();
+        let pending = calls.calls_awaiting_wake(10).unwrap();
+        let wake = pending.iter().find(|wake| wake.call_id == composing.id).unwrap();
+        calls.mark_woken(&composing.id, &wake.message_id).unwrap();
+
+        // Opened just now: fresh.
+        let fresh = calls.open_call("rook", None).unwrap();
+
+        let swept = calls.close_quiet_calls(quiet_for).unwrap();
+        assert_eq!(swept.len(), 1, "only the abandoned call: {swept:?}");
+        assert_eq!(swept[0].id, abandoned.id);
+        assert_eq!(swept[0].status, CallStatus::Closed);
+        assert_eq!(swept[0].close_reason.as_deref(), Some(CLOSE_REASON_QUIET));
+        assert!(swept[0].closed_at.is_some());
+
+        for id in [&alive.id, &composing.id, &fresh.id] {
+            let call = calls.get(id).unwrap().unwrap();
+            assert_eq!(call.status, CallStatus::Open, "{id} must stay open");
+            assert!(call.close_reason.is_none());
+        }
+
+        // The swept call reaches the close reporter like any other close, and
+        // an ordinary close carries no reason.
+        let reports = calls.calls_needing_close_report(10).unwrap();
+        assert!(reports.iter().any(|call| call.id == abandoned.id));
+        calls.close(&alive.id).unwrap();
+        assert!(calls.get(&alive.id).unwrap().unwrap().close_reason.is_none());
+
+        // A second sweep finds nothing new.
+        assert!(calls.close_quiet_calls(quiet_for).unwrap().is_empty());
+
+        fs::remove_file(path).ok();
     }
 
     #[test]

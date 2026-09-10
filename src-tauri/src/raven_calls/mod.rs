@@ -109,7 +109,15 @@ pub(crate) struct RavenCall {
     /// say "their model failed: rate limit" the moment it is true (s572).
     /// `None` while a wake is in flight or succeeded, and after any re-ring.
     pub(crate) wake_error: Option<String>,
+    /// Why a closed call closed, when it was not the ordinary way.
+    /// [`CLOSE_REASON_QUIET`]: nobody spoke for the quiet window and the
+    /// waker closed the line (s573). `None` = the turn cap or a hang-up.
+    pub(crate) close_reason: Option<String>,
 }
+
+/// The one close reason that is not "the exchange finished": the line went
+/// quiet — no answer, or no closing word — and the waker hung it up.
+pub(crate) const CLOSE_REASON_QUIET: &str = "quiet";
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
