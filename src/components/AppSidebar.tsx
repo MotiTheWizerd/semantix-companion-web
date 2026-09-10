@@ -1,5 +1,6 @@
 import { CompanionMark } from "./CompanionMark";
 import { SettlingTitle } from "./SettlingTitle";
+import { Tooltip } from "./Tooltip/Tooltip";
 import type { Conversation } from "../features/chat/types";
 import { SkyLegend } from "../features/memory-sky/SkyLegend";
 import {
@@ -114,19 +115,27 @@ export function AppSidebar({
           <p className="sidebar-section-label">Recent</p>
           {conversations.map((conversation) => {
             const settlingFrom = settlingTitles[conversation.id] ?? null;
+            // A name the row cuts short is read in full beside it — to the
+            // right, over the chat, so it never covers the neighbouring rows.
             return (
-              <button
-                className={`conversation-list__item ${
-                  activeView === "chat" && activeConversationId === conversation.id
-                    ? "is-active"
-                    : ""
-                } ${settlingFrom ? "is-settling" : ""}`}
-                type="button"
+              <Tooltip
                 key={conversation.id}
-                onClick={() => onConversationSelect(conversation.id)}
+                content={conversation.title}
+                placement="right"
+                whenTruncated
               >
-                <SettlingTitle title={conversation.title} from={settlingFrom} />
-              </button>
+                <button
+                  className={`conversation-list__item ${
+                    activeView === "chat" && activeConversationId === conversation.id
+                      ? "is-active"
+                      : ""
+                  } ${settlingFrom ? "is-settling" : ""}`}
+                  type="button"
+                  onClick={() => onConversationSelect(conversation.id)}
+                >
+                  <SettlingTitle title={conversation.title} from={settlingFrom} />
+                </button>
+              </Tooltip>
             );
           })}
         </div>

@@ -180,8 +180,9 @@
 }
 
 .conversation-list__item {
-  display: block;
+  display: flex;
   width: 100%;
+  align-items: center;
   overflow: hidden;
   padding: 8px 10px;
   cursor: pointer;
@@ -190,6 +191,18 @@
   color: var(--text-secondary);
   font-size: 12.5px;
   text-align: left;
+}
+
+/* The name is cut by the span, not the button — the tab's pattern. A button
+   never reports its overflow (scrollWidth stays at clientWidth), and a block
+   inside a button shrink-wraps instead of filling it; a flex child with
+   min-width 0 takes the row's width and overflows honestly, so the tooltip's
+   "only when truncated" check can see a name cut short. */
+.conversation-list__item > span {
+  display: block;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
