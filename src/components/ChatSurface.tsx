@@ -235,6 +235,9 @@ type PresenceVerb = "thinking" | "remembering" | "working" | "writing";
 
 interface PresenceLineProps {
   name: string;
+  /** The companion's picture, when it has one — the orb wears the same face
+   *  as the tab and the picker, or its lettermark. */
+  avatarUrl?: string | null;
   isRemembering: boolean;
   messages: ChatMessage[];
   toolCallsByMessageId: Record<string, ToolCallChipItem[]>;
@@ -272,7 +275,13 @@ function presenceVerb({
  * whole of a turn, saying what kind of work. It is the answer to "is it
  * still going?" — while this is here, it is; the moment the turn lands, it
  * is gone. The clock ticks only while the line is mounted. */
-function PresenceLine({ name, isRemembering, messages, toolCallsByMessageId }: PresenceLineProps) {
+function PresenceLine({
+  name,
+  avatarUrl,
+  isRemembering,
+  messages,
+  toolCallsByMessageId,
+}: PresenceLineProps) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 500);
@@ -282,7 +291,7 @@ function PresenceLine({ name, isRemembering, messages, toolCallsByMessageId }: P
   return (
     <article className={`chat-message chat-message--assistant chat-presence chat-presence--${verb}`}>
       <span className="chat-presence__orb">
-        <CompanionMark />
+        <CompanionMark src={avatarUrl} name={name} />
       </span>
       <span className="chat-presence__text">
         {name} is {verb}…
@@ -489,7 +498,10 @@ const ChatThread = memo(function ChatThread({
                 <article className={`chat-message chat-message--${message.role}`}>
                   {bylineCompanionId ? (
                     <span className="chat-message__byline">
-                      <CompanionMark src={callAgentAvatars.get(bylineCompanionId)} />
+                      <CompanionMark
+                        src={callAgentAvatars.get(bylineCompanionId)}
+                        name={callAgentNames.get(bylineCompanionId)}
+                      />
                       {callAgentNames.get(bylineCompanionId) ?? "Another companion"}
                     </span>
                   ) : null}
@@ -533,6 +545,7 @@ const ChatThread = memo(function ChatThread({
         {isSending ? (
           <PresenceLine
             name={companionName}
+            avatarUrl={currentCompanionId ? callAgentAvatars.get(currentCompanionId) : null}
             isRemembering={isRemembering}
             messages={messages}
             toolCallsByMessageId={toolCallsByMessageId}

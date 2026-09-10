@@ -178,7 +178,8 @@
   height: 16px;
 }
 
-.chat-presence__orb .companion-mark__img {
+.chat-presence__orb .companion-mark__img,
+.chat-presence__orb .companion-mark__initial {
   animation: presence-breathe 1.8s ease-in-out infinite;
 }
 
@@ -445,6 +446,7 @@
   .chat-presence,
   .chat-presence__orb::after,
   .chat-presence__orb .companion-mark__img,
+  .chat-presence__orb .companion-mark__initial,
   .composer-send--stop {
     animation: none;
   }

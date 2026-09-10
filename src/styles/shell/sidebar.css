@@ -56,6 +56,47 @@
   border-radius: 50%;
 }
 
+/* The lettermark — a companion with a name and no picture. A round tile lit
+   from its top-left corner in the name's own hue, a hairline of light on the
+   rim so it sits ON the glass rather than in it, and the initial in white.
+   Drawn as SVG so the letter scales with the tile: 16px in a tab, 28px in
+   the picker, one drawing. The hue arrives as --mark-hue from the component;
+   oklch keeps every hue at the same felt brightness, and the hsl line before
+   it is the fallback for an engine without it. */
+.companion-mark__initial {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.45));
+}
+
+.companion-mark__initial-light {
+  stop-color: hsl(var(--mark-hue) 72% 66%);
+  stop-color: oklch(0.76 0.14 var(--mark-hue));
+}
+
+.companion-mark__initial-deep {
+  stop-color: hsl(var(--mark-hue) 62% 44%);
+  stop-color: oklch(0.52 0.16 var(--mark-hue));
+}
+
+.companion-mark__initial-rim {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.22);
+  stroke-width: 1;
+}
+
+.companion-mark__initial-letter {
+  fill: #fff;
+  font-family: inherit;
+  font-size: 15.5px;
+  font-weight: 680;
+  letter-spacing: 0.01em;
+  paint-order: stroke fill;
+  stroke: rgba(0, 0, 0, 0.12);
+  stroke-width: 0.6px;
+}
+
 .new-chat-button {
   display: flex;
   align-items: center;

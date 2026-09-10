@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
+import { companionLabel } from "../features/companions/types";
 import { useCompanionStore } from "../features/workspace/companionStore";
 import { CompanionMark } from "./CompanionMark";
 import { SettlingTitle } from "./SettlingTitle";
@@ -79,7 +80,10 @@ export const ConversationTabs = memo(function ConversationTabs() {
                   onClick={() => setActiveTab(tabId)}
                 >
                   <span className="conversation-tab__face">
-                    <CompanionMark src={companion?.avatarUrl} />
+                    <CompanionMark
+                      src={companion?.avatarUrl}
+                      name={companion ? companionLabel(companion) : null}
+                    />
                   </span>
                   {tab.unreadCount > 0 ? <span className="conversation-tab__unread" /> : null}
                   <SettlingTitle title={tab.title} from={settlingFrom} />
