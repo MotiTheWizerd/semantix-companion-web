@@ -59,7 +59,7 @@ export function CompanionSelect({
       renderItem={(companion) => (
         <span className={styles.companionItem}>
           <span className={styles.companionMark}>
-            <CompanionMark src={companion.avatarUrl} />
+            <CompanionMark src={companion.avatarUrl} name={companionLabel(companion)} />
           </span>
           <span className={styles.companionCopy}>
             <span className={styles.companionName}>
@@ -78,7 +78,10 @@ export function CompanionSelect({
               isPill ? styles.selectedMarkPill : ""
             }`}
           >
-            <CompanionMark src={selectedCompanion?.avatarUrl} />
+            <CompanionMark
+              src={selectedCompanion?.avatarUrl}
+              name={selectedCompanion ? companionLabel(selectedCompanion) : null}
+            />
           </span>
           <span
             className={`${styles.selectedName} ${isPill ? styles.selectedNamePill : ""}`}
@@ -100,6 +103,7 @@ export function CompanionSelect({
       menuClassName={styles.menu}
       direction={isPill ? "down" : "up"}
       searchable
+      maxVisibleItems={5}
       searchPlaceholder="Search companions..."
       emptyMessage="No companions available"
       getSearchText={companionLabel}

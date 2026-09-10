@@ -105,6 +105,10 @@ export interface DropdownProps<T> {
    *  button, so it still shows while the control is disabled — which is
    *  exactly when a caller has something to explain. */
   title?: string;
+  /** How many rows the list shows before it scrolls. Measured from the
+   *  rendered rows, so a taller item style still shows exactly this many.
+   *  Omit for no cap beyond the viewport. */
+  maxVisibleItems?: number;
 }
 
 export function Dropdown<T>({
@@ -130,11 +134,13 @@ export function Dropdown<T>({
   menuClassName = "",
   triggerClassName = "",
   title,
+  maxVisibleItems,
 }: DropdownProps<T>) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const [coords, setCoords] = useState<MenuCoords | null>(null);
+  const [listMaxHeight, setListMaxHeight] = useState<number | undefined>(undefined);
   const generatedId = useId();
   const popupId = `${generatedId}-popup`;
   const listboxId = `${generatedId}-listbox`;
@@ -251,12 +257,41 @@ export function Dropdown<T>({
     };
   }, [isOpen, position]);
 
-  // Focus search input + highlight the currently selected item on open.
+  // Cap the list at `maxVisibleItems` rows, measured from the rows
+  // themselves — the height of the first N as laid out, plus the list's own
+  // padding — so the cap follows whatever an item style makes a row. Before
+  // paint, like the placement, so the first frame is already the right size.
+  useLayoutEffect(() => {
+    if (!isOpen || !maxVisibleItems) {
+      setListMaxHeight(undefined);
+      return;
+    }
+    const container = itemsContainerRef.current;
+    const rows = container?.children;
+    if (!container || !rows || rows.length <= maxVisibleItems) {
+      setListMaxHeight(undefined);
+      return;
+    }
+    const first = rows[0] as HTMLElement;
+    const last = rows[maxVisibleItems - 1] as HTMLElement;
+    const inner = last.offsetTop + last.offsetHeight - first.offsetTop;
+    const style = window.getComputedStyle(container);
+    setListMaxHeight(
+      inner + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom),
+    );
+  }, [isOpen, maxVisibleItems, filteredItems.length]);
+
+  // Focus the search once the menu is PLACED. It mounts hidden for its
+  // measurement frame, and a hidden input refuses focus — focusing on open
+  // alone landed nowhere (s571: "set the search focus on open").
+  const isPlaced = coords !== null;
+  useEffect(() => {
+    if (isOpen && isPlaced && searchable) searchInputRef.current?.focus();
+  }, [isOpen, isPlaced, searchable]);
+
+  // Highlight the currently selected item on open.
   useEffect(() => {
     if (!isOpen) return;
-    if (searchable && searchInputRef.current) {
-      searchInputRef.current.focus();
-    }
     const selectedIdx = value
       ? filteredItems.findIndex((item) => getItemKey(item) === getItemKey(value))
       : -1;
@@ -402,6 +437,7 @@ export function Dropdown<T>({
               ref={itemsContainerRef}
               role="listbox"
               aria-label={menuLabel}
+              style={{ maxHeight: listMaxHeight }}
             >
               {filteredItems.length === 0 ? (
                 <div className={styles.empty}>
