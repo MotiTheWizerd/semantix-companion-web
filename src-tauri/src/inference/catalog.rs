@@ -54,6 +54,23 @@ pub(crate) const API_PROVIDERS: &[ApiProviderSpec] = &[
         // data rides in this static application title.
         default_headers: &[("X-OpenRouter-Title", "Semantix Companion")],
     },
+    // Moti's own GPU: the RunPod serverless endpoint qwen35-122b (s593), a
+    // vLLM OpenAI-compatible server behind RunPod's queue. The endpoint id is
+    // baked in because the catalog is static &'static — the proper product
+    // answer is a "custom OpenAI-compatible" provider with a base-URL field
+    // (task-next-companion-custom-openai-endpoint); this entry is the ten-line
+    // road that makes the model usable today. Key = a RunPod account API key
+    // (rpa_…); model id = the served name, qwen3.5-122b-a10b-abliterated-nvfp4.
+    ApiProviderSpec {
+        id: "runpod-serverless",
+        name: "RunPod Serverless (own GPU)",
+        key_placeholder: "rpa_…",
+        api_base_url: "https://api.runpod.ai/v2/zb3yu2wrftqada/openai/v1",
+        chat_completions_url: "https://api.runpod.ai/v2/zb3yu2wrftqada/openai/v1/chat/completions",
+        protocol: ApiProviderProtocol::OpenAiChatCompletions,
+        capabilities: OPENAI_COMPATIBLE_CAPABILITIES,
+        default_headers: &[],
+    },
 ];
 
 pub(crate) fn api_provider_spec(id: &str) -> Option<&'static ApiProviderSpec> {

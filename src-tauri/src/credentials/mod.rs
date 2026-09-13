@@ -366,7 +366,7 @@ mod tests {
                 .iter()
                 .map(|provider| provider.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["together", "openrouter"]
+            vec!["together", "openrouter", "runpod-serverless"]
         );
         assert_eq!(
             provider_by_id("openrouter").map(|provider| provider.name),

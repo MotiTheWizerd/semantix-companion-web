@@ -195,6 +195,7 @@ impl<'a> OpenAiRequest<'a> {
                 }
             })
             .collect();
+        let messages = fold_system_messages(messages);
 
         let tools = (!request.tools.is_empty()).then(|| {
             request
@@ -219,6 +220,41 @@ impl<'a> OpenAiRequest<'a> {
             tools,
         })
     }
+}
+
+/// One system message on the wire, however many the chat loop composed.
+///
+/// The persona and the time-awareness block arrive as two `system` messages.
+/// OpenRouter and Together pass that through; a vLLM box running Qwen's own
+/// chat template rejects a second system message with a 500, which RunPod's
+/// stream route then delivers as a 200 with an empty body — the companion
+/// simply never answered (s593, Moti's own GPU). Every later system message
+/// is appended to the first, blank-line separated, order kept. Text only:
+/// system messages never carry images.
+fn fold_system_messages(messages: Vec<OpenAiMessage<'_>>) -> Vec<OpenAiMessage<'_>> {
+    let mut folded: Vec<OpenAiMessage<'_>> = Vec::with_capacity(messages.len());
+    let mut first_system: Option<usize> = None;
+    for message in messages {
+        if message.role == "system" {
+            if let Some(index) = first_system {
+                if let (OpenAiContent::Text(head), OpenAiContent::Text(tail)) =
+                    (&mut folded[index].content, &message.content)
+                {
+                    if !tail.is_empty() {
+                        if !head.is_empty() {
+                            head.push_str("\n\n");
+                        }
+                        head.push_str(tail);
+                    }
+                    continue;
+                }
+            } else {
+                first_system = Some(folded.len());
+            }
+        }
+        folded.push(message);
+    }
+    folded
 }
 
 #[derive(Serialize)]
@@ -610,6 +646,44 @@ mod tests {
         assert_eq!(value["stream"], true);
         assert!(value.get("tools").is_none());
         assert!(value.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn every_system_message_folds_into_the_first_so_the_wire_carries_one() {
+        // Persona + time-awareness arrive as two system messages; a Qwen chat
+        // template on vLLM rejects the second one (s593). One goes out.
+        let request = InferenceRequest {
+            id: "request-5".to_owned(),
+            target: ModelTarget {
+                provider_id: "runpod-serverless".to_owned(),
+                model_id: "qwen".to_owned(),
+            },
+            messages: vec![
+                InferenceMessage::text(Role::System, "You are speaking with Moti."),
+                InferenceMessage::text(Role::System, "<time-awareness>13:04</time-awareness>"),
+                InferenceMessage::text(Role::User, "Hello there"),
+                InferenceMessage::text(Role::Assistant, "Hi."),
+                InferenceMessage::text(Role::System, ""),
+                InferenceMessage::text(Role::User, "hello buddy"),
+            ],
+            tools: Vec::new(),
+            session_id: None,
+        };
+        let mapped =
+            OpenAiRequest::from_canonical(&request, "RunPod").expect("request should map");
+        let value = serde_json::to_value(mapped).expect("request should serialize");
+        let roles: Vec<&str> = value["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
+        assert_eq!(
+            value["messages"][0]["content"],
+            "You are speaking with Moti.\n\n<time-awareness>13:04</time-awareness>"
+        );
+        assert_eq!(value["messages"][3]["content"], "hello buddy");
     }
 
     #[test]
